@@ -418,6 +418,41 @@ def _device_for_code(code):
 # PRIMITIVES
 # ---------------------------------------------------------------------------
 
+# Per-thread so concurrently-running macros never affect each other's
+# timing, and reset to 1.0 at the start of every macro run (see
+# _fire_once/_loop_until_stopped below) so it never carries over
+# between separate triggers of the same macro either.
+_speed_local = threading.local()
+
+
+def _current_speed_multiplier():
+    return getattr(_speed_local, "value", 1.0)
+
+
+def speed(multiplier):
+    """
+    Multiplies every wait/hold/movement DURATION from this point on,
+    for the rest of THIS macro's execution (including any macros it
+    calls along the way) -- not the whole daemon, and not other macros
+    running independently on their own threads. Call it again to
+    change the rate further, as many times as you like in one macro --
+    e.g. speed up just one section and bring it back after:
+
+        speed(3)
+        move_mouse(500, 0)   # takes 1/3 the normal time
+        speed(1)
+        move_mouse(0, 500)   # back to normal speed
+
+    Affects: wait(), tap()'s hold time, move_mouse()'s time_, and
+    type()'s time_per_letter (via tap(), which it's built on). Does
+    NOT affect anything with no duration to begin with (kd(), ku()).
+    Resets to 1 automatically at the start of every run of this macro
+    -- it never carries over between separate triggers, or between
+    different macros running concurrently on their own threads.
+    """
+    _speed_local.value = multiplier
+
+
 def _resolve(key):
     """Accept either a bare ecodes int (KEY_A) or a string name ("KEY_A")."""
     if isinstance(key, str):
@@ -445,9 +480,10 @@ def ku(key):
 
 def tap(key, time_=0.1):
     """Down, wait `time_` seconds, up. Default hold is 0.1s. Works for
-    both typing keys and mouse buttons."""
+    both typing keys and mouse buttons. Hold time is scaled by
+    speed(), like everything else with a duration."""
     kd(key)
-    time.sleep(time_)
+    time.sleep(time_ * _current_speed_multiplier())
     ku(key)
 
 
@@ -554,9 +590,14 @@ def move_mouse(x_pixels, y_pixels, time_=0.25, easing="inout", async_=False, mov
     immediately, so the rest of the macro keeps running while the
     mouse is still moving. (Named async_ with a trailing underscore
     because "async" is a reserved keyword in Python.)
+
+    time_ is scaled by speed(), like everything else with a duration --
+    note that easing="none" already ignores time_ entirely (see below),
+    so speed() has nothing to scale on an instant move either.
     """
 
     def _do_move():
+        scaled_time = time_ * _current_speed_multiplier()
         dx, dy = x_pixels, y_pixels
         had_position = False
 
@@ -571,17 +612,17 @@ def move_mouse(x_pixels, y_pixels, time_=0.25, easing="inout", async_=False, mov
                 # that known (0, 0) origin for the eased move below.
                 _move_rel_step(-100000, -100000)
 
-        if easing == "none" or time_ <= 0:
+        if easing == "none" or scaled_time <= 0:
             _move_rel_step(dx, dy)
         else:
-            steps = max(1, int(time_ * 120))  # ~120 steps/sec, smooth without flooding uinput
+            steps = max(1, int(scaled_time * 120))  # ~120 steps/sec, smooth without flooding uinput
             prev = 0.0
             for i in range(1, steps + 1):
                 t = i / steps
                 cur = _ease(t, easing)
                 _move_rel_step(round(dx * (cur - prev)), round(dy * (cur - prev)))
                 prev = cur
-                time.sleep(time_ / steps)
+                time.sleep(scaled_time / steps)
 
         if move_to and had_position:
             # Pointer acceleration can leave us a bit off target --
@@ -608,13 +649,15 @@ def wheel(amount):
 
 def wait(time_, precise=False):
     """
-    Wait `time_` seconds.
+    Wait `time_` seconds (scaled by speed(), like everything else with
+    a duration).
     precise=False (default): time.sleep() -- cheap, accurate enough for
       almost everything (Linux's sleep is backed by clock_nanosleep).
     precise=True: busy-waits against time.perf_counter() instead. Costs
       real CPU for the duration, only worth it for timing that actually
       needs sub-millisecond accuracy.
     """
+    time_ = time_ * _current_speed_multiplier()
     if not precise:
         time.sleep(time_)
         return
@@ -694,6 +737,7 @@ PRIMITIVES_NAMESPACE = {
     "move_mouse": move_mouse,
     "wheel": wheel,
     "wait": wait,
+    "speed": speed,
     "time": time,
     **_KEY_CONSTANTS,
 }
@@ -829,7 +873,10 @@ class Macro:
 
 
 def _fire_once(macro):
-    threading.Thread(target=macro.func, daemon=True).start()
+    def _run():
+        _speed_local.value = 1.0  # fresh 1x for every top-level trigger
+        macro.func()
+    threading.Thread(target=_run, daemon=True).start()
 
 
 def _loop_until_stopped(macro):
@@ -839,6 +886,9 @@ def _loop_until_stopped(macro):
     needing to force-release a key mid-iteration."""
     rt = macro.runtime
     while not rt.stop_event.is_set():
+        _speed_local.value = 1.0  # fresh 1x every iteration -- a
+        # speed() call left active at the end of one loop pass must
+        # not silently carry into the next.
         macro.func()
     rt.active_hold = False
 
