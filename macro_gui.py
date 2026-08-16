@@ -260,16 +260,17 @@ class InputTranscriber:
         wait, again as the move's own duration). Requires KDE Plasma/
         KWin; if the position query fails, that ping is skipped and a
         comment noting the failure is inserted instead of a bogus call.
-      - Raw (raw_mouse=True): every raw relative-motion frame from the
-        physical mouse becomes its own move_mouse(dx, dy,
-        time_=<gap>, easing="none") call, using the literal hardware
-        delta for that frame and the real elapsed time as the
-        duration (constant-speed, unsmoothed -- "easing=none" here
-        means "don't editorialize the curve", not "teleport instantly").
-        No querying needed, so this works fine under Hyprland too.
-        This is what "unoptimized/ugly" refers to: full fidelity,
-        one call per hardware frame, far less readable than the
-        ping-based waypoints above.
+      - Raw (raw_mouse=True): the physical mouse's motion is sampled
+        on a fixed 60Hz tick (independent of the mouse's actual
+        polling rate) -- whatever raw relative motion arrived within
+        each ~16.7ms window becomes one move_mouse(dx, dy, time_=0,
+        easing="none") call, preceded by an explicit wait() for that
+        tick's real elapsed time. No querying needed, so this works
+        fine under Hyprland too. This is what "unoptimized/ugly"
+        refers to: still far more, far less readable lines than the
+        ping-based waypoints above -- just batched to a sane, fixed
+        rate rather than one line per raw hardware frame (which for a
+        high-polling-rate mouse would be excessive).
 
     One shared clock spans every event type -- keyboard, clicks,
     pings, and raw movement all interleave into a single chronological
@@ -328,9 +329,18 @@ class InputTranscriber:
 
             last_time = _time.monotonic()
             raw_dx, raw_dy = 0, 0
+            RAW_TICK = 1.0 / 60.0  # fixed 60Hz sample rate for raw mode,
+            # independent of the mouse's actual polling rate -- batches
+            # whatever raw motion arrived within each ~16.7ms window
+            # into a single line, instead of one line per hardware
+            # frame (which for a 1000Hz gaming mouse is drastically
+            # more granular than useful and was the main source of
+            # both the line-count explosion and, combined with the
+            # bug below, the "does almost nothing" playback.
+            next_raw_tick = _time.monotonic() + RAW_TICK
 
             while not self._stop.is_set():
-                for key, _ in sel.select(timeout=0.1):
+                for key, _ in sel.select(timeout=0.01):
                     dev = key.data
                     try:
                         for ev in dev.read():
@@ -368,21 +378,50 @@ class InputTranscriber:
                                     last_time = now
                                     GLib.idle_add(self.on_line, text)
 
-                            elif self.transcribe_mouse and self.raw_mouse and dev.path == self.mouse_path:
-                                if ev.type == e.EV_REL:
-                                    if ev.code == e.REL_X:
-                                        raw_dx += ev.value
-                                    elif ev.code == e.REL_Y:
-                                        raw_dy += ev.value
-                                elif ev.type == e.EV_SYN and (raw_dx or raw_dy):
-                                    now = _time.monotonic()
-                                    gap = now - last_time
-                                    text = f'move_mouse({raw_dx}, {raw_dy}, time_={gap:.3f}, easing="none")\n'
-                                    last_time = now
-                                    raw_dx, raw_dy = 0, 0
-                                    GLib.idle_add(self.on_line, text)
+                            elif ev.type == e.EV_REL and self.transcribe_mouse and self.raw_mouse \
+                                    and dev.path == self.mouse_path:
+                                # Just accumulate here -- actual emission
+                                # happens on the fixed 60Hz tick below,
+                                # not per raw event.
+                                if ev.code == e.REL_X:
+                                    raw_dx += ev.value
+                                elif ev.code == e.REL_Y:
+                                    raw_dy += ev.value
                     except BlockingIOError:
                         pass
+
+                if self.transcribe_mouse and self.raw_mouse:
+                    now = _time.monotonic()
+                    if now >= next_raw_tick:
+                        if raw_dx or raw_dy:
+                            gap = now - last_time
+                            # Unlike keyboard/click events, this ALWAYS
+                            # gets an explicit wait() regardless of
+                            # WAIT_THRESHOLD -- the whole point of the
+                            # fixed tick rate is reproducing that exact
+                            # ~16.7ms cadence on playback, and this gap
+                            # is routinely right around/below that
+                            # threshold, so skipping it here would
+                            # silently reintroduce the same
+                            # everything-happens-instantly bug this
+                            # tick system was built to fix.
+                            #
+                            # time_=0/easing="none" is deliberate too:
+                            # move_mouse's "none" branch does one
+                            # instant relative step and returns WITHOUT
+                            # sleeping, ignoring time_ entirely -- so
+                            # the wait() above is what actually
+                            # provides this line's pacing, not time_.
+                            text = f'wait({gap:.3f})\nmove_mouse({raw_dx}, {raw_dy}, time_=0, easing="none")\n'
+                            last_time = now
+                            raw_dx, raw_dy = 0, 0
+                            GLib.idle_add(self.on_line, text)
+                        next_raw_tick += RAW_TICK
+                        if next_raw_tick < now:
+                            # Fell behind (e.g. the GTK thread was briefly
+                            # busy) -- resync instead of firing a burst
+                            # of back-to-back catch-up ticks.
+                            next_raw_tick = now + RAW_TICK
         finally:
             for dev in devices:
                 try:
