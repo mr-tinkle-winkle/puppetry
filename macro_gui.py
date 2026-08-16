@@ -281,20 +281,37 @@ class InputTranscriber:
         rate rather than one line per raw hardware frame (which for a
         high-polling-rate mouse would be excessive).
 
+        set_positions=True changes each tick's line to
+        move_mouse(x, y, move_to=True, ...) with the literal absolute
+        coordinate instead of a relative (dx, dy) -- tracked by
+        querying KWin ONCE at the start of recording and then locally
+        accumulating raw deltas on top of that (re-synced against a
+        fresh query every couple of seconds to correct any drift),
+        rather than querying per tick. That keeps RECORDING cheap.
+        PLAYBACK is a different story: move_to=True queries KWin at
+        runtime on every call, so a macro recorded this way will
+        replay noticeably slower/less smooth than plain raw mode,
+        since it's now making up to 60 KWin round-trips a second
+        instead of zero. Worth it only when you actually want literal,
+        editable absolute coordinates in the generated code -- not for
+        macros meant to replay your motion smoothly in real time.
+
     One shared clock spans every event type -- keyboard, clicks,
     pings, and raw movement all interleave into a single chronological
     script, not separate per-stream timelines.
     """
 
     WAIT_THRESHOLD = 0.02  # gaps below this aren't worth a wait() line
+    RESYNC_INTERVAL = 2.0  # how often set_positions re-queries KWin to correct drift
 
     def __init__(self, keyboard_path, mouse_path, transcribe_keyboard,
-                 transcribe_mouse, raw_mouse, ping_code, on_line, on_done):
+                 transcribe_mouse, raw_mouse, set_positions, ping_code, on_line, on_done):
         self.keyboard_path = keyboard_path
         self.mouse_path = mouse_path
         self.transcribe_keyboard = transcribe_keyboard
         self.transcribe_mouse = transcribe_mouse
         self.raw_mouse = raw_mouse
+        self.set_positions = set_positions
         self.ping_code = ping_code
         self.on_line = on_line  # (text:str) -> None, GTK thread; text includes trailing \n
         self.on_done = on_done  # (status:str) -> None ; status: "ok"|"no_devices"
@@ -347,6 +364,25 @@ class InputTranscriber:
             # both the line-count explosion and, combined with the
             # bug below, the "does almost nothing" playback.
             next_raw_tick = _time.monotonic() + RAW_TICK
+
+            # set_positions: track absolute position locally instead of
+            # querying KWin every tick (60/sec would be far too slow) --
+            # one query now for a starting baseline, then pure local
+            # accumulation of raw deltas on top of it, periodically
+            # re-synced against a fresh query to correct drift.
+            tracked_pos = None
+            next_resync = 0.0
+            if self.raw_mouse and self.set_positions:
+                baseline = md._get_cursor_pos_kde()
+                if baseline is not None:
+                    tracked_pos = [baseline[0], baseline[1]]
+                    next_resync = _time.monotonic() + self.RESYNC_INTERVAL
+                else:
+                    GLib.idle_add(
+                        self.on_line,
+                        "# couldn't read starting cursor position -- "
+                        "falling back to relative deltas for this session\n",
+                    )
 
             while not self._stop.is_set():
                 for key, _ in sel.select(timeout=0.01):
@@ -401,6 +437,13 @@ class InputTranscriber:
 
                 if self.transcribe_mouse and self.raw_mouse:
                     now = _time.monotonic()
+
+                    if tracked_pos is not None and now >= next_resync:
+                        fresh = md._get_cursor_pos_kde(timeout=0.5)
+                        if fresh is not None:
+                            tracked_pos[0], tracked_pos[1] = fresh
+                        next_resync = now + self.RESYNC_INTERVAL
+
                     if now >= next_raw_tick:
                         if raw_dx or raw_dy:
                             gap = now - last_time
@@ -414,14 +457,20 @@ class InputTranscriber:
                             # silently reintroduce the same
                             # everything-happens-instantly bug this
                             # tick system was built to fix.
-                            #
-                            # time_=0/easing="none" is deliberate too:
-                            # move_mouse's "none" branch does one
-                            # instant relative step and returns WITHOUT
-                            # sleeping, ignoring time_ entirely -- so
-                            # the wait() above is what actually
-                            # provides this line's pacing, not time_.
-                            text = f'wait({gap:.3f})\nmove_mouse({raw_dx}, {raw_dy}, time_=0, easing="none")\n'
+                            if tracked_pos is not None:
+                                tracked_pos[0] += raw_dx
+                                tracked_pos[1] += raw_dy
+                                move_line = f"move_mouse({tracked_pos[0]}, {tracked_pos[1]}, move_to=True, time_=0)"
+                            else:
+                                # time_=0/easing="none" is deliberate:
+                                # move_mouse's "none" branch does one
+                                # instant relative step and returns
+                                # WITHOUT sleeping, ignoring time_
+                                # entirely -- so the wait() above is
+                                # what actually provides this line's
+                                # pacing, not time_.
+                                move_line = f'move_mouse({raw_dx}, {raw_dy}, time_=0, easing="none")'
+                            text = f"wait({gap:.3f})\n{move_line}\n"
                             last_time = now
                             raw_dx, raw_dy = 0, 0
                             GLib.idle_add(self.on_line, text)
@@ -688,6 +737,9 @@ class MacroEditorWindow(Gtk.Window):
         self.transcribe_raw_check = Gtk.CheckButton(label="Raw Mouse Input")
         self.transcribe_raw_check.set_sensitive(False)
         transcribe_check_row.append(self.transcribe_raw_check)
+        self.transcribe_setpos_check = Gtk.CheckButton(label="Set Mouse Positions")
+        self.transcribe_setpos_check.set_sensitive(False)
+        transcribe_check_row.append(self.transcribe_setpos_check)
         root.append(transcribe_check_row)
 
         def _on_mouse_check_toggled(check_btn):
@@ -695,6 +747,12 @@ class MacroEditorWindow(Gtk.Window):
             if not check_btn.get_active():
                 self.transcribe_raw_check.set_active(False)
         self.transcribe_mouse_check.connect("toggled", _on_mouse_check_toggled)
+
+        def _on_raw_check_toggled(check_btn):
+            self.transcribe_setpos_check.set_sensitive(check_btn.get_active())
+            if not check_btn.get_active():
+                self.transcribe_setpos_check.set_active(False)
+        self.transcribe_raw_check.connect("toggled", _on_raw_check_toggled)
 
         ping_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         ping_row.append(Gtk.Label(label="Ping key"))
@@ -893,6 +951,7 @@ class MacroEditorWindow(Gtk.Window):
             transcribe_keyboard=transcribe_kb,
             transcribe_mouse=transcribe_mouse,
             raw_mouse=self.transcribe_raw_check.get_active(),
+            set_positions=self.transcribe_setpos_check.get_active(),
             ping_code=self.ping_code,
             on_line=self._on_transcribe_line,
             on_done=self._on_transcribe_done,

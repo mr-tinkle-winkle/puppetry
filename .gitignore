@@ -1,0 +1,21 @@
+# Python bytecode cache
+__pycache__/
+*.pyc
+
+# Nix build output symlink
+result
+result-*
+
+# direnv, if you ever use it
+.direnv/
+
+# editor cruft
+*.swp
+.vscode/
+.idea/
+
+# Puppetry's own runtime state -- never something to commit, and
+# nothing in this repo generates it, but easy to have lying around
+# locally if you've been testing in place.
+state.json
+profiles/
