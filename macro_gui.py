@@ -230,6 +230,215 @@ class ComboRecorder:
 
 
 # ---------------------------------------------------------------------------
+# Live transcription: turns real key/click/movement events into macro code
+# as you perform them, inserted straight into the code editor.
+# ---------------------------------------------------------------------------
+
+class InputTranscriber:
+    """Watches your real devices while running and streams generated
+    primitive calls (kd/ku/wait/move_mouse) back to the editor as you
+    act -- "record a macro by just doing it" instead of hand-writing it.
+
+    Keyboard: every KEY_* press/release becomes a kd()/ku() pair, with
+    a preceding wait() line whenever the gap since the last emitted
+    event is large enough to matter -- this is what preserves your
+    actual pacing on replay.
+
+    Mouse clicks (BTN_*): identical kd()/ku()/wait() treatment,
+    regardless of the raw-mouse setting below -- clicks are always
+    discrete events; there's no "raw vs waypoint" distinction for them.
+
+    Mouse movement has two modes:
+      - Default (raw_mouse=False): movement is NOT continuously
+        transcribed. Instead, pressing the configured ping key samples
+        wherever the cursor actually is right now (same KWin/kdotool
+        query move_to=True uses at runtime) and emits a single
+        move_mouse(x, y, move_to=True, time_=<gap since the last
+        emitted event>) call -- the elapsed time IS the move's
+        duration, so there's no separate wait() line for pings
+        specifically (that would double-count the gap: once as a
+        wait, again as the move's own duration). Requires KDE Plasma/
+        KWin; if the position query fails, that ping is skipped and a
+        comment noting the failure is inserted instead of a bogus call.
+      - Raw (raw_mouse=True): every raw relative-motion frame from the
+        physical mouse becomes its own move_mouse(dx, dy,
+        time_=<gap>, easing="none") call, using the literal hardware
+        delta for that frame and the real elapsed time as the
+        duration (constant-speed, unsmoothed -- "easing=none" here
+        means "don't editorialize the curve", not "teleport instantly").
+        No querying needed, so this works fine under Hyprland too.
+        This is what "unoptimized/ugly" refers to: full fidelity,
+        one call per hardware frame, far less readable than the
+        ping-based waypoints above.
+
+    One shared clock spans every event type -- keyboard, clicks,
+    pings, and raw movement all interleave into a single chronological
+    script, not separate per-stream timelines.
+    """
+
+    WAIT_THRESHOLD = 0.02  # gaps below this aren't worth a wait() line
+
+    def __init__(self, keyboard_path, mouse_path, transcribe_keyboard,
+                 transcribe_mouse, raw_mouse, ping_code, on_line, on_done):
+        self.keyboard_path = keyboard_path
+        self.mouse_path = mouse_path
+        self.transcribe_keyboard = transcribe_keyboard
+        self.transcribe_mouse = transcribe_mouse
+        self.raw_mouse = raw_mouse
+        self.ping_code = ping_code
+        self.on_line = on_line  # (text:str) -> None, GTK thread; text includes trailing \n
+        self.on_done = on_done  # (status:str) -> None ; status: "ok"|"no_devices"
+        self._stop = threading.Event()
+        self._thread = None
+
+    def start(self):
+        self._stop.clear()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def stop(self):
+        self._stop.set()
+
+    def _run(self):
+        import time as _time
+        sel = selectors.DefaultSelector()
+        devices = []
+        try:
+            wanted_paths = set()
+            if (self.transcribe_keyboard or self.transcribe_mouse) and self.keyboard_path:
+                wanted_paths.add(self.keyboard_path)  # keyboard also needed for the ping key
+            if self.transcribe_mouse and self.mouse_path:
+                wanted_paths.add(self.mouse_path)
+
+            if not wanted_paths:
+                GLib.idle_add(self.on_done, "no_devices")
+                return
+
+            for path in wanted_paths:
+                try:
+                    dev = InputDevice(path)
+                    devices.append(dev)
+                    sel.register(dev.fd, selectors.EVENT_READ, dev)
+                except Exception:
+                    pass
+
+            if not devices:
+                GLib.idle_add(self.on_done, "no_devices")
+                return
+
+            last_time = _time.monotonic()
+            raw_dx, raw_dy = 0, 0
+
+            while not self._stop.is_set():
+                for key, _ in sel.select(timeout=0.1):
+                    dev = key.data
+                    try:
+                        for ev in dev.read():
+                            if ev.type == e.EV_KEY:
+                                code = ev.code
+
+                                if code == self.ping_code:
+                                    if ev.value == 1 and self.transcribe_mouse and not self.raw_mouse:
+                                        pos = md._get_cursor_pos_kde(timeout=0.5)
+                                        now = _time.monotonic()
+                                        gap = now - last_time
+                                        if pos is None:
+                                            text = "# ping failed -- couldn't read cursor position (needs KDE/kdotool)\n"
+                                        else:
+                                            text = f"move_mouse({pos[0]}, {pos[1]}, move_to=True, time_={gap:.3f})\n"
+                                        last_time = now
+                                        GLib.idle_add(self.on_line, text)
+                                    continue  # ping key (press AND release) never transcribed as a keypress
+
+                                if self.transcribe_keyboard and dev.path == self.keyboard_path \
+                                        and _is_key_name(code) and ev.value in (0, 1):
+                                    now = _time.monotonic()
+                                    gap = now - last_time
+                                    line = f"{'kd' if ev.value == 1 else 'ku'}({_key_name(code)})"
+                                    text = (f"wait({gap:.3f})\n" if gap >= self.WAIT_THRESHOLD else "") + line + "\n"
+                                    last_time = now
+                                    GLib.idle_add(self.on_line, text)
+
+                                elif self.transcribe_mouse and dev.path == self.mouse_path \
+                                        and _is_button_name(code) and ev.value in (0, 1):
+                                    now = _time.monotonic()
+                                    gap = now - last_time
+                                    line = f"{'kd' if ev.value == 1 else 'ku'}({_key_name(code)})"
+                                    text = (f"wait({gap:.3f})\n" if gap >= self.WAIT_THRESHOLD else "") + line + "\n"
+                                    last_time = now
+                                    GLib.idle_add(self.on_line, text)
+
+                            elif self.transcribe_mouse and self.raw_mouse and dev.path == self.mouse_path:
+                                if ev.type == e.EV_REL:
+                                    if ev.code == e.REL_X:
+                                        raw_dx += ev.value
+                                    elif ev.code == e.REL_Y:
+                                        raw_dy += ev.value
+                                elif ev.type == e.EV_SYN and (raw_dx or raw_dy):
+                                    now = _time.monotonic()
+                                    gap = now - last_time
+                                    text = f'move_mouse({raw_dx}, {raw_dy}, time_={gap:.3f}, easing="none")\n'
+                                    last_time = now
+                                    raw_dx, raw_dy = 0, 0
+                                    GLib.idle_add(self.on_line, text)
+                    except BlockingIOError:
+                        pass
+        finally:
+            for dev in devices:
+                try:
+                    dev.close()
+                except Exception:
+                    pass
+            GLib.idle_add(self.on_done, "ok")
+
+
+def detect_ping_key(keyboard_path, mouse_path, on_found, timeout=10.0):
+    """Waits for a single KEY_*/BTN_* press on either device, for
+    (re)assigning the transcriber's ping trigger. Calls
+    on_found(code_or_None, name_or_None) from the GTK main thread."""
+
+    def worker():
+        sel = selectors.DefaultSelector()
+        devices = []
+        found_code = None
+        found_name = None
+        try:
+            for path in (keyboard_path, mouse_path):
+                if not path:
+                    continue
+                try:
+                    dev = InputDevice(path)
+                    devices.append(dev)
+                    sel.register(dev.fd, selectors.EVENT_READ, dev)
+                except Exception:
+                    pass
+
+            import time as _time
+            deadline = _time.monotonic() + timeout
+            while _time.monotonic() < deadline and found_code is None:
+                for key, _ in sel.select(timeout=0.2):
+                    dev = key.data
+                    try:
+                        for ev in dev.read():
+                            if ev.type == e.EV_KEY and ev.value == 1:
+                                found_code, found_name = ev.code, _key_name(ev.code)
+                                break
+                    except BlockingIOError:
+                        pass
+                    if found_code:
+                        break
+        finally:
+            for dev in devices:
+                try:
+                    dev.close()
+                except Exception:
+                    pass
+            GLib.idle_add(on_found, found_code, found_name)
+
+    threading.Thread(target=worker, daemon=True).start()
+
+
+# ---------------------------------------------------------------------------
 # Device auto-detect: "press any key on your keyboard" / "move your mouse"
 # ---------------------------------------------------------------------------
 
@@ -414,6 +623,52 @@ class MacroEditorWindow(Gtk.Window):
         self._pos_poller.start()
         self.connect("destroy", lambda *_: self._pos_poller.stop())
 
+        # Transcribe Inputs -- records real key/click/movement events
+        # as macro code, inserted live at the cursor position in the
+        # code box below.
+        root.append(Gtk.Label(label="Transcribe Inputs", xalign=0))
+
+        self._transcriber = None
+        self._transcribing = False
+        self.ping_code = getattr(e, self.app_window.state.get("transcribe_ping_key") or "KEY_INSERT", e.KEY_INSERT)
+
+        transcribe_check_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        self.transcribe_kb_check = Gtk.CheckButton(label="Transcribe Keyboard")
+        transcribe_check_row.append(self.transcribe_kb_check)
+        self.transcribe_mouse_check = Gtk.CheckButton(label="Transcribe Mouse")
+        transcribe_check_row.append(self.transcribe_mouse_check)
+        self.transcribe_raw_check = Gtk.CheckButton(label="Raw Mouse Input")
+        self.transcribe_raw_check.set_sensitive(False)
+        transcribe_check_row.append(self.transcribe_raw_check)
+        root.append(transcribe_check_row)
+
+        def _on_mouse_check_toggled(check_btn):
+            self.transcribe_raw_check.set_sensitive(check_btn.get_active())
+            if not check_btn.get_active():
+                self.transcribe_raw_check.set_active(False)
+        self.transcribe_mouse_check.connect("toggled", _on_mouse_check_toggled)
+
+        ping_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        ping_row.append(Gtk.Label(label="Ping key"))
+        self.ping_key_label = Gtk.Label(label=_key_name(self.ping_code), xalign=0)
+        self.ping_key_label.add_css_class("monospace")
+        self.ping_key_label.set_hexpand(True)
+        ping_row.append(self.ping_key_label)
+        self.ping_change_button = Gtk.Button(label="Change")
+        self.ping_change_button.connect("clicked", self.on_ping_change_clicked)
+        ping_row.append(self.ping_change_button)
+        root.append(ping_row)
+
+        transcribe_action_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        self.transcribe_button = Gtk.Button(label="Start Transcribing")
+        self.transcribe_button.connect("clicked", self.on_transcribe_clicked)
+        transcribe_action_row.append(self.transcribe_button)
+        self.transcribe_status_label = Gtk.Label(label="", xalign=0)
+        transcribe_action_row.append(self.transcribe_status_label)
+        root.append(transcribe_action_row)
+
+        self.connect("destroy", lambda *_: self._transcriber and self._transcriber.stop())
+
         # Code
         code_header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
         code_header.append(Gtk.Label(label="Macro code", xalign=0))
@@ -539,6 +794,74 @@ class MacroEditorWindow(Gtk.Window):
             self.combo_label.set_text("Couldn't open keyboard/mouse device -- check paths & permissions.")
         else:  # cancelled
             self.combo_label.set_text(self._combo_display(self.macro.get("combo", [])))
+        return False
+
+    def on_ping_change_clicked(self, _btn):
+        self.ping_change_button.set_sensitive(False)
+        self.ping_key_label.set_text("press a key…")
+        detect_ping_key(
+            self.app_window.keyboard_path, self.app_window.mouse_path,
+            on_found=self._on_ping_found,
+        )
+
+    def _on_ping_found(self, code, name):
+        self.ping_change_button.set_sensitive(True)
+        if code is None:
+            self.ping_key_label.set_text(_key_name(self.ping_code))
+            self.transcribe_status_label.set_text("No key detected -- kept the previous ping key.")
+            return False
+        self.ping_code = code
+        self.ping_key_label.set_text(name)
+        self.app_window.state["transcribe_ping_key"] = name
+        try:
+            md.save_state(self.app_window.state)
+        except Exception as exc:
+            self.transcribe_status_label.set_text(f"Ping key set, but couldn't save: {exc}")
+        return False
+
+    def on_transcribe_clicked(self, _btn):
+        if self._transcribing:
+            if self._transcriber:
+                self._transcriber.stop()
+            return
+
+        transcribe_kb = self.transcribe_kb_check.get_active()
+        transcribe_mouse = self.transcribe_mouse_check.get_active()
+        if not transcribe_kb and not transcribe_mouse:
+            self.transcribe_status_label.set_text("Check Transcribe Keyboard and/or Transcribe Mouse first.")
+            return
+
+        keyboard_path = self.app_window.keyboard_path
+        mouse_path = self.app_window.mouse_path
+        if (transcribe_kb and not keyboard_path) or (transcribe_mouse and not mouse_path):
+            self.transcribe_status_label.set_text("Set a keyboard/mouse device path first.")
+            return
+
+        self._transcribing = True
+        self.transcribe_button.set_label("Stop Transcribing")
+        self.transcribe_status_label.set_text("Transcribing… inserting code at your cursor position.")
+        self._transcriber = InputTranscriber(
+            keyboard_path, mouse_path,
+            transcribe_keyboard=transcribe_kb,
+            transcribe_mouse=transcribe_mouse,
+            raw_mouse=self.transcribe_raw_check.get_active(),
+            ping_code=self.ping_code,
+            on_line=self._on_transcribe_line,
+            on_done=self._on_transcribe_done,
+        )
+        self._transcriber.start()
+
+    def _on_transcribe_line(self, text):
+        self.code_view.get_buffer().insert_at_cursor(text)
+        return False
+
+    def _on_transcribe_done(self, status):
+        self._transcribing = False
+        self.transcribe_button.set_label("Start Transcribing")
+        if status == "no_devices":
+            self.transcribe_status_label.set_text("Couldn't open keyboard/mouse device -- check paths & permissions.")
+        else:
+            self.transcribe_status_label.set_text("Stopped.")
         return False
 
     def _add_alias_row(self, name="", target=None):

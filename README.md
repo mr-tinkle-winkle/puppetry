@@ -28,7 +28,7 @@ Add this repo to your flake's inputs:
 {
   inputs = {
     nixpkgs.url = "github:nixos/nixpkgs/nixos-unstable";
-    puppetry.url = "github:mr-tinkle-winkle/puppetry";
+    puppetry.url = "github:YOUR_GITHUB_USERNAME/puppetry";
     # Optional but recommended -- makes puppetry reuse YOUR pinned
     # nixpkgs instead of fetching its own copy:
     puppetry.inputs.nixpkgs.follows = "nixpkgs";
@@ -39,7 +39,7 @@ Add this repo to your flake's inputs:
       system = "x86_64-linux";
       modules = [
         ./configuration.nix
-        inputs.puppetry.nixosModules.default
+        puppetry.nixosModules.default
         {
           services.puppetry = {
             enable = true;
@@ -52,7 +52,14 @@ Add this repo to your flake's inputs:
 }
 ```
 
-Then rebuild.
+Then:
+
+```fish
+sudo nixos-rebuild switch --flake .
+```
+
+(swap in whatever your usual rebuild command is -- `nixos-rebuild-flaked`,
+plain `nixos-rebuild switch`, etc.)
 
 **Log out and back in** afterward -- group membership needs a fresh login
 session to take effect.
@@ -89,7 +96,7 @@ rebuild. Nothing else needs to change.
 ## Trying it without committing to the module
 
 ```fish
-nix run github:mr-tinkle-winkle/puppetry
+nix run github:YOUR_GITHUB_USERNAME/puppetry
 ```
 
 This runs just the GUI, useful for a quick look. It won't have the udev
