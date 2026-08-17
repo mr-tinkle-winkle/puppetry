@@ -429,6 +429,147 @@ def _current_speed_multiplier():
     return getattr(_speed_local, "value", 1.0)
 
 
+# Panic-button infrastructure (see abort_all() near the bottom of this
+# file, and PRIMITIVES_NAMESPACE registration is deliberately NOT done
+# for this -- it's a daemon-level safety feature triggered by a
+# dedicated hotkey, not something macro code calls itself).
+_abort_event = threading.Event()
+
+
+def _check_abort():
+    if _abort_event.is_set():
+        raise _MacroAborted()
+
+
+class _MacroAborted(Exception):
+    """Raised internally to unwind a macro's execution when the abort
+    hotkey fires mid-run. Never meant to escape to the user -- caught
+    in _fire_once/_loop_until_stopped and treated as a clean, silent
+    stop, not an error."""
+
+
+# Every code WE (our own virtual devices) currently have held down,
+# via kd() below -- tracked explicitly (rather than trusting the
+# kernel's own per-device key-state table) so abort_all() knows
+# exactly what to release without any ambiguity about which device
+# state it's reading. Guarded by _held_lock since multiple macros can
+# run kd()/ku() concurrently on their own threads.
+_held_lock = threading.Lock()
+_synth_held = set()
+
+# ---------------------------------------------------------------------------
+# ignore() -- blocking real physical input from reaching anywhere else
+# while a macro runs, so your own keypresses/clicks/mouse movement
+# can't interfere with what it's doing. The only way to truly do this
+# is an exclusive device grab (EVIOCGRAB) -- everything below exists
+# to make that safe: best-effort everywhere, and abort_all() always
+# force-releases all of it regardless of what state it thinks it's in.
+# ---------------------------------------------------------------------------
+
+_ignore_lock = threading.Lock()
+_ignore_flags = {"keyboard": False, "mouse_buttons": False, "mouse_movement": False}
+
+_grab_lock = threading.Lock()
+_grab_state = {"keyboard": False, "mouse": False}
+_watched_devices = {}  # "keyboard"/"mouse" -> InputDevice, set by watch_device()
+
+
+def _apply_grab_state():
+    """Grabs/ungrabs the real keyboard/mouse device to match the
+    current ignore flags. Best-effort throughout: a device that isn't
+    being watched yet, or a grab/ungrab call that fails for whatever
+    reason, is silently skipped rather than raising -- this must never
+    be able to crash the daemon or take a macro down with it."""
+    with _ignore_lock:
+        kb_needed = _ignore_flags["keyboard"]
+        mouse_needed = _ignore_flags["mouse_buttons"] or _ignore_flags["mouse_movement"]
+
+    with _grab_lock:
+        kb_dev = _watched_devices.get("keyboard")
+        if kb_dev is not None:
+            try:
+                if kb_needed and not _grab_state["keyboard"]:
+                    kb_dev.grab()
+                    _grab_state["keyboard"] = True
+                    print("Keyboard grabbed (ignore active)")
+                elif not kb_needed and _grab_state["keyboard"]:
+                    kb_dev.ungrab()
+                    _grab_state["keyboard"] = False
+                    print("Keyboard released")
+            except Exception as exc:
+                print(f"Keyboard grab/ungrab failed: {exc}")
+
+        mouse_dev = _watched_devices.get("mouse")
+        if mouse_dev is not None:
+            try:
+                if mouse_needed and not _grab_state["mouse"]:
+                    mouse_dev.grab()
+                    _grab_state["mouse"] = True
+                    print("Mouse grabbed (ignore active)")
+                elif not mouse_needed and _grab_state["mouse"]:
+                    mouse_dev.ungrab()
+                    _grab_state["mouse"] = False
+                    print("Mouse released")
+            except Exception as exc:
+                print(f"Mouse grab/ungrab failed: {exc}")
+
+
+def _toggle_ignore(what):
+    with _ignore_lock:
+        _ignore_flags[what] = not _ignore_flags[what]
+    _apply_grab_state()
+
+
+def ignore(what):
+    """
+    Toggles whether real physical input of the given kind is blocked
+    from reaching the rest of the system while active, so your own
+    keypresses/clicks/mouse movement can't interfere with whatever a
+    macro is doing. A TOGGLE, like a light switch -- calling it again
+    with the same argument turns it back off (ignore("mouse") twice in
+    a row is a no-op overall).
+
+    Global, not per-macro -- unlike speed(), this genuinely needs to
+    be: it's about blocking real hardware input system-wide, not
+    scoping a rate to this macro's own execution. If two macros toggle
+    the same target at the same time, they're sharing one on/off
+    switch, same as any other global state -- that's on you to reason
+    about, same caveat as macros calling each other while speed() is
+    active.
+
+    what:
+      "keyboard" -- blocks all real keyboard input EXCEPT the abort
+        hotkey, which keeps working regardless. That's not a special
+        case here -- Puppetry's own reading of the device never stops
+        just because it's grabbed (a grab only blocks OTHER listeners,
+        never the process holding it), so abort detection is
+        unaffected either way.
+      "mouse" -- shorthand for toggling both of the below together.
+      "mouse_buttons" -- blocks only real mouse clicks; movement still
+        works normally.
+      "mouse_movement" -- blocks only real mouse movement; clicks
+        still work normally.
+
+    IMPORTANT: this works by actually, exclusively grabbing the real
+    device while active -- the only way to truly block input at this
+    level, and a bigger deal than anything else in here. If a macro
+    crashes or gets stuck without toggling it back off, physical input
+    could stay blocked. The abort hotkey ALWAYS force-releases every
+    active ignore as part of what it does, specifically as a safety
+    net for exactly that -- and the checkbox-driven version of this in
+    the editor wraps its macro in a try/finally, so a raised exception
+    still restores it correctly even without hitting abort.
+    """
+    if what == "mouse":
+        _toggle_ignore("mouse_buttons")
+        _toggle_ignore("mouse_movement")
+        return
+    if what not in _ignore_flags:
+        raise ValueError(f"ignore: unknown target {what!r} -- expected "
+                          "'keyboard', 'mouse', 'mouse_buttons', or 'mouse_movement'")
+    _toggle_ignore(what)
+
+
 def speed(multiplier):
     """
     Multiplies every wait/hold/movement DURATION from this point on,
@@ -468,6 +609,8 @@ def kd(key):
     dev = _device_for_code(code)
     dev.write(e.EV_KEY, code, 1)
     dev.syn()
+    with _held_lock:
+        _synth_held.add(code)
 
 
 def ku(key):
@@ -476,14 +619,18 @@ def ku(key):
     dev = _device_for_code(code)
     dev.write(e.EV_KEY, code, 0)
     dev.syn()
+    with _held_lock:
+        _synth_held.discard(code)
 
 
 def tap(key, time_=0.1):
     """Down, wait `time_` seconds, up. Default hold is 0.1s. Works for
     both typing keys and mouse buttons. Hold time is scaled by
-    speed(), like everything else with a duration."""
+    speed(), like everything else with a duration (via wait(), which
+    this is built on -- see wait() for the abort/speed behavior that
+    gives this)."""
     kd(key)
-    time.sleep(time_ * _current_speed_multiplier())
+    wait(time_)
     ku(key)
 
 
@@ -618,6 +765,7 @@ def move_mouse(x_pixels, y_pixels, time_=0.25, easing="inout", async_=False, mov
             steps = max(1, int(scaled_time * 120))  # ~120 steps/sec, smooth without flooding uinput
             prev = 0.0
             for i in range(1, steps + 1):
+                _check_abort()  # long/slow moves stay responsive to the panic-button hotkey
                 t = i / steps
                 cur = _ease(t, easing)
                 _move_rel_step(round(dx * (cur - prev)), round(dy * (cur - prev)))
@@ -656,14 +804,25 @@ def wait(time_, precise=False):
     precise=True: busy-waits against time.perf_counter() instead. Costs
       real CPU for the duration, only worth it for timing that actually
       needs sub-millisecond accuracy.
+
+    Interruptible by the abort hotkey either way -- checked every 30ms
+    (non-precise) or continuously (precise), so a long wait() never
+    blocks a panic-button abort for more than a beat.
     """
     time_ = time_ * _current_speed_multiplier()
     if not precise:
-        time.sleep(time_)
+        remaining = time_
+        chunk = 0.03
+        while remaining > 0:
+            _check_abort()
+            this_chunk = chunk if remaining > chunk else remaining
+            time.sleep(this_chunk)
+            remaining -= this_chunk
+        _check_abort()
         return
     start = time.perf_counter()
     while (time.perf_counter() - start) < time_:
-        pass
+        _check_abort()
 
 
 # Character -> (KEY_* name, needs_shift) for type(). US QWERTY layout --
@@ -738,6 +897,7 @@ PRIMITIVES_NAMESPACE = {
     "wheel": wheel,
     "wait": wait,
     "speed": speed,
+    "ignore": ignore,
     "time": time,
     **_KEY_CONSTANTS,
 }
@@ -829,10 +989,39 @@ def compile_macro(macro_def, macro_refs=None):
     but ignored, since macros don't have declared parameters yet.
     Nothing stops two macros from calling each other and recursing
     forever -- that's on you to avoid, it isn't detected here.
+
+    macro_def["ignore_keyboard"/"ignore_mouse_buttons"/"ignore_mouse_movement"]:
+    the editor's "Ignore ..." checkboxes. When set, this wraps the
+    compiled body in a try/finally that calls ignore(target) on entry
+    and ignore(target) again (toggling it back off) on exit -- so it's
+    just sugar for calling ignore() by hand at the top of your code,
+    except it's guaranteed to toggle back off even if the macro raises
+    partway through. (The abort hotkey is a second, independent safety
+    net on top of that -- see ignore()'s own docstring.)
     """
     body = macro_def.get("code", "") or "pass"
-    indented = textwrap.indent(body, "    ")
-    src = f"def _macro(*_args, **_kwargs):\n{indented}\n"
+
+    ignore_targets = [target for target, key in (
+        ("keyboard", "ignore_keyboard"),
+        ("mouse_buttons", "ignore_mouse_buttons"),
+        ("mouse_movement", "ignore_mouse_movement"),
+    ) if macro_def.get(key)]
+
+    if ignore_targets:
+        on_block = "\n".join(f"    ignore({target!r})" for target in ignore_targets)
+        off_block = "\n".join(f"        ignore({target!r})" for target in ignore_targets)
+        body_indented = textwrap.indent(body, "        ")
+        src = (
+            f"def _macro(*_args, **_kwargs):\n"
+            f"{on_block}\n"
+            f"    try:\n"
+            f"{body_indented}\n"
+            f"    finally:\n"
+            f"{off_block}\n"
+        )
+    else:
+        body_indented = textwrap.indent(body, "    ")
+        src = f"def _macro(*_args, **_kwargs):\n{body_indented}\n"
 
     namespace = dict(PRIMITIVES_NAMESPACE)
     if macro_def.get("simplified_names"):
@@ -875,21 +1064,30 @@ class Macro:
 def _fire_once(macro):
     def _run():
         _speed_local.value = 1.0  # fresh 1x for every top-level trigger
-        macro.func()
+        try:
+            macro.func()
+        except _MacroAborted:
+            pass  # panic-button abort -- clean stop, not an error
     threading.Thread(target=_run, daemon=True).start()
 
 
 def _loop_until_stopped(macro):
-    """Runs the macro body repeatedly. Checks the stop flag BETWEEN
-    iterations only -- so a running iteration always finishes, and no
-    new one starts once stopped. This is deliberate: it avoids ever
-    needing to force-release a key mid-iteration."""
+    """Runs the macro body repeatedly. Checks the ordinary per-macro
+    stop flag (combo released, toggled off) BETWEEN iterations only --
+    so a running iteration always finishes naturally, and no new one
+    starts once stopped. The global abort hotkey is the one exception:
+    it can interrupt mid-iteration too (see _check_abort() calls inside
+    wait()/move_mouse()), since it's specifically meant as an emergency
+    stop, not a graceful one."""
     rt = macro.runtime
-    while not rt.stop_event.is_set():
-        _speed_local.value = 1.0  # fresh 1x every iteration -- a
-        # speed() call left active at the end of one loop pass must
-        # not silently carry into the next.
-        macro.func()
+    try:
+        while not rt.stop_event.is_set():
+            _speed_local.value = 1.0  # fresh 1x every iteration -- a
+            # speed() call left active at the end of one loop pass must
+            # not silently carry into the next.
+            macro.func()
+    except _MacroAborted:
+        pass  # panic-button abort -- clean stop, not an error
     rt.active_hold = False
 
 
@@ -909,6 +1107,64 @@ def _is_looping(macro):
     return macro.runtime.thread is not None and macro.runtime.thread.is_alive()
 
 
+def abort_all():
+    """Panic button. Immediately stops every currently-running macro --
+    both mid-execution (via the cooperative _check_abort() points
+    inside wait()/tap()/move_mouse()) and any hold/toggle loop that
+    would otherwise start another iteration -- releases every key/
+    button WE (Puppetry's own virtual devices) currently have held
+    down, and force-releases any active ignore()/grab, regardless of
+    what state it thinks it's in.
+
+    Never INJECTS anything on the real keyboard/mouse: Puppetry only
+    ever reads those. The one thing it CAN touch is an exclusive grab
+    a macro's ignore() may have taken to block real input -- releasing
+    that just restores normal function, it doesn't inject anything
+    either. Between the held-key release and the grab release, this
+    covers both ways a crashed/stuck macro could leave real input in a
+    bad state without a full reboot.
+    """
+    _abort_event.set()
+    for macro in MACROS:
+        macro.runtime.stop_event.set()
+
+    # Grabs get released immediately, not on the delayed timer below --
+    # a stuck grab means the user can't type/click AT ALL, which is
+    # more urgent to fix than the held-key cleanup, and releasing one
+    # is always safe regardless of whether any macro thread has
+    # actually finished unwinding yet.
+    with _ignore_lock:
+        for key in _ignore_flags:
+            _ignore_flags[key] = False
+    with _grab_lock:
+        for kind, dev in _watched_devices.items():
+            if _grab_state.get(kind):
+                try:
+                    dev.ungrab()
+                    print(f"{kind.capitalize()} force-released (abort)")
+                except Exception as exc:
+                    print(f"{kind.capitalize()} force-release failed: {exc}")
+                _grab_state[kind] = False
+
+    def _release_and_clear():
+        # Give any macro thread that was mid-flight (or spawned in the
+        # same instant as the abort) a fair window to actually reach a
+        # _check_abort() point and unwind, before we clear the flag --
+        # otherwise a macro whose thread starts a beat late could miss
+        # the pulse entirely and keep running.
+        time.sleep(0.3)
+        with _held_lock:
+            stuck = list(_synth_held)
+            _synth_held.clear()
+        for code in stuck:
+            dev = _device_for_code(code)
+            dev.write(e.EV_KEY, code, 0)
+            dev.syn()
+        _abort_event.clear()
+
+    threading.Thread(target=_release_and_clear, daemon=True).start()
+
+
 # ---------------------------------------------------------------------------
 # EVENT LOOP
 # ---------------------------------------------------------------------------
@@ -916,9 +1172,17 @@ def _is_looping(macro):
 held = set()
 _lock = threading.Lock()
 MACROS = []  # populated at startup from the active profile
+ABORT_CODE = e.KEY_PAUSE  # overwritten from state.json's "abort_key" in main()
 
 
 def _handle_key_event(code, value):
+    if value == 1 and code == ABORT_CODE:
+        # Dedicated panic-button hotkey -- never participates in combo
+        # matching at all (not even added to `held`), so it can't be
+        # accidentally folded into some other macro's combo.
+        abort_all()
+        return
+
     if value == 1:  # fresh key down (not autorepeat)
         with _lock:
             held.add(code)
@@ -959,17 +1223,48 @@ def _handle_key_event(code, value):
     # value == 2 (autorepeat) ignored
 
 
-async def watch_device(path):
+async def watch_device(path, kind):
+    """kind: "keyboard" or "mouse" -- identifies which device this is
+    for combo-matching AND for the ignore()/grab machinery above.
+    Registers itself in _watched_devices so ignore() can find it.
+
+    Normally (not grabbed) this only reads for combo-matching -- the
+    real events already reach the rest of the system natively, nothing
+    to forward. Once grabbed (some ignore flag is active), NOTHING
+    else can see this device's events anymore, so this loop also
+    becomes responsible for forwarding through whichever categories
+    ISN'T currently being ignored -- e.g. with only mouse_buttons
+    ignored, real movement still needs to reach the cursor normally,
+    which now only happens because this loop re-emits it onto our own
+    virtual mouse device.
+    """
     dev = InputDevice(path)
+    _watched_devices[kind] = dev
     print(f"Watching {dev.path} ({dev.name}) -- read-only, not grabbed")
     async for ev in dev.async_read_loop():
         if ev.type == e.EV_KEY:
             _handle_key_event(ev.code, ev.value)
+            if kind == "mouse" and _grab_state.get("mouse") and not _ignore_flags["mouse_buttons"]:
+                try:
+                    ui_mouse.write(e.EV_KEY, ev.code, ev.value)
+                    ui_mouse.syn()
+                except Exception:
+                    pass
+        elif ev.type == e.EV_REL and kind == "mouse" and _grab_state.get("mouse") \
+                and not _ignore_flags["mouse_movement"]:
+            try:
+                ui_mouse.write(e.EV_REL, ev.code, ev.value)
+                ui_mouse.syn()
+            except Exception:
+                pass
 
 
 async def main():
     ensure_config_exists()
     state = load_state()
+
+    global ABORT_CODE
+    ABORT_CODE = getattr(e, state.get("abort_key") or "KEY_PAUSE", e.KEY_PAUSE)
 
     # Resolve real input devices BEFORE creating our own virtual
     # output devices below -- otherwise our virtual keyboard/mouse
@@ -989,6 +1284,7 @@ async def main():
         print(f"Keyboard: {keyboard_path} ({keyboard_name}) [{kb_how}]")
     if mouse_path:
         print(f"Mouse: {mouse_path} ({mouse_name}) [{mouse_how}]")
+    print(f"Abort hotkey: {state.get('abort_key') or 'KEY_PAUSE'}")
 
     if not keyboard_path or not mouse_path:
         print("Could not determine keyboard/mouse device, automatically "
@@ -1036,8 +1332,8 @@ async def main():
             print(f"Skipping macro {macro_def.get('name', macro_def.get('id'))!r}: {exc}")
 
     await asyncio.gather(
-        watch_device(keyboard_path),
-        watch_device(mouse_path),
+        watch_device(keyboard_path, "keyboard"),
+        watch_device(mouse_path, "mouse"),
     )
 
 

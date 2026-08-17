@@ -51,6 +51,18 @@ DICTIONARY_TEXT = (
     "  after to bring the rest back to normal. Resets to 1 automatically\n"
     "  at the start of every run -- never carries over between separate\n"
     "  triggers, or between other macros running on their own.\n\n"
+    "ignore(target)\n"
+    "  Blocks real physical input from reaching anywhere else, so your\n"
+    "  own keypresses/clicks/movement can't interfere with what this\n"
+    "  macro is doing. A TOGGLE, not a one-way switch -- call it again\n"
+    "  with the same target to turn it back off. target is one of\n"
+    "  \"keyboard\" (blocks all real keys except the abort hotkey, which\n"
+    "  always keeps working), \"mouse_buttons\", \"mouse_movement\", or\n"
+    "  \"mouse\" (both mouse ones together). Global, not per-macro, and\n"
+    "  works by actually grabbing the real device -- see the \"Ignore ...\"\n"
+    "  checkboxes below the code box for the guardrailed version of this\n"
+    "  (auto-restores even if the macro raises); the abort hotkey is a\n"
+    "  second, independent safety net on top of either.\n\n"
     "move_mouse(x_pixels, y_pixels, time_=0.25, easing=\"inout\", async_=False, move_to=False)\n"
     "  Move the mouse by (x, y) over time_ seconds.\n"
     "  easing: none (instant jump), linear (constant speed),\n"
@@ -97,6 +109,9 @@ def _blank_macro():
         "combo": [],
         "code": "",
         "simplified_names": False,
+        "ignore_keyboard": False,
+        "ignore_mouse_buttons": False,
+        "ignore_mouse_movement": False,
     }
 
 
@@ -270,16 +285,18 @@ class InputTranscriber:
         KWin; if the position query fails, that ping is skipped and a
         comment noting the failure is inserted instead of a bogus call.
       - Raw (raw_mouse=True): the physical mouse's motion is sampled
-        on a fixed 60Hz tick (independent of the mouse's actual
-        polling rate) -- whatever raw relative motion arrived within
-        each ~16.7ms window becomes one move_mouse(dx, dy, time_=0,
-        easing="none") call, preceded by an explicit wait() for that
-        tick's real elapsed time. No querying needed, so this works
-        fine under Hyprland too. This is what "unoptimized/ugly"
-        refers to: still far more, far less readable lines than the
-        ping-based waypoints above -- just batched to a sane, fixed
-        rate rather than one line per raw hardware frame (which for a
-        high-polling-rate mouse would be excessive).
+        on a fixed tick rate (raw_hz, default 60 -- independent of the
+        mouse's actual polling rate) -- whatever raw relative motion
+        arrived within each tick's window becomes one
+        move_mouse(dx, dy, time_=0, easing="none") call, preceded by
+        an explicit wait() for that tick's real elapsed time. No
+        querying needed, so this works fine under Hyprland too. This
+        is what "unoptimized/ugly" refers to: still far more, far less
+        readable lines than the ping-based waypoints above -- just
+        batched to a sane, fixed rate rather than one line per raw
+        hardware frame (which for a high-polling-rate mouse would be
+        excessive). Higher raw_hz = more/finer lines and closer
+        fidelity to the actual motion; lower = fewer/coarser lines.
 
         set_positions=True changes each tick's line to
         move_mouse(x, y, move_to=True, ...) with the literal absolute
@@ -291,10 +308,21 @@ class InputTranscriber:
         PLAYBACK is a different story: move_to=True queries KWin at
         runtime on every call, so a macro recorded this way will
         replay noticeably slower/less smooth than plain raw mode,
-        since it's now making up to 60 KWin round-trips a second
+        since it's now making up to raw_hz KWin round-trips a second
         instead of zero. Worth it only when you actually want literal,
         editable absolute coordinates in the generated code -- not for
         macros meant to replay your motion smoothly in real time.
+
+        same_start is the lighter-weight alternative to set_positions:
+        rather than making every tick absolute, it inserts exactly ONE
+        move_mouse(x, y, move_to=True) line at the very start of the
+        recording -- wherever the cursor was when you clicked Start
+        Transcribing -- and every tick after that stays a normal
+        relative (dx, dy) call. Gives a reproducible starting point
+        without set_positions' per-call playback cost. Mutually
+        exclusive with set_positions in the editor UI (checking one
+        unchecks the other) since set_positions' first tick already
+        does this implicitly.
 
     One shared clock spans every event type -- keyboard, clicks,
     pings, and raw movement all interleave into a single chronological
@@ -304,14 +332,19 @@ class InputTranscriber:
     WAIT_THRESHOLD = 0.02  # gaps below this aren't worth a wait() line
     RESYNC_INTERVAL = 2.0  # how often set_positions re-queries KWin to correct drift
 
+    RAW_TICK_DEFAULT = 1.0 / 60.0  # fallback if raw_hz isn't given/valid
+
     def __init__(self, keyboard_path, mouse_path, transcribe_keyboard,
-                 transcribe_mouse, raw_mouse, set_positions, ping_code, on_line, on_done):
+                 transcribe_mouse, raw_mouse, set_positions, same_start, raw_hz,
+                 ping_code, on_line, on_done):
         self.keyboard_path = keyboard_path
         self.mouse_path = mouse_path
         self.transcribe_keyboard = transcribe_keyboard
         self.transcribe_mouse = transcribe_mouse
         self.raw_mouse = raw_mouse
         self.set_positions = set_positions
+        self.same_start = same_start
+        self.raw_hz = raw_hz
         self.ping_code = ping_code
         self.on_line = on_line  # (text:str) -> None, GTK thread; text includes trailing \n
         self.on_done = on_done  # (status:str) -> None ; status: "ok"|"no_devices"
@@ -355,28 +388,45 @@ class InputTranscriber:
 
             last_time = _time.monotonic()
             raw_dx, raw_dy = 0, 0
-            RAW_TICK = 1.0 / 60.0  # fixed 60Hz sample rate for raw mode,
-            # independent of the mouse's actual polling rate -- batches
-            # whatever raw motion arrived within each ~16.7ms window
-            # into a single line, instead of one line per hardware
-            # frame (which for a 1000Hz gaming mouse is drastically
-            # more granular than useful and was the main source of
-            # both the line-count explosion and, combined with the
-            # bug below, the "does almost nothing" playback.
+            try:
+                hz = float(self.raw_hz)
+                RAW_TICK = 1.0 / hz if hz > 0 else self.RAW_TICK_DEFAULT
+            except (TypeError, ValueError):
+                RAW_TICK = self.RAW_TICK_DEFAULT
+            # Fixed sample-rate tick for raw mode, independent of the
+            # mouse's actual polling rate -- batches whatever raw motion
+            # arrived within each tick's window into a single line,
+            # instead of one line per hardware frame (which for a
+            # 1000Hz gaming mouse is drastically more granular than
+            # useful and was the original source of both the
+            # line-count explosion and, combined with the bug below,
+            # the "does almost nothing" playback.
             next_raw_tick = _time.monotonic() + RAW_TICK
 
-            # set_positions: track absolute position locally instead of
-            # querying KWin every tick (60/sec would be far too slow) --
-            # one query now for a starting baseline, then pure local
-            # accumulation of raw deltas on top of it, periodically
-            # re-synced against a fresh query to correct drift.
+            # set_positions / same_start both need a starting baseline
+            # position -- share the one query rather than doing it
+            # twice. set_positions then tracks it continuously via
+            # local accumulation (60/sec of actual KWin queries would
+            # be far too slow); same_start just emits it once, up
+            # front, and every tick after that stays a normal relative
+            # call.
             tracked_pos = None
             next_resync = 0.0
-            if self.raw_mouse and self.set_positions:
+            if self.raw_mouse and (self.set_positions or self.same_start):
                 baseline = md._get_cursor_pos_kde()
                 if baseline is not None:
-                    tracked_pos = [baseline[0], baseline[1]]
-                    next_resync = _time.monotonic() + self.RESYNC_INTERVAL
+                    if self.same_start:
+                        GLib.idle_add(
+                            self.on_line,
+                            f"move_mouse({baseline[0]}, {baseline[1]}, move_to=True, time_=0)\n",
+                        )
+                        # Doesn't count against the first real event's
+                        # gap -- this was our own setup, not something
+                        # you actually waited through.
+                        last_time = _time.monotonic()
+                    if self.set_positions:
+                        tracked_pos = [baseline[0], baseline[1]]
+                        next_resync = _time.monotonic() + self.RESYNC_INTERVAL
                 else:
                     GLib.idle_add(
                         self.on_line,
@@ -729,18 +779,57 @@ class MacroEditorWindow(Gtk.Window):
         self._transcribing = False
         self.ping_code = getattr(e, self.app_window.state.get("transcribe_ping_key") or "KEY_INSERT", e.KEY_INSERT)
 
+        # Transcription settings are app-wide (like the ping key already
+        # was), not per-macro -- they're a "how do I want to work right
+        # now" preference, not something that makes sense to vary per
+        # macro. Restored here every time this editor opens, saved back
+        # in on_save_clicked below.
+        transcribe_kb_default = self.app_window.state.get("transcribe_keyboard", False)
+        transcribe_mouse_default = self.app_window.state.get("transcribe_mouse", False)
+        transcribe_raw_default = self.app_window.state.get("transcribe_raw", False)
+        transcribe_setpos_default = self.app_window.state.get("transcribe_setpos", False)
+        transcribe_samestart_default = self.app_window.state.get("transcribe_samestart", False)
+        transcribe_hz_default = self.app_window.state.get("transcribe_raw_hz", 60)
+
         transcribe_check_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
         self.transcribe_kb_check = Gtk.CheckButton(label="Transcribe Keyboard")
+        self.transcribe_kb_check.set_active(transcribe_kb_default)
         transcribe_check_row.append(self.transcribe_kb_check)
         self.transcribe_mouse_check = Gtk.CheckButton(label="Transcribe Mouse")
+        self.transcribe_mouse_check.set_active(transcribe_mouse_default)
         transcribe_check_row.append(self.transcribe_mouse_check)
         self.transcribe_raw_check = Gtk.CheckButton(label="Raw Mouse Input")
-        self.transcribe_raw_check.set_sensitive(False)
+        self.transcribe_raw_check.set_sensitive(transcribe_mouse_default)
         transcribe_check_row.append(self.transcribe_raw_check)
-        self.transcribe_setpos_check = Gtk.CheckButton(label="Set Mouse Positions")
-        self.transcribe_setpos_check.set_sensitive(False)
-        transcribe_check_row.append(self.transcribe_setpos_check)
         root.append(transcribe_check_row)
+
+        # Set Mouse Positions and Same Starting Mouse Position are
+        # alternatives, not additive -- set_positions' own first tick
+        # already gives an exact starting position, so having both on
+        # would just make same_start's line entirely redundant.
+        raw_alt_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        self.transcribe_setpos_check = Gtk.CheckButton(label="Set Mouse Positions")
+        self.transcribe_setpos_check.set_sensitive(transcribe_mouse_default and transcribe_raw_default)
+        raw_alt_row.append(self.transcribe_setpos_check)
+        self.transcribe_samestart_check = Gtk.CheckButton(label="Same Starting Mouse Position")
+        self.transcribe_samestart_check.set_sensitive(transcribe_mouse_default and transcribe_raw_default)
+        raw_alt_row.append(self.transcribe_samestart_check)
+        root.append(raw_alt_row)
+
+        raw_freq_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        raw_freq_row.append(Gtk.Label(label="Raw sample rate (Hz)"))
+        self.raw_hz_spin = Gtk.SpinButton.new_with_range(1, 1000, 5)
+        self.raw_hz_spin.set_value(transcribe_hz_default)
+        self.raw_hz_spin.set_sensitive(transcribe_mouse_default and transcribe_raw_default)
+        raw_freq_row.append(self.raw_hz_spin)
+        root.append(raw_freq_row)
+
+        # Set these AFTER both spin/checkbox defaults are applied above,
+        # so restoring a saved raw=True state doesn't get immediately
+        # stomped by the checkboxes' own "off by default" toggled logic.
+        self.transcribe_raw_check.set_active(transcribe_raw_default)
+        self.transcribe_setpos_check.set_active(transcribe_setpos_default)
+        self.transcribe_samestart_check.set_active(transcribe_samestart_default and not transcribe_setpos_default)
 
         def _on_mouse_check_toggled(check_btn):
             self.transcribe_raw_check.set_sensitive(check_btn.get_active())
@@ -749,10 +838,24 @@ class MacroEditorWindow(Gtk.Window):
         self.transcribe_mouse_check.connect("toggled", _on_mouse_check_toggled)
 
         def _on_raw_check_toggled(check_btn):
-            self.transcribe_setpos_check.set_sensitive(check_btn.get_active())
-            if not check_btn.get_active():
+            active = check_btn.get_active()
+            self.transcribe_setpos_check.set_sensitive(active)
+            self.transcribe_samestart_check.set_sensitive(active)
+            self.raw_hz_spin.set_sensitive(active)
+            if not active:
                 self.transcribe_setpos_check.set_active(False)
+                self.transcribe_samestart_check.set_active(False)
         self.transcribe_raw_check.connect("toggled", _on_raw_check_toggled)
+
+        def _on_setpos_toggled(check_btn):
+            if check_btn.get_active():
+                self.transcribe_samestart_check.set_active(False)
+        self.transcribe_setpos_check.connect("toggled", _on_setpos_toggled)
+
+        def _on_samestart_toggled(check_btn):
+            if check_btn.get_active():
+                self.transcribe_setpos_check.set_active(False)
+        self.transcribe_samestart_check.connect("toggled", _on_samestart_toggled)
 
         ping_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         ping_row.append(Gtk.Label(label="Ping key"))
@@ -796,6 +899,34 @@ class MacroEditorWindow(Gtk.Window):
         scroller.set_child(self.code_view)
         code_frame.set_child(scroller)
         root.append(code_frame)
+
+        # Ignore toggles -- checking one wraps this macro's compiled
+        # code in a try/finally that calls ignore(target) on entry and
+        # ignore(target) again (toggling it back off) on exit. Same
+        # machinery as calling ignore() by hand (see the Function
+        # reference below), just automatic and guaranteed to restore
+        # correctly even if the macro raises partway through.
+        ignore_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        self.ignore_kb_check = Gtk.CheckButton(label="Ignore Keyboard Input (except Abort)")
+        self.ignore_kb_check.set_active(bool(self.macro.get("ignore_keyboard", False)))
+        ignore_row.append(self.ignore_kb_check)
+        self.ignore_mouse_btn_check = Gtk.CheckButton(label="Ignore Mouse Buttons")
+        self.ignore_mouse_btn_check.set_active(bool(self.macro.get("ignore_mouse_buttons", False)))
+        ignore_row.append(self.ignore_mouse_btn_check)
+        self.ignore_mouse_move_check = Gtk.CheckButton(label="Ignore Mouse Movement")
+        self.ignore_mouse_move_check.set_active(bool(self.macro.get("ignore_mouse_movement", False)))
+        ignore_row.append(self.ignore_mouse_move_check)
+        root.append(ignore_row)
+        ignore_hint = Gtk.Label(
+            xalign=0,
+            label="Actually grabs the real device while this macro runs, so your own "
+                  "input can't interfere with it -- a bigger deal than the other "
+                  "settings here. The abort hotkey always force-releases these if "
+                  "something gets stuck.",
+        )
+        ignore_hint.add_css_class("dim-label")
+        ignore_hint.set_wrap(True)
+        root.append(ignore_hint)
 
         # Dictionary
         expander = Gtk.Expander(label="Function reference")
@@ -952,6 +1083,8 @@ class MacroEditorWindow(Gtk.Window):
             transcribe_mouse=transcribe_mouse,
             raw_mouse=self.transcribe_raw_check.get_active(),
             set_positions=self.transcribe_setpos_check.get_active(),
+            same_start=self.transcribe_samestart_check.get_active(),
+            raw_hz=self.raw_hz_spin.get_value(),
             ping_code=self.ping_code,
             on_line=self._on_transcribe_line,
             on_done=self._on_transcribe_done,
@@ -959,7 +1092,15 @@ class MacroEditorWindow(Gtk.Window):
         self._transcriber.start()
 
     def _on_transcribe_line(self, text):
-        self.code_view.get_buffer().insert_at_cursor(text)
+        buf = self.code_view.get_buffer()
+        buf.insert_at_cursor(text)
+        # Rapid successive programmatic inserts (raw mode can fire this
+        # up to raw_hz times a second) seem to occasionally outrun
+        # GTK's own change-driven repaint -- explicitly forcing a
+        # redraw and keeping the cursor's line in view avoids stale/
+        # ghosted text lingering in the view during a transcribe run.
+        self.code_view.queue_draw()
+        self.code_view.scroll_mark_onscreen(buf.get_insert())
         return False
 
     def _on_transcribe_done(self, status):
@@ -1002,6 +1143,9 @@ class MacroEditorWindow(Gtk.Window):
         self.macro["repeat_mode"] = REPEAT_MODES[self.repeat_dropdown.get_selected()]
         self.macro["code"] = code_text
         self.macro["simplified_names"] = self.simplified_check.get_active()
+        self.macro["ignore_keyboard"] = self.ignore_kb_check.get_active()
+        self.macro["ignore_mouse_buttons"] = self.ignore_mouse_btn_check.get_active()
+        self.macro["ignore_mouse_movement"] = self.ignore_mouse_move_check.get_active()
 
         # Validate: this only compiles the body into a function, it never
         # executes it, so it's safe to run without /dev/uinput access.
@@ -1021,6 +1165,20 @@ class MacroEditorWindow(Gtk.Window):
             if 0 <= idx < len(self._alias_target_names):
                 aliases[custom_name] = self._alias_target_names[idx]
         md.save_aliases({"aliases": aliases})
+
+        # Transcription settings are app-wide too (see the comment where
+        # they're loaded, above) -- persisted here so they're restored
+        # next time any macro editor opens, not just this one.
+        self.app_window.state["transcribe_keyboard"] = self.transcribe_kb_check.get_active()
+        self.app_window.state["transcribe_mouse"] = self.transcribe_mouse_check.get_active()
+        self.app_window.state["transcribe_raw"] = self.transcribe_raw_check.get_active()
+        self.app_window.state["transcribe_setpos"] = self.transcribe_setpos_check.get_active()
+        self.app_window.state["transcribe_samestart"] = self.transcribe_samestart_check.get_active()
+        self.app_window.state["transcribe_raw_hz"] = self.raw_hz_spin.get_value()
+        try:
+            md.save_state(self.app_window.state)
+        except Exception as exc:
+            self.error_label.set_text(f"Macro saved, but transcription settings weren't: {exc}")
 
         self.on_saved(self.macro, self.is_new)
         self.close()
@@ -1266,6 +1424,32 @@ class MainWindow(Gtk.ApplicationWindow):
 
         self._update_device_display("keyboard")
         self._update_device_display("mouse")
+
+        # Panic-button hotkey -- daemon-wide, not per-macro, so it
+        # lives here rather than in the macro editor. Takes effect on
+        # next daemon restart (Save button below, or a manual
+        # `systemctl --user restart macro-daemon`) since it's only
+        # read once at daemon startup. Follows the same "only persists
+        # on Save" pattern as the keyboard/mouse device rows above --
+        # self.abort_key_name is the pending value, only written into
+        # self.state (and disk) from on_save_clicked.
+        self.abort_key_name = self.state.get("abort_key") or "KEY_PAUSE"
+        abort_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        abort_row.append(Gtk.Label(label="Abort key"))
+        self.abort_key_label = Gtk.Label(label=self.abort_key_name, xalign=0, hexpand=True)
+        self.abort_key_label.add_css_class("monospace")
+        abort_row.append(self.abort_key_label)
+        abort_change_btn = Gtk.Button(label="Change")
+        abort_change_btn.connect("clicked", self.on_abort_key_change_clicked)
+        abort_row.append(abort_change_btn)
+        root.append(abort_row)
+        abort_hint = Gtk.Label(
+            xalign=0,
+            label="Instantly stops every running macro and releases any stuck keys/"
+                  "clicks. Takes effect after the next Save/restart.",
+        )
+        abort_hint.add_css_class("dim-label")
+        root.append(abort_hint)
 
         root.append(Gtk.Separator())
 
@@ -1654,6 +1838,25 @@ class MainWindow(Gtk.ApplicationWindow):
 
         detect_device(kind, done)
 
+    def on_abort_key_change_clicked(self, btn):
+        btn.set_sensitive(False)
+        btn.set_label("Listening…")
+        self.status_label.set_text("Press the key you want as the abort/panic hotkey…")
+
+        def done(code, name):
+            btn.set_sensitive(True)
+            btn.set_label("Change")
+            if code is not None:
+                self.abort_key_name = name
+                self.abort_key_label.set_text(name)
+                self.dirty = True
+                self.status_label.set_text(f"Abort key set to {name} -- takes effect after Save.")
+            else:
+                self.status_label.set_text("No key detected in 10s -- kept the previous abort key.")
+            return False
+
+        detect_ping_key(self.keyboard_path, self.mouse_path, on_found=done)
+
     # -- save -------------------------------------------------
 
     def on_save_clicked(self, _btn):
@@ -1662,6 +1865,7 @@ class MainWindow(Gtk.ApplicationWindow):
         self.state["keyboard_name"] = self.keyboard_name
         self.state["mouse_path"] = self.mouse_path
         self.state["mouse_name"] = self.mouse_name
+        self.state["abort_key"] = self.abort_key_name
 
         try:
             md.save_macros(self.macros_data)
