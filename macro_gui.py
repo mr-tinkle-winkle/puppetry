@@ -21,7 +21,7 @@ from pathlib import Path
 
 import gi
 gi.require_version("Gtk", "4.0")
-from gi.repository import Gtk, GLib, Gio
+from gi.repository import Gtk, GLib, Gio, Gdk
 
 sys.path.insert(0, str(Path(__file__).parent))
 import macro_daemon as md
@@ -29,6 +29,67 @@ from evdev import InputDevice, list_devices, ecodes as e
 
 REPEAT_MODES = ["none", "hold", "toggle"]
 REPEAT_MODE_LABELS = ["No Repeat", "Hold", "Toggle"]
+
+# ---------------------------------------------------------------------------
+# App-wide text/UI zoom. One shared CssProvider registered against the
+# display (so it covers every window, present and future) rather than
+# per-window -- the +/- buttons next to Save in both MainWindow and
+# MacroEditorWindow drive this same shared state. In-memory only
+# (resets to default on relaunch) -- not persisted, matching how this
+# was asked for as a quick display adjustment, not a saved preference.
+# ---------------------------------------------------------------------------
+
+_ZOOM_MIN_PT = 6
+_ZOOM_MAX_PT = 24
+_ZOOM_STEP_PT = 1
+_zoom_pt = 10  # a reasonable baseline; exact default doesn't need to match
+                # the theme's real default since the first +/- click
+                # already re-bases everything visibly from here anyway
+_zoom_provider = Gtk.CssProvider()
+_zoom_registered = False
+
+
+def _apply_zoom():
+    _zoom_provider.load_from_string(f"* {{ font-size: {_zoom_pt}pt; }}")
+
+
+def _ensure_zoom_registered():
+    global _zoom_registered
+    if _zoom_registered:
+        return
+    display = Gdk.Display.get_default()
+    Gtk.StyleContext.add_provider_for_display(
+        display, _zoom_provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+    _apply_zoom()
+    _zoom_registered = True
+
+
+def zoom_in(_btn=None):
+    global _zoom_pt
+    _zoom_pt = min(_ZOOM_MAX_PT, _zoom_pt + _ZOOM_STEP_PT)
+    _apply_zoom()
+
+
+def zoom_out(_btn=None):
+    global _zoom_pt
+    _zoom_pt = max(_ZOOM_MIN_PT, _zoom_pt - _ZOOM_STEP_PT)
+    _apply_zoom()
+
+
+def _make_zoom_buttons():
+    """A small +/- box, for placing next to a Save row. Every caller
+    gets its own button instances (GTK widgets can't be shared across
+    parents) but they all drive the one shared zoom state above."""
+    box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+    minus_btn = Gtk.Button(label="-")
+    minus_btn.set_tooltip_text("Smaller text/UI")
+    minus_btn.connect("clicked", zoom_out)
+    box.append(minus_btn)
+    plus_btn = Gtk.Button(label="+")
+    plus_btn.set_tooltip_text("Larger text/UI")
+    plus_btn.connect("clicked", zoom_in)
+    box.append(plus_btn)
+    return box
 
 DICTIONARY_TEXT = (
     "tap(key, time_=0.1)\n"
@@ -709,9 +770,12 @@ class MousePositionPoller:
 class MacroEditorWindow(Gtk.Window):
     def __init__(self, app_window, macro, is_new, on_saved):
         super().__init__(title=f"Edit Macro — {macro.get('name', '')}")
+        # See MainWindow's identical call for why this is needed
+        # separately per-window rather than inherited from the app.
+        self.set_icon_name("puppetry")
         self.set_transient_for(app_window)
         self.set_modal(True)
-        self.set_default_size(560, 640)
+        self.set_default_size(1120, 1280)
 
         self.app_window = app_window
         self.macro = dict(macro)  # working copy
@@ -720,11 +784,58 @@ class MacroEditorWindow(Gtk.Window):
         self._recorder = None
         self._recording = False
 
-        root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8,
-                        margin_top=12, margin_bottom=12, margin_start=12, margin_end=12)
-        outer_scroller = Gtk.ScrolledWindow(vexpand=True, hscrollbar_policy=Gtk.PolicyType.NEVER)
-        outer_scroller.set_child(root)
-        self.set_child(outer_scroller)
+        outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8,
+                         margin_top=12, margin_bottom=8, margin_start=12, margin_end=12)
+        self.set_child(outer)
+
+        # Top toolbar -- stays visible regardless of scroll position in
+        # either pane below, since Save/Close and zoom are the kind of
+        # controls you want reachable at all times, not buried in a
+        # scrollable column.
+        toolbar_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        save_btn = Gtk.Button(label="Save")
+        save_btn.add_css_class("suggested-action")
+        save_btn.connect("clicked", self.on_save_clicked)
+        toolbar_row.append(save_btn)
+        save_close_btn = Gtk.Button(label="Save and Close")
+        save_close_btn.connect("clicked", self.on_save_and_close_clicked)
+        toolbar_row.append(save_close_btn)
+        close_btn = Gtk.Button(label="Close")
+        close_btn.connect("clicked", lambda *_: self.close())
+        toolbar_row.append(close_btn)
+        toolbar_row.append(_make_zoom_buttons())
+        outer.append(toolbar_row)
+
+        # Error banner (hidden until needed) -- also full-width, above
+        # the pane split, so it's visible no matter which side of the
+        # editor you're looking at when a save fails.
+        self.error_label = Gtk.Label(label="", xalign=0, wrap=True)
+        self.error_label.add_css_class("error")
+        outer.append(self.error_label)
+
+        paned = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL, vexpand=True)
+        paned.set_resize_start_child(True)
+        paned.set_resize_end_child(True)
+        paned.set_shrink_start_child(False)
+        paned.set_shrink_end_child(False)
+        outer.append(paned)
+
+        left_content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8,
+                                margin_top=4, margin_bottom=4, margin_start=4, margin_end=8)
+        left_scroller = Gtk.ScrolledWindow(vexpand=True, hexpand=True,
+                                            hscrollbar_policy=Gtk.PolicyType.NEVER)
+        left_scroller.set_child(left_content)
+        paned.set_start_child(left_scroller)
+
+        right_content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8,
+                                 margin_top=4, margin_bottom=4, margin_start=8, margin_end=4,
+                                 hexpand=True, vexpand=True)
+        paned.set_end_child(right_content)
+        paned.set_position(540)  # roughly half of the 1120 default width; draggable either way
+
+        root = left_content  # everything below is unchanged from before except
+        # this redirect and the "Code" section further down switching
+        # to right_content -- see that comment for why.
 
         # Name
         root.append(Gtk.Label(label="Name", xalign=0))
@@ -772,7 +883,7 @@ class MacroEditorWindow(Gtk.Window):
 
         # Transcribe Inputs -- records real key/click/movement events
         # as macro code, inserted live at the cursor position in the
-        # code box below.
+        # code box (now over in right_content -- see below).
         root.append(Gtk.Label(label="Transcribe Inputs", xalign=0))
 
         self._transcriber = None
@@ -878,28 +989,6 @@ class MacroEditorWindow(Gtk.Window):
 
         self.connect("destroy", lambda *_: self._transcriber and self._transcriber.stop())
 
-        # Code
-        code_header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
-        code_header.append(Gtk.Label(label="Macro code", xalign=0))
-        self.simplified_check = Gtk.CheckButton(label="Simplified Variable Names")
-        self.simplified_check.set_active(bool(self.macro.get("simplified_names", False)))
-        code_header.append(self.simplified_check)
-        root.append(code_header)
-
-        code_frame = Gtk.Frame()
-        scroller = Gtk.ScrolledWindow(vexpand=True)
-        self.code_view = Gtk.TextView()
-        self.code_view.set_monospace(True)
-        self.code_view.add_css_class("view")
-        self.code_view.set_top_margin(6)
-        self.code_view.set_bottom_margin(6)
-        self.code_view.set_left_margin(6)
-        self.code_view.set_right_margin(6)
-        self.code_view.get_buffer().set_text(self.macro.get("code", ""))
-        scroller.set_child(self.code_view)
-        code_frame.set_child(scroller)
-        root.append(code_frame)
-
         # Ignore toggles -- checking one wraps this macro's compiled
         # code in a try/finally that calls ignore(target) on entry and
         # ignore(target) again (toggling it back off) on exit. Same
@@ -935,7 +1024,8 @@ class MacroEditorWindow(Gtk.Window):
         root.append(expander)
 
         # Simplified-name reference (only really relevant with the
-        # checkbox above on, but harmless to always show)
+        # checkbox in the code header on the right, but harmless to
+        # always show)
         simplified_expander = Gtk.Expander(label="Simplified name reference")
         simplified_label = Gtk.Label(label=_simplified_names_reference_text(), xalign=0, wrap=True)
         simplified_label.add_css_class("monospace")
@@ -962,21 +1052,30 @@ class MacroEditorWindow(Gtk.Window):
         else:
             self._add_alias_row()
 
-        # Error banner (hidden until needed)
-        self.error_label = Gtk.Label(label="", xalign=0, wrap=True)
-        self.error_label.add_css_class("error")
-        root.append(self.error_label)
+        # Code -- the entire right-hand pane, per the deliberate split
+        # above: this is what you're looking at 90% of the time while
+        # working on a macro, so it gets the dedicated real estate
+        # rather than competing for scroll space with everything else.
+        code_header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        code_header.append(Gtk.Label(label="Macro code", xalign=0))
+        self.simplified_check = Gtk.CheckButton(label="Simplified Variable Names")
+        self.simplified_check.set_active(bool(self.macro.get("simplified_names", False)))
+        code_header.append(self.simplified_check)
+        right_content.append(code_header)
 
-        # Buttons
-        btn_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8, halign=Gtk.Align.END)
-        cancel_btn = Gtk.Button(label="Cancel")
-        cancel_btn.connect("clicked", lambda *_: self.close())
-        save_btn = Gtk.Button(label="Save")
-        save_btn.add_css_class("suggested-action")
-        save_btn.connect("clicked", self.on_save_clicked)
-        btn_row.append(cancel_btn)
-        btn_row.append(save_btn)
-        root.append(btn_row)
+        code_frame = Gtk.Frame()
+        scroller = Gtk.ScrolledWindow(vexpand=True)
+        self.code_view = Gtk.TextView()
+        self.code_view.set_monospace(True)
+        self.code_view.add_css_class("view")
+        self.code_view.set_top_margin(6)
+        self.code_view.set_bottom_margin(6)
+        self.code_view.set_left_margin(6)
+        self.code_view.set_right_margin(6)
+        self.code_view.get_buffer().set_text(self.macro.get("code", ""))
+        scroller.set_child(self.code_view)
+        code_frame.set_child(scroller)
+        right_content.append(code_frame)
 
     def _combo_display(self, combo_names):
         if not combo_names:
@@ -1134,7 +1233,12 @@ class MacroEditorWindow(Gtk.Window):
         self.aliases_box.append(row)
         self._alias_rows.append((name_entry, dropdown, row))
 
-    def on_save_clicked(self, _btn):
+    def _do_save(self):
+        """Does the actual save work; returns True on success, False
+        if validation failed (error_label is already set either way).
+        Shared by on_save_clicked and on_save_and_close_clicked -- the
+        only difference between them is whether this gets followed by
+        self.close()."""
         buf = self.code_view.get_buffer()
         code_text = buf.get_text(buf.get_start_iter(), buf.get_end_iter(), True)
 
@@ -1153,7 +1257,7 @@ class MacroEditorWindow(Gtk.Window):
             md.compile_macro(self.macro)
         except Exception as exc:
             self.error_label.set_text(f"Code error, not saved: {exc}")
-            return
+            return False
 
         # Custom button names are app-wide, saved alongside this macro.
         aliases = {}
@@ -1181,7 +1285,17 @@ class MacroEditorWindow(Gtk.Window):
             self.error_label.set_text(f"Macro saved, but transcription settings weren't: {exc}")
 
         self.on_saved(self.macro, self.is_new)
-        self.close()
+        self.is_new = False  # a second Save (without closing) is now an edit, not a fresh create
+        self.set_title(f"Edit Macro — {self.macro.get('name', '')}")
+        self.error_label.set_text("")
+        return True
+
+    def on_save_clicked(self, _btn):
+        self._do_save()  # stays open either way, per the Save/Close split above
+
+    def on_save_and_close_clicked(self, _btn):
+        if self._do_save():
+            self.close()
 
 
 # ---------------------------------------------------------------------------
@@ -1318,6 +1432,7 @@ class ProfileRow(Gtk.Box):
 class MainWindow(Gtk.ApplicationWindow):
     def __init__(self, app, testing=False):
         super().__init__(application=app, title="Puppetry")
+        _ensure_zoom_registered()
         # The application_id (see MacroApp below) handles taskbar/
         # launcher/alt-tab icon resolution via the .desktop file, but
         # NOT the titlebar/CSD corner icon -- GTK draws that itself
@@ -1328,7 +1443,11 @@ class MainWindow(Gtk.ApplicationWindow):
         # variants like set_icon()/set_icon_from_file() were removed;
         # this name-based one wasn't).
         self.set_icon_name("puppetry")
+        # set_default_size is still worth keeping as a fallback for
+        # window managers that don't honor maximize() for whatever
+        # reason -- maximize() itself is a request, not a guarantee.
         self.set_default_size(760, 720 if testing else 640)
+        self.maximize()
         self.testing = testing
 
         md.ensure_config_exists()
@@ -1353,6 +1472,7 @@ class MainWindow(Gtk.ApplicationWindow):
         save_btn.add_css_class("suggested-action")
         save_btn.connect("clicked", self.on_save_clicked)
         profile_row.append(save_btn)
+        profile_row.append(_make_zoom_buttons())
 
         # Persisted in state.json so this survives reopening the app --
         # previously reset to off every launch.

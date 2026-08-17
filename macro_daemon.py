@@ -474,6 +474,42 @@ _grab_state = {"keyboard": False, "mouse": False}
 _watched_devices = {}  # "keyboard"/"mouse" -> InputDevice, set by watch_device()
 
 
+def _release_held_from(kind):
+    """After grabbing a real device, any key/button that was already
+    physically down at that instant would otherwise stay stuck-down
+    forever from the focused app's perspective -- it never gets an
+    "up" event once the real device disappears out from under it (the
+    grab happened mid-hold). Compensates by sending a synthetic
+    release for exactly those codes through OUR virtual device, which
+    every app sees as perfectly ordinary input, indistinguishable from
+    a real key-up.
+
+    kind: "keyboard" releases everything in `held` that ISN'T a mouse
+    button code; "mouse" releases everything that IS one. Also drops
+    those codes from `held` itself, since we've now told the rest of
+    the system they're up regardless of whether they're still
+    physically pressed.
+    """
+    with _lock:
+        if kind == "keyboard":
+            stuck = [c for c in held if c not in _BUTTON_CODE_SET]
+        else:
+            stuck = [c for c in held if c in _BUTTON_CODE_SET]
+        for code in stuck:
+            held.discard(code)
+
+    if not stuck:
+        return
+    out_dev = ui_keyboard if kind == "keyboard" else ui_mouse
+    for code in stuck:
+        try:
+            out_dev.write(e.EV_KEY, code, 0)
+            out_dev.syn()
+        except Exception:
+            pass
+    print(f"Released {len(stuck)} stuck {kind} code(s) held at grab time")
+
+
 def _apply_grab_state():
     """Grabs/ungrabs the real keyboard/mouse device to match the
     current ignore flags. Best-effort throughout: a device that isn't
@@ -492,6 +528,7 @@ def _apply_grab_state():
                     kb_dev.grab()
                     _grab_state["keyboard"] = True
                     print("Keyboard grabbed (ignore active)")
+                    _release_held_from("keyboard")
                 elif not kb_needed and _grab_state["keyboard"]:
                     kb_dev.ungrab()
                     _grab_state["keyboard"] = False
@@ -506,6 +543,7 @@ def _apply_grab_state():
                     mouse_dev.grab()
                     _grab_state["mouse"] = True
                     print("Mouse grabbed (ignore active)")
+                    _release_held_from("mouse")
                 elif not mouse_needed and _grab_state["mouse"]:
                     mouse_dev.ungrab()
                     _grab_state["mouse"] = False
