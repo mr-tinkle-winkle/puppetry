@@ -169,7 +169,7 @@ def _blank_macro():
         "repeat_mode": "none",
         "combo": [],
         "code": "",
-        "simplified_names": False,
+        "simplified_names": True,
         "ignore_keyboard": False,
         "ignore_mouse_buttons": False,
         "ignore_mouse_movement": False,
@@ -775,7 +775,7 @@ class MacroEditorWindow(Gtk.Window):
         self.set_icon_name("puppetry")
         self.set_transient_for(app_window)
         self.set_modal(True)
-        self.set_default_size(1120, 1280)
+        self.set_default_size(1600, 1280)
 
         self.app_window = app_window
         self.macro = dict(macro)  # working copy
@@ -814,7 +814,12 @@ class MacroEditorWindow(Gtk.Window):
         outer.append(self.error_label)
 
         paned = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL, vexpand=True)
-        paned.set_resize_start_child(True)
+        # Standard "fixed sidebar, growing main content" idiom -- the
+        # left/settings side stays put on window resize, the code side
+        # absorbs any extra/removed space. Both being resize=True (the
+        # previous setting) is a known-rough edge in GTK's Paned that
+        # can make manual dragging feel unresponsive/clamped.
+        paned.set_resize_start_child(False)
         paned.set_resize_end_child(True)
         paned.set_shrink_start_child(False)
         paned.set_shrink_end_child(False)
@@ -831,7 +836,10 @@ class MacroEditorWindow(Gtk.Window):
                                  margin_top=4, margin_bottom=4, margin_start=8, margin_end=4,
                                  hexpand=True, vexpand=True)
         paned.set_end_child(right_content)
-        paned.set_position(540)  # roughly half of the 1120 default width; draggable either way
+        # Code side gets roughly 2x the settings side by default (settings
+        # ~400px of the 1600px total, code gets the rest) -- still fully
+        # draggable either direction from here.
+        paned.set_position(400)
 
         root = left_content  # everything below is unchanged from before except
         # this redirect and the "Code" section further down switching
@@ -902,7 +910,7 @@ class MacroEditorWindow(Gtk.Window):
         transcribe_samestart_default = self.app_window.state.get("transcribe_samestart", False)
         transcribe_hz_default = self.app_window.state.get("transcribe_raw_hz", 60)
 
-        transcribe_check_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        transcribe_check_row = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
         self.transcribe_kb_check = Gtk.CheckButton(label="Transcribe Keyboard")
         self.transcribe_kb_check.set_active(transcribe_kb_default)
         transcribe_check_row.append(self.transcribe_kb_check)
@@ -918,7 +926,7 @@ class MacroEditorWindow(Gtk.Window):
         # alternatives, not additive -- set_positions' own first tick
         # already gives an exact starting position, so having both on
         # would just make same_start's line entirely redundant.
-        raw_alt_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        raw_alt_row = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
         self.transcribe_setpos_check = Gtk.CheckButton(label="Set Mouse Positions")
         self.transcribe_setpos_check.set_sensitive(transcribe_mouse_default and transcribe_raw_default)
         raw_alt_row.append(self.transcribe_setpos_check)
@@ -995,7 +1003,7 @@ class MacroEditorWindow(Gtk.Window):
         # machinery as calling ignore() by hand (see the Function
         # reference below), just automatic and guaranteed to restore
         # correctly even if the macro raises partway through.
-        ignore_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        ignore_row = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
         self.ignore_kb_check = Gtk.CheckButton(label="Ignore Keyboard Input (except Abort)")
         self.ignore_kb_check.set_active(bool(self.macro.get("ignore_keyboard", False)))
         ignore_row.append(self.ignore_kb_check)
