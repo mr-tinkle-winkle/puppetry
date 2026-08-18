@@ -1282,12 +1282,43 @@ async def watch_device(path, kind):
     async for ev in dev.async_read_loop():
         if ev.type == e.EV_KEY:
             _handle_key_event(ev.code, ev.value)
-            if kind == "mouse" and _grab_state.get("mouse") and not _ignore_flags["mouse_buttons"]:
+
+            if kind == "keyboard" and _grab_state.get("keyboard") and ev.value == 0:
+                # Keyboard ignore is all-or-nothing (no "keyboard_buttons"
+                # split like mouse has), so while grabbed every real
+                # key-down stays blocked -- but a real key-up is always
+                # let through regardless. This is what actually fixes a
+                # key that was already held when the grab kicked in: the
+                # one-shot synthetic release in _release_held_from() is a
+                # best-effort snapshot taken at that single instant, but
+                # THIS is what reflects the user's actual finger leaving
+                # the key, whenever that really happens. Forwarding it
+                # through the real device also sidesteps any chance of a
+                # synthetic up on a different (virtual) device path not
+                # being treated as equivalent by the compositor.
                 try:
-                    ui_mouse.write(e.EV_KEY, ev.code, ev.value)
-                    ui_mouse.syn()
+                    ui_keyboard.write(e.EV_KEY, ev.code, 0)
+                    ui_keyboard.syn()
                 except Exception:
                     pass
+
+            elif kind == "mouse" and _grab_state.get("mouse"):
+                if not _ignore_flags["mouse_buttons"]:
+                    try:
+                        ui_mouse.write(e.EV_KEY, ev.code, ev.value)
+                        ui_mouse.syn()
+                    except Exception:
+                        pass
+                elif ev.value == 0:
+                    # Same reasoning as the keyboard case above: buttons
+                    # are fully blocked while mouse_buttons is ignored,
+                    # but a real release should never be swallowed.
+                    try:
+                        ui_mouse.write(e.EV_KEY, ev.code, 0)
+                        ui_mouse.syn()
+                    except Exception:
+                        pass
+
         elif ev.type == e.EV_REL and kind == "mouse" and _grab_state.get("mouse") \
                 and not _ignore_flags["mouse_movement"]:
             try:
