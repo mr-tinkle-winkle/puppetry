@@ -74,9 +74,12 @@ toggle: first full-combo press starts the same kind of loop; a second
         current iteration, don't start another.
 """
 
+import ast
 import asyncio
 import json
+import os
 import re
+import socket
 import subprocess
 import sys
 import textwrap
@@ -96,6 +99,13 @@ STATE_FILE = CONFIG_DIR / "state.json"
 MACROS_FILE = CONFIG_DIR / "macros.json"
 ALIASES_FILE = CONFIG_DIR / "aliases.json"
 PROFILES_DIR = CONFIG_DIR / "profiles"
+
+# Unix domain socket the running daemon listens on for `puppetry
+# --name=...`/`--abort` (see send_control_command() and
+# _control_server() below) and for the GUI's own PAUSE/RESUME calls
+# while recording a new combo. Only exists while the daemon is
+# actually running -- send_control_command() checks for that.
+CONTROL_SOCKET = CONFIG_DIR / "control.sock"
 
 DEFAULT_PROFILE_NAMES = ["Profile 1", "Profile 2", "Profile 3"]
 
@@ -672,6 +682,22 @@ def tap(key, time_=0.1):
     ku(key)
 
 
+def combo(*keys, time_=0.1):
+    """Like tap(), but for an arbitrary number of keys/buttons held
+    together as one chord, e.g. combo(KEY_LEFTCTRL, KEY_LEFTSHIFT, KEY_S).
+    Presses all of them down (in the order given), waits `time_`
+    seconds, then releases all of them (in reverse order). `time_` is
+    keyword-only in practice -- always pass it as time_=... -- since
+    the positional args are however many keys you list, and there's no
+    reliable way to tell a bare number apart from a raw key code
+    (both are just ints). Scaled by speed(), like tap()'s hold time."""
+    for k in keys:
+        kd(k)
+    wait(time_)
+    for k in reversed(keys):
+        ku(k)
+
+
 def _move_rel_step(dx, dy):
     if dx:
         ui_mouse.write(e.EV_REL, e.REL_X, dx)
@@ -828,6 +854,25 @@ def move_mouse(x_pixels, y_pixels, time_=0.25, easing="inout", async_=False, mov
         _do_move()
 
 
+def command(cmd):
+    """Runs a shell command completely detached from the daemon --
+    fire-and-forget, same idea as `nohup ... &`: doesn't block the
+    macro, doesn't wait for it to finish or check its exit code, and
+    keeps running even if the daemon restarts or this macro's own
+    thread ends. Runs through $SHELL (falling back to /bin/sh), so
+    normal shell syntax works (pipes, &&, ~ expansion, etc.) -- same
+    trust model as everything else in a macro: this runs as you, with
+    your own permissions."""
+    shell = os.environ.get("SHELL", "/bin/sh")
+    subprocess.Popen(
+        [shell, "-c", cmd],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+
+
 def wheel(amount):
     ui_mouse.write(e.EV_REL, e.REL_WHEEL, amount)
     ui_mouse.syn()
@@ -930,12 +975,14 @@ PRIMITIVES_NAMESPACE = {
     "kd": kd,
     "ku": ku,
     "tap": tap,
+    "combo": combo,
     "type": type_text,
     "move_mouse": move_mouse,
     "wheel": wheel,
     "wait": wait,
     "speed": speed,
     "ignore": ignore,
+    "command": command,
     "time": time,
     **_KEY_CONSTANTS,
 }
@@ -1013,20 +1060,98 @@ def sanitize_macro_name(name):
     return ident
 
 
+class MacroCompileError(Exception):
+    """Raised for problems in a macro's source that are specific to
+    Puppetry's own conventions (arguments(...) misuse) rather than
+    plain Python syntax errors -- callers handle it the same way as
+    any other compile_macro() exception (skip the macro, or show the
+    message in the editor's save error label)."""
+
+
+_ARGUMENTS_LINE_RE = re.compile(r"^\s*arguments\s*\((.*)\)\s*$")
+_ARGUMENTS_CALL_RE = re.compile(r"(?<![\w.])arguments\s*\(")
+
+
+def _extract_arguments_signature(body):
+    """Looks for an arguments(...) declaration as the first non-blank
+    line of `body` -- the ONLY place it's allowed. If found, validates
+    it and returns (body_with_that_line_removed, param_source), where
+    param_source is the raw parameter-list text to splice straight
+    into the generated `def _macro(...):` signature (e.g.
+    "hits=3, key=KEY_A"). If not found, returns (body, None) meaning
+    "use the old *_args, **_kwargs catch-all signature" -- fully
+    backward compatible with macros that don't declare arguments.
+
+    Every declared parameter MUST have a default value: a macro can
+    always be triggered with zero arguments (a hotkey combo, or
+    `puppetry --name=...`), so there has to be something to fall back
+    to. Raises MacroCompileError if any parameter lacks one, if
+    arguments(...) uses *args/**kwargs/keyword-only markers (not
+    supported), if its syntax is invalid, or if it shows up anywhere
+    other than that first line (where it would silently do nothing --
+    rejected outright instead of failing confusingly at run time).
+    """
+    lines = body.split("\n")
+    first_idx = next((i for i, ln in enumerate(lines) if ln.strip()), None)
+
+    param_source = None
+    if first_idx is not None:
+        m = _ARGUMENTS_LINE_RE.match(lines[first_idx])
+        if m:
+            param_source = m.group(1).strip()
+            try:
+                tree = ast.parse(f"def _f({param_source}): pass")
+            except SyntaxError as exc:
+                raise MacroCompileError(f"arguments(...) has invalid syntax: {exc}")
+            fn_args = tree.body[0].args
+            if fn_args.vararg or fn_args.kwarg or fn_args.kwonlyargs or fn_args.posonlyargs:
+                raise MacroCompileError(
+                    "arguments(...) only supports plain name=default parameters "
+                    "-- no *args, **kwargs, or keyword-only markers"
+                )
+            if len(fn_args.defaults) != len(fn_args.args):
+                raise MacroCompileError(
+                    "Every parameter in arguments(...) needs a default value "
+                    "(e.g. arguments(hits=3, key=KEY_A)) -- a macro can always "
+                    "be triggered with no arguments at all (hotkey combo, "
+                    "puppetry --name=...), so there has to be a fallback value."
+                )
+            del lines[first_idx]
+
+    remaining = "\n".join(lines)
+    if _ARGUMENTS_CALL_RE.search(remaining):
+        raise MacroCompileError(
+            "arguments(...) is only allowed on the very first line of a macro"
+        )
+    return remaining, param_source
+
+
 def compile_macro(macro_def, macro_refs=None):
     """
     Wraps the raw body text stored in macro_def["code"] into a real
-    function and returns it as a zero-arg callable. Raises SyntaxError
-    (or whatever the body itself raises at compile time) if the code is
-    invalid -- the caller decides whether to skip that macro or abort.
+    function and returns it as a callable. Raises SyntaxError (or
+    whatever the body itself raises at compile time), or
+    MacroCompileError for an invalid arguments(...) declaration -- the
+    caller decides whether to skip that macro or abort.
+
+    ARGUMENTS
+    ---------
+    A macro's code may optionally start (first line only) with:
+        arguments(name1=default1, name2=default2, ...)
+    which declares real parameters, each renameable and each requiring
+    a default value (see _extract_arguments_signature() above for why).
+    Those names are then usable anywhere in the rest of the macro's
+    code. A macro with no such line keeps the old zero-effective-arg
+    behavior (extra positional/keyword args passed to it are silently
+    accepted and ignored).
 
     macro_refs: optional {sanitized_name: callable} for every OTHER
     macro, letting this macro's code call them by name directly (e.g.
-    "Flick and Click" becomes callable as Flick_and_Click()). These are
-    currently zero-argument calls -- any args you pass are accepted
-    but ignored, since macros don't have declared parameters yet.
-    Nothing stops two macros from calling each other and recursing
-    forever -- that's on you to avoid, it isn't detected here.
+    "Flick and Click" becomes callable as Flick_and_Click()) --
+    including passing arguments if the target declares any, e.g.
+    Flick_and_Click(hits=5). Nothing stops two macros from calling
+    each other and recursing forever -- that's on you to avoid, it
+    isn't detected here.
 
     macro_def["ignore_keyboard"/"ignore_mouse_buttons"/"ignore_mouse_movement"]:
     the editor's "Ignore ..." checkboxes. When set, this wraps the
@@ -1038,6 +1163,8 @@ def compile_macro(macro_def, macro_refs=None):
     net on top of that -- see ignore()'s own docstring.)
     """
     body = macro_def.get("code", "") or "pass"
+    body, param_source = _extract_arguments_signature(body)
+    sig = param_source if param_source is not None else "*_args, **_kwargs"
 
     ignore_targets = [target for target, key in (
         ("keyboard", "ignore_keyboard"),
@@ -1050,7 +1177,7 @@ def compile_macro(macro_def, macro_refs=None):
         off_block = "\n".join(f"        ignore({target!r})" for target in ignore_targets)
         body_indented = textwrap.indent(body, "        ")
         src = (
-            f"def _macro(*_args, **_kwargs):\n"
+            f"def _macro({sig}):\n"
             f"{on_block}\n"
             f"    try:\n"
             f"{body_indented}\n"
@@ -1059,7 +1186,7 @@ def compile_macro(macro_def, macro_refs=None):
         )
     else:
         body_indented = textwrap.indent(body, "    ")
-        src = f"def _macro(*_args, **_kwargs):\n{body_indented}\n"
+        src = f"def _macro({sig}):\n{body_indented}\n"
 
     namespace = dict(PRIMITIVES_NAMESPACE)
     if macro_def.get("simplified_names"):
@@ -1212,6 +1339,13 @@ _lock = threading.Lock()
 MACROS = []  # populated at startup from the active profile
 ABORT_CODE = e.KEY_PAUSE  # overwritten from state.json's "abort_key" in main()
 
+# Set while the GUI is actively recording a new combo (see
+# _control_server()'s PAUSE/RESUME below). Suppresses NEW macro
+# triggers only -- doesn't touch anything already running -- so the
+# very input you're holding down to define a combo can't also happen
+# to match some other macro's existing combo and fire it.
+_external_pause = threading.Event()
+
 
 def _handle_key_event(code, value):
     if value == 1 and code == ABORT_CODE:
@@ -1226,10 +1360,23 @@ def _handle_key_event(code, value):
             held.add(code)
             current = frozenset(held)
 
-        for macro in MACROS:
-            if not macro.enabled or code not in macro.combo or not (macro.combo <= current):
-                continue
+        if _external_pause.is_set():
+            return
 
+        matching = [
+            m for m in MACROS
+            if m.enabled and m.combo and code in m.combo and (m.combo <= current)
+        ]
+        # If a more complex (superset) combo among the matches is also
+        # satisfied right now, only the most complex one(s) fire --
+        # e.g. holding Ctrl+Shift+F shouldn't also fire a plain Ctrl+F
+        # macro just because Ctrl+F's keys happen to all be held too.
+        maximal = [
+            m for m in matching
+            if not any(other is not m and m.combo < other.combo for other in matching)
+        ]
+
+        for macro in maximal:
             if macro.repeat_mode == "none":
                 _fire_once(macro)
 
@@ -1328,6 +1475,104 @@ async def watch_device(path, kind):
                 pass
 
 
+async def _handle_control_client(reader, writer):
+    """One line in, one line out, then close. Commands:
+      FIRE <macro name>   -- trigger a macro by its exact display name,
+                              same semantics as its combo completing
+                              (fire-once / start-or-noop hold / toggle).
+      ABORT                -- same as the abort hotkey.
+      PAUSE / RESUME        -- suppress/restore new macro triggers
+                              (used by the GUI while recording a combo).
+    """
+    try:
+        line = await reader.readline()
+        cmd = line.decode("utf-8", "replace").strip()
+
+        if cmd == "ABORT":
+            abort_all()
+            writer.write(b"OK\n")
+
+        elif cmd == "PAUSE":
+            _external_pause.set()
+            writer.write(b"OK\n")
+
+        elif cmd == "RESUME":
+            _external_pause.clear()
+            writer.write(b"OK\n")
+
+        elif cmd.startswith("FIRE "):
+            name = cmd[len("FIRE "):]
+            match = next((m for m in MACROS if m.name == name), None)
+            if match is None:
+                writer.write(f"ERR no macro named {name!r}\n".encode())
+            elif not match.enabled:
+                writer.write(f"ERR {name!r} is disabled in the active profile\n".encode())
+            else:
+                if match.repeat_mode == "none":
+                    _fire_once(match)
+                elif match.repeat_mode == "hold":
+                    if not _is_looping(match):
+                        _start_loop(match)
+                elif match.repeat_mode == "toggle":
+                    if _is_looping(match):
+                        _stop_loop(match)
+                    else:
+                        _start_loop(match)
+                writer.write(b"OK\n")
+        else:
+            writer.write(b"ERR unknown command\n")
+
+        await writer.drain()
+    except Exception as exc:
+        try:
+            writer.write(f"ERR {exc}\n".encode())
+            await writer.drain()
+        except Exception:
+            pass
+    finally:
+        writer.close()
+
+
+async def _control_server():
+    if CONTROL_SOCKET.exists():
+        try:
+            CONTROL_SOCKET.unlink()
+        except OSError:
+            pass
+    server = await asyncio.start_unix_server(_handle_control_client, path=str(CONTROL_SOCKET))
+    try:
+        os.chmod(CONTROL_SOCKET, 0o600)  # this user only -- macros can run shell commands
+    except OSError:
+        pass
+    async with server:
+        await server.serve_forever()
+
+
+def send_control_command(cmd, timeout=3.0):
+    """Synchronous client for the control socket above -- used by the
+    `puppetry --name=...`/`--abort` CLI and by the GUI's combo
+    recorder (PAUSE/RESUME), NOT by the GUI's normal editing flow
+    (that still only ever touches disk + `systemctl --user restart`,
+    same as always). Returns (ok, message); ok=False (with a message
+    explaining why) if the daemon isn't running, the socket doesn't
+    exist, the connection failed, or the daemon replied with an error.
+    """
+    if not CONTROL_SOCKET.exists():
+        return False, "macro-daemon isn't running (no control socket found)"
+    try:
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.settimeout(timeout)
+        sock.connect(str(CONTROL_SOCKET))
+        sock.sendall((cmd + "\n").encode("utf-8"))
+        resp = sock.recv(4096).decode("utf-8", "replace").strip()
+        sock.close()
+    except OSError as exc:
+        return False, f"couldn't reach macro-daemon: {exc}"
+    if resp.startswith("OK"):
+        return True, resp
+    return False, resp or "no response from macro-daemon"
+
+
 async def main():
     ensure_config_exists()
     state = load_state()
@@ -1403,6 +1648,7 @@ async def main():
     await asyncio.gather(
         watch_device(keyboard_path, "keyboard"),
         watch_device(mouse_path, "mouse"),
+        _control_server(),
     )
 
 
@@ -1420,3 +1666,8 @@ if __name__ == "__main__":
             ui_keyboard.close()
         if ui_mouse is not None:
             ui_mouse.close()
+        if CONTROL_SOCKET.exists():
+            try:
+                CONTROL_SOCKET.unlink()
+            except OSError:
+                pass

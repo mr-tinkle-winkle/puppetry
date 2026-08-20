@@ -3,10 +3,15 @@
 macro_gui.py — GTK4 front-end for the macro daemon config.
 
 Edits ~/.config/macro-daemon/{state.json,profiles/*.json} -- the exact
-same files macro_daemon.py reads. Never talks to the running daemon
-directly; "Save" writes config to disk, then runs
+same files macro_daemon.py reads. For actual config changes, "Save"
+writes config to disk, then runs
 `systemctl --user restart macro-daemon.service` so the new config takes
-effect immediately.
+effect immediately -- this app still never edits the running daemon's
+in-memory state directly. The one exception is the small control
+socket (see macro_daemon.send_control_command()): used here only for
+PAUSE/RESUME around combo recording, and by this same script's CLI
+mode (`puppetry --name=...`/`--abort`) to talk to an already-running
+daemon without going through the GUI at all.
 
 Requires macro_daemon.py to be importable (same directory by default).
 """
@@ -142,12 +147,47 @@ DICTIONARY_TEXT = (
     "  Down only -- pair with ku(). Works for keys and mouse buttons.\n\n"
     "ku(key)\n"
     "  Up only -- releases what kd() pressed.\n\n"
+    "combo(*keys, time_=0.1)\n"
+    "  Like tap(), but for any number of keys/buttons held together as\n"
+    "  one chord, e.g. combo(KEY_LEFTCTRL, KEY_LEFTSHIFT, KEY_S). Presses\n"
+    "  all of them down in the order given, waits time_ seconds, then\n"
+    "  releases all of them in reverse order. Always pass time_ as a\n"
+    "  keyword (time_=0.5) -- it can't be told apart from a key code\n"
+    "  positionally, since both are just plain numbers.\n\n"
+    "command(cmd)\n"
+    "  Runs a shell command completely detached from the daemon --\n"
+    "  fire-and-forget, like `nohup ... &`. Doesn't block the macro,\n"
+    "  doesn't wait for it to finish, and keeps running even if the\n"
+    "  daemon restarts. Runs through $SHELL, so normal shell syntax\n"
+    "  works (pipes, &&, ~ expansion, etc.).\n\n"
     "Every KEY_* and BTN_* name (e.g. KEY_A, KEY_LEFTCTRL, BTN_LEFT) is\n"
     "available directly -- no import or prefix needed.\n\n"
+    "arguments(name=default, ...)  -- FIRST LINE OF THE MACRO ONLY\n"
+    "  Declares real, renameable parameters for this macro, usable\n"
+    "  anywhere else in its code, e.g.:\n"
+    "      arguments(hits=3, key=KEY_A)\n"
+    "      for i in range(hits):\n"
+    "          tap(key)\n"
+    "  EVERY parameter needs a default value -- saving will refuse\n"
+    "  otherwise, since a macro can always be triggered with zero\n"
+    "  arguments (its hotkey combo, or puppetry --name=...). Only\n"
+    "  valid as the very first line; anywhere else it's rejected at\n"
+    "  save time rather than silently doing nothing. A macro with no\n"
+    "  arguments(...) line at all doesn't need one -- it works exactly\n"
+    "  as before.\n\n"
     "Other macros are callable by name (spaces/punctuation become\n"
     "underscores, e.g. a macro named \"Flick and Click\" is called as\n"
-    "Flick_and_Click()). These calls are zero-argument for now -- any\n"
-    "args you pass are accepted but ignored."
+    "Flick_and_Click()). If the target declares arguments(...), pass\n"
+    "them like any normal Python call, by position or by name:\n"
+    "  Flick_and_Click(hits=5)\n"
+    "A macro with no arguments(...) still accepts and ignores any args\n"
+    "passed to it, so old cross-macro calls keep working unchanged.\n\n"
+    "From outside Puppetry entirely: `puppetry --name=\"Macro Name\"`\n"
+    "triggers a macro by its exact display name (quote it if it has\n"
+    "spaces) without waiting for it to finish -- same as its combo\n"
+    "completing. `puppetry --abort` triggers the panic-button abort.\n"
+    "Both talk to the already-running daemon and do nothing if it\n"
+    "isn't running."
 )
 
 
@@ -247,6 +287,10 @@ class ComboRecorder:
 
     def start(self):
         self._stop.clear()
+        # Best-effort -- if the daemon isn't running there's nothing
+        # to pause anyway, and send_control_command() fails fast (no
+        # blocking network attempt) when the socket doesn't exist.
+        md.send_control_command("PAUSE")
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
 
@@ -308,6 +352,7 @@ class ComboRecorder:
                     dev.close()
                 except Exception:
                     pass
+            md.send_control_command("RESUME")  # unconditionally, however we got here
             if finalized is not None:
                 GLib.idle_add(self.on_done, [_key_name(c) for c in finalized], "ok")
             else:
@@ -1085,6 +1130,98 @@ class MacroEditorWindow(Gtk.Window):
         code_frame.set_child(scroller)
         right_content.append(code_frame)
 
+        # -- Ctrl+H: hide/unhide a line --------------------------------
+        # Purely a viewing aid -- the underlying text is never touched
+        # (an "invisible" tag just stops it rendering), so saving and
+        # compiling always see the exact same code either way. See
+        # _hide_line_at_iter()'s comments for the mechanics.
+        buf = self.code_view.get_buffer()
+        self._hidden_tag = buf.create_tag("hidden_line", invisible=True)
+        self._hidden_lines = []  # [{"anchor","label","start_mark","end_mark"}, ...]
+        self._hover_hidden_record = None
+        hide_key_controller = Gtk.EventControllerKey()
+        hide_key_controller.connect("key-pressed", self._on_editor_key_pressed)
+        self.code_view.add_controller(hide_key_controller)
+
+    def _on_editor_key_pressed(self, _controller, keyval, _keycode, state):
+        is_ctrl = bool(state & Gdk.ModifierType.CONTROL_MASK)
+        if not is_ctrl or keyval not in (Gdk.KEY_h, Gdk.KEY_H):
+            return False
+        # Whichever hidden line is currently under the mouse (if any)
+        # takes priority -- that's the "hover it, then Ctrl+H" unhide
+        # path. Otherwise, hide whatever line the text cursor is on.
+        if self._hover_hidden_record is not None:
+            self._unhide_record(self._hover_hidden_record)
+            self._hover_hidden_record = None
+        else:
+            buf = self.code_view.get_buffer()
+            cursor_it = buf.get_iter_at_mark(buf.get_insert())
+            self._hide_line_at_iter(cursor_it)
+        return True  # also stops GTK's legacy Ctrl+H == Backspace binding
+
+    def _hide_line_at_iter(self, it):
+        buf = self.code_view.get_buffer()
+        line_start = buf.get_iter_at_line(it.get_line())
+        if line_start.has_tag(self._hidden_tag):
+            return  # already hidden
+        line_end = line_start.copy()
+        if not line_end.ends_line():
+            line_end.forward_to_line_end()
+        if line_start.equal(line_end):
+            return  # nothing on this line to hide
+
+        insert_offset = line_start.get_offset()
+        end_offset = line_end.get_offset()
+
+        anchor = Gtk.TextChildAnchor()
+        buf.insert_child_anchor(buf.get_iter_at_offset(insert_offset), anchor)
+        # Everything from insert_offset onward shifted right by one --
+        # the anchor itself occupies a single position in the buffer,
+        # even though it isn't a text character and won't show up in
+        # get_text() output when the macro is saved/compiled.
+        real_start = buf.get_iter_at_offset(insert_offset + 1)
+        real_end = buf.get_iter_at_offset(end_offset + 1)
+        buf.apply_tag(self._hidden_tag, real_start, real_end)
+
+        rec = {"anchor": anchor, "label": None, "start_mark": None, "end_mark": None}
+        label = Gtk.Label(label="⟨ Line hidden — hover + Ctrl+H to unhide ⟩")
+        label.add_css_class("dim-label")
+        motion = Gtk.EventControllerMotion()
+        motion.connect("enter", lambda *_a, r=rec: self._set_hover(r))
+        motion.connect("leave", lambda *_a, r=rec: self._clear_hover(r))
+        label.add_controller(motion)
+        self.code_view.add_child_at_anchor(label, anchor)
+
+        rec["label"] = label
+        # left_gravity=True/False on the two marks means neither one
+        # drifts into the other's territory if text ever gets inserted
+        # exactly at the boundary -- start stays pinned to the anchor
+        # side, end stays pinned to the real line-end side.
+        rec["start_mark"] = buf.create_mark(None, real_start, True)
+        rec["end_mark"] = buf.create_mark(None, real_end, False)
+        self._hidden_lines.append(rec)
+
+    def _unhide_record(self, rec):
+        buf = self.code_view.get_buffer()
+        start = buf.get_iter_at_mark(rec["start_mark"])
+        end = buf.get_iter_at_mark(rec["end_mark"])
+        buf.remove_tag(self._hidden_tag, start, end)
+        anchor_it = buf.get_iter_at_child_anchor(rec["anchor"])
+        anchor_end = anchor_it.copy()
+        anchor_end.forward_char()
+        buf.delete(anchor_it, anchor_end)  # removes just the anchor slot
+        buf.delete_mark(rec["start_mark"])
+        buf.delete_mark(rec["end_mark"])
+        if rec in self._hidden_lines:
+            self._hidden_lines.remove(rec)
+
+    def _set_hover(self, rec):
+        self._hover_hidden_record = rec
+
+    def _clear_hover(self, rec):
+        if self._hover_hidden_record is rec:
+            self._hover_hidden_record = None
+
     def _combo_display(self, combo_names):
         if not combo_names:
             return "(none set)"
@@ -1331,6 +1468,11 @@ class MacroRow(Gtk.Box):
         self.combo_btn.connect("clicked", self._on_combo_btn_clicked)
         self.append(self.combo_btn)
 
+        clear_combo_btn = Gtk.Button(label="✕")
+        clear_combo_btn.set_tooltip_text("Remove this macro's combo (back to \"no combo\")")
+        clear_combo_btn.connect("clicked", self._on_clear_combo_clicked)
+        self.append(clear_combo_btn)
+
         enabled_switch = Gtk.Switch(active=bool(enabled))
         enabled_switch.set_valign(Gtk.Align.CENTER)
         enabled_switch.connect("state-set", lambda sw, state: (on_toggle_enabled(macro, state), False)[1])
@@ -1355,6 +1497,13 @@ class MacroRow(Gtk.Box):
 
     def _combo_display(self, combo_names):
         return " + ".join(combo_names) if combo_names else "(no combo)"
+
+    def _on_clear_combo_clicked(self, _btn):
+        if self._recording:
+            return  # don't clear out from under an in-progress recording
+        self.macro["combo"] = []
+        self.combo_btn.set_label(self._combo_display([]))
+        self.on_combo_changed(self.macro, [])
 
     def _on_combo_btn_clicked(self, _btn):
         if self._recording:
@@ -1681,6 +1830,11 @@ class MainWindow(Gtk.ApplicationWindow):
     def on_macro_saved(self, macro, is_new):
         if is_new:
             self.macros_data.setdefault("macros", []).append(macro)
+            # New macros default to enabled -- but only on the profile
+            # they were created on. Every other profile just leaves
+            # this id absent from its own "enabled" map, which the
+            # lookup in refresh_macro_list() already treats as False.
+            self.profile.setdefault("enabled", {})[macro["id"]] = True
         else:
             target = self._find_macro(macro["id"])
             if target is not None:
@@ -2037,7 +2191,31 @@ class MacroApp(Gtk.Application):
         win.present()
 
 
+def _run_as_cli(argv):
+    """Handles `puppetry --name="Macro Name"` and `puppetry --abort`
+    without ever touching GTK -- these talk straight to an already-
+    running daemon over its control socket and exit immediately.
+    Returns an exit code if this was a CLI invocation, or None if argv
+    didn't match either flag (meaning: fall through to the normal GUI).
+    """
+    for arg in argv:
+        if arg == "--abort":
+            ok, msg = md.send_control_command("ABORT")
+            print("Aborted." if ok else f"puppetry --abort failed: {msg}")
+            return 0 if ok else 1
+        if arg.startswith("--name="):
+            name = arg[len("--name="):]
+            ok, msg = md.send_control_command(f"FIRE {name}")
+            print(f"Triggered {name!r}." if ok else f"puppetry --name failed: {msg}")
+            return 0 if ok else 1
+    return None
+
+
 if __name__ == "__main__":
+    _cli_result = _run_as_cli(sys.argv[1:])
+    if _cli_result is not None:
+        sys.exit(_cli_result)
+
     testing = "--testing" in sys.argv
     argv = [a for a in sys.argv if a != "--testing"]  # GApplication rejects unknown flags
     app = MacroApp(testing=testing)
