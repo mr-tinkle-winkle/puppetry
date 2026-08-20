@@ -208,6 +208,8 @@ def _blank_macro():
         "description": "",
         "repeat_mode": "none",
         "combo": [],
+        "trigger_edge": "down",
+        "locked": False,
         "code": "",
         "simplified_names": True,
         "ignore_keyboard": False,
@@ -273,7 +275,14 @@ class ComboRecorder:
     """Waits for input, then auto-commits once whatever is currently held
     stops changing for STABLE_SECONDS. This deliberately means a brief
     click (e.g. the click that pressed "Record Combo" itself) doesn't get
-    captured -- it releases well before the stability window elapses."""
+    captured -- it releases well before the stability window elapses.
+
+    STABLE_SECONDS is a class attribute (not a fixed constant) so the
+    "Record Time" control (top of the main macros screen, next to the
+    zoom buttons) can change it for every recorder at once -- read
+    fresh off the class each time rather than copied into an instance,
+    so an in-progress recording even picks up a change made while it's
+    still running."""
 
     STABLE_SECONDS = 3.0
 
@@ -916,6 +925,16 @@ class MacroEditorWindow(Gtk.Window):
         self.combo_label = Gtk.Label(label=self._combo_display(self.macro.get("combo", [])), xalign=0)
         self.combo_label.set_hexpand(True)
         combo_row.append(self.combo_label)
+        self.trigger_edge_dropdown = Gtk.DropDown.new_from_strings(["On Press", "On Release"])
+        self.trigger_edge_dropdown.set_selected(0 if self.macro.get("trigger_edge", "down") == "down" else 1)
+        self.trigger_edge_dropdown.set_tooltip_text(
+            "On Press: fires the instant the combo is fully held (default).\n"
+            "On Release: waits until every key in the combo has been let go, "
+            "then fires -- useful when the combo collides with something else "
+            "that needs the keys held, and avoids ever having a key stuck down "
+            "from this macro's own combo in the first place."
+        )
+        combo_row.append(self.trigger_edge_dropdown)
         self.record_button = Gtk.Button(label="Record Combo")
         self.record_button.connect("clicked", self.on_record_clicked)
         combo_row.append(self.record_button)
@@ -1130,97 +1149,48 @@ class MacroEditorWindow(Gtk.Window):
         code_frame.set_child(scroller)
         right_content.append(code_frame)
 
-        # -- Ctrl+H: hide/unhide a line --------------------------------
-        # Purely a viewing aid -- the underlying text is never touched
-        # (an "invisible" tag just stops it rendering), so saving and
-        # compiling always see the exact same code either way. See
-        # _hide_line_at_iter()'s comments for the mechanics.
-        buf = self.code_view.get_buffer()
-        self._hidden_tag = buf.create_tag("hidden_line", invisible=True)
-        self._hidden_lines = []  # [{"anchor","label","start_mark","end_mark"}, ...]
-        self._hover_hidden_record = None
-        hide_key_controller = Gtk.EventControllerKey()
-        hide_key_controller.connect("key-pressed", self._on_editor_key_pressed)
-        self.code_view.add_controller(hide_key_controller)
+        # -- Ctrl+Scroll to zoom, Ctrl+0 to reset ----------------------
+        self._code_zoom = 1.0
+        self._code_base_pt = 11
+        self._code_zoom_css = Gtk.CssProvider()
+        self.code_view.get_style_context().add_provider(
+            self._code_zoom_css, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
+        )
+        self._apply_code_zoom()
+
+        zoom_key_controller = Gtk.EventControllerKey()
+        zoom_key_controller.connect("key-pressed", self._on_editor_key_pressed)
+        self.code_view.add_controller(zoom_key_controller)
+
+        zoom_scroll_controller = Gtk.EventControllerScroll.new(
+            Gtk.EventControllerScrollFlags.VERTICAL
+        )
+        zoom_scroll_controller.connect("scroll", self._on_code_scroll)
+        self.code_view.add_controller(zoom_scroll_controller)
+
+    def _apply_code_zoom(self):
+        size_pt = max(4, round(self._code_base_pt * self._code_zoom))
+        css = f"textview {{ font-size: {size_pt}pt; }}".encode("utf-8")
+        self._code_zoom_css.load_from_data(css)
+
+    def _on_code_scroll(self, controller, _dx, dy):
+        state = controller.get_current_event_state()
+        if not (state & Gdk.ModifierType.CONTROL_MASK):
+            return False  # not zooming -- let the view scroll normally
+        if dy < 0:
+            self._code_zoom = min(self._code_zoom * 1.1, 4.0)
+        elif dy > 0:
+            self._code_zoom = max(self._code_zoom / 1.1, 0.3)
+        self._apply_code_zoom()
+        return True  # consumed -- don't also scroll the view
 
     def _on_editor_key_pressed(self, _controller, keyval, _keycode, state):
         is_ctrl = bool(state & Gdk.ModifierType.CONTROL_MASK)
-        if not is_ctrl or keyval not in (Gdk.KEY_h, Gdk.KEY_H):
-            return False
-        # Whichever hidden line is currently under the mouse (if any)
-        # takes priority -- that's the "hover it, then Ctrl+H" unhide
-        # path. Otherwise, hide whatever line the text cursor is on.
-        if self._hover_hidden_record is not None:
-            self._unhide_record(self._hover_hidden_record)
-            self._hover_hidden_record = None
-        else:
-            buf = self.code_view.get_buffer()
-            cursor_it = buf.get_iter_at_mark(buf.get_insert())
-            self._hide_line_at_iter(cursor_it)
-        return True  # also stops GTK's legacy Ctrl+H == Backspace binding
-
-    def _hide_line_at_iter(self, it):
-        buf = self.code_view.get_buffer()
-        line_start = buf.get_iter_at_line(it.get_line())
-        if line_start.has_tag(self._hidden_tag):
-            return  # already hidden
-        line_end = line_start.copy()
-        if not line_end.ends_line():
-            line_end.forward_to_line_end()
-        if line_start.equal(line_end):
-            return  # nothing on this line to hide
-
-        insert_offset = line_start.get_offset()
-        end_offset = line_end.get_offset()
-
-        anchor = Gtk.TextChildAnchor()
-        buf.insert_child_anchor(buf.get_iter_at_offset(insert_offset), anchor)
-        # Everything from insert_offset onward shifted right by one --
-        # the anchor itself occupies a single position in the buffer,
-        # even though it isn't a text character and won't show up in
-        # get_text() output when the macro is saved/compiled.
-        real_start = buf.get_iter_at_offset(insert_offset + 1)
-        real_end = buf.get_iter_at_offset(end_offset + 1)
-        buf.apply_tag(self._hidden_tag, real_start, real_end)
-
-        rec = {"anchor": anchor, "label": None, "start_mark": None, "end_mark": None}
-        label = Gtk.Label(label="⟨ Line hidden — hover + Ctrl+H to unhide ⟩")
-        label.add_css_class("dim-label")
-        motion = Gtk.EventControllerMotion()
-        motion.connect("enter", lambda *_a, r=rec: self._set_hover(r))
-        motion.connect("leave", lambda *_a, r=rec: self._clear_hover(r))
-        label.add_controller(motion)
-        self.code_view.add_child_at_anchor(label, anchor)
-
-        rec["label"] = label
-        # left_gravity=True/False on the two marks means neither one
-        # drifts into the other's territory if text ever gets inserted
-        # exactly at the boundary -- start stays pinned to the anchor
-        # side, end stays pinned to the real line-end side.
-        rec["start_mark"] = buf.create_mark(None, real_start, True)
-        rec["end_mark"] = buf.create_mark(None, real_end, False)
-        self._hidden_lines.append(rec)
-
-    def _unhide_record(self, rec):
-        buf = self.code_view.get_buffer()
-        start = buf.get_iter_at_mark(rec["start_mark"])
-        end = buf.get_iter_at_mark(rec["end_mark"])
-        buf.remove_tag(self._hidden_tag, start, end)
-        anchor_it = buf.get_iter_at_child_anchor(rec["anchor"])
-        anchor_end = anchor_it.copy()
-        anchor_end.forward_char()
-        buf.delete(anchor_it, anchor_end)  # removes just the anchor slot
-        buf.delete_mark(rec["start_mark"])
-        buf.delete_mark(rec["end_mark"])
-        if rec in self._hidden_lines:
-            self._hidden_lines.remove(rec)
-
-    def _set_hover(self, rec):
-        self._hover_hidden_record = rec
-
-    def _clear_hover(self, rec):
-        if self._hover_hidden_record is rec:
-            self._hover_hidden_record = None
+        if is_ctrl and keyval == Gdk.KEY_0:
+            self._code_zoom = 1.0
+            self._apply_code_zoom()
+            return True
+        return False
 
     def _combo_display(self, combo_names):
         if not combo_names:
@@ -1390,6 +1360,7 @@ class MacroEditorWindow(Gtk.Window):
         self.macro["name"] = self.name_entry.get_text().strip() or "Unnamed Macro"
         self.macro["description"] = self.desc_entry.get_text().strip()
         self.macro["repeat_mode"] = REPEAT_MODES[self.repeat_dropdown.get_selected()]
+        self.macro["trigger_edge"] = "down" if self.trigger_edge_dropdown.get_selected() == 0 else "up"
         self.macro["code"] = code_text
         self.macro["simplified_names"] = self.simplified_check.get_active()
         self.macro["ignore_keyboard"] = self.ignore_kb_check.get_active()
@@ -1449,13 +1420,16 @@ class MacroEditorWindow(Gtk.Window):
 
 class MacroRow(Gtk.Box):
     def __init__(self, macro, enabled, keyboard_path, mouse_path,
-                 on_edit, on_delete, on_toggle_enabled, on_repeat_changed, on_combo_changed):
+                 on_edit, on_delete, on_toggle_enabled, on_repeat_changed, on_combo_changed,
+                 on_lock_changed, on_trigger_edge_changed):
         super().__init__(orientation=Gtk.Orientation.HORIZONTAL, spacing=8,
                           margin_top=4, margin_bottom=4, margin_start=8, margin_end=8)
         self.macro = macro
         self.keyboard_path = keyboard_path
         self.mouse_path = mouse_path
         self.on_combo_changed = on_combo_changed
+        self.on_lock_changed = on_lock_changed
+        self.on_trigger_edge_changed = on_trigger_edge_changed
         self._recorder = None
         self._recording = False
 
@@ -1463,15 +1437,43 @@ class MacroRow(Gtk.Box):
         name_label.set_hexpand(True)
         self.append(name_label)
 
+        # Locking a macro blocks Edit/Delete/combo changes entirely --
+        # meant for e.g. a macro you've split sensitive code into and
+        # don't want casually reopened (say, while screen-sharing),
+        # not a content-hiding feature in itself. Sits to the left of
+        # the combo controls, as asked.
+        self.lock_btn = Gtk.ToggleButton()
+        self.lock_btn.set_active(bool(macro.get("locked", False)))
+        self.lock_btn.set_tooltip_text(
+            "Lock this macro (blocks Edit, Delete, and combo changes until unlocked)"
+        )
+        self.lock_btn.connect("toggled", self._on_lock_toggled)
+        self.append(self.lock_btn)
+
         self.combo_btn = Gtk.Button(label=self._combo_display(macro.get("combo", [])))
         self.combo_btn.set_tooltip_text("Click, then hold your combo for 3 seconds to change it")
         self.combo_btn.connect("clicked", self._on_combo_btn_clicked)
         self.append(self.combo_btn)
 
-        clear_combo_btn = Gtk.Button(label="✕")
-        clear_combo_btn.set_tooltip_text("Remove this macro's combo (back to \"no combo\")")
-        clear_combo_btn.connect("clicked", self._on_clear_combo_clicked)
-        self.append(clear_combo_btn)
+        self.clear_combo_btn = Gtk.Button(label="✕")
+        self.clear_combo_btn.set_tooltip_text("Remove this macro's combo (back to \"no combo\")")
+        self.clear_combo_btn.connect("clicked", self._on_clear_combo_clicked)
+        self.append(self.clear_combo_btn)
+
+        self.trigger_edge_dropdown = Gtk.DropDown.new_from_strings(["On Press", "On Release"])
+        self.trigger_edge_dropdown.set_selected(0 if macro.get("trigger_edge", "down") == "down" else 1)
+        self.trigger_edge_dropdown.set_tooltip_text(
+            "On Press: fires the instant the combo is fully held (default).\n"
+            "On Release: waits until every key in the combo has been let go, "
+            "then fires -- useful when the combo collides with something else "
+            "that needs the keys held, and avoids ever having a key stuck down "
+            "from this macro's own combo in the first place."
+        )
+        self.trigger_edge_dropdown.connect(
+            "notify::selected",
+            lambda dd, _p: self.on_trigger_edge_changed(macro, "down" if dd.get_selected() == 0 else "up"),
+        )
+        self.append(self.trigger_edge_dropdown)
 
         enabled_switch = Gtk.Switch(active=bool(enabled))
         enabled_switch.set_valign(Gtk.Align.CENTER)
@@ -1487,25 +1489,47 @@ class MacroRow(Gtk.Box):
         )
         self.append(repeat_dropdown)
 
-        edit_btn = Gtk.Button(label="Edit")
-        edit_btn.connect("clicked", lambda *_: on_edit(macro))
-        self.append(edit_btn)
+        self.edit_btn = Gtk.Button(label="Edit")
+        self.edit_btn.connect("clicked", lambda *_: on_edit(macro))
+        self.append(self.edit_btn)
 
-        delete_btn = Gtk.Button(label="Delete")
-        delete_btn.connect("clicked", lambda *_: on_delete(macro))
-        self.append(delete_btn)
+        self.delete_btn = Gtk.Button(label="Delete")
+        self.delete_btn.connect("clicked", lambda *_: on_delete(macro))
+        self.append(self.delete_btn)
+
+        self._update_lock_icon()
+        self._apply_lock_sensitivity(self.lock_btn.get_active())
+
+    def _update_lock_icon(self):
+        self.lock_btn.set_label("🔒" if self.lock_btn.get_active() else "🔓")
+
+    def _on_lock_toggled(self, btn):
+        locked = btn.get_active()
+        self._update_lock_icon()
+        self.macro["locked"] = locked
+        self._apply_lock_sensitivity(locked)
+        self.on_lock_changed(self.macro, locked)
+
+    def _apply_lock_sensitivity(self, locked):
+        self.combo_btn.set_sensitive(not locked)
+        self.clear_combo_btn.set_sensitive(not locked)
+        self.trigger_edge_dropdown.set_sensitive(not locked)
+        self.edit_btn.set_sensitive(not locked)
+        self.delete_btn.set_sensitive(not locked)
 
     def _combo_display(self, combo_names):
         return " + ".join(combo_names) if combo_names else "(no combo)"
 
     def _on_clear_combo_clicked(self, _btn):
-        if self._recording:
-            return  # don't clear out from under an in-progress recording
+        if self._recording or self.lock_btn.get_active():
+            return  # don't clear out from under an in-progress recording, or while locked
         self.macro["combo"] = []
         self.combo_btn.set_label(self._combo_display([]))
         self.on_combo_changed(self.macro, [])
 
     def _on_combo_btn_clicked(self, _btn):
+        if self.lock_btn.get_active():
+            return
         if self._recording:
             if self._recorder:
                 self._recorder.cancel()
@@ -1630,6 +1654,19 @@ class MainWindow(Gtk.ApplicationWindow):
         save_btn.connect("clicked", self.on_save_clicked)
         profile_row.append(save_btn)
         profile_row.append(_make_zoom_buttons())
+
+        # How long you need to hold a combo still before it auto-commits
+        # while recording (see ComboRecorder). Persisted the same way as
+        # autosave below -- a UI/behavior preference, not part of any
+        # profile's own data, so it's saved immediately rather than
+        # gated behind the main Save button.
+        record_time_label = Gtk.Label(label="Record Time:")
+        profile_row.append(record_time_label)
+        self.record_time_spin = Gtk.SpinButton.new_with_range(0.5, 30.0, 0.5)
+        self.record_time_spin.set_value(float(self.state.get("record_time_seconds", 3.0)))
+        ComboRecorder.STABLE_SECONDS = self.record_time_spin.get_value()
+        self.record_time_spin.connect("value-changed", self.on_record_time_changed)
+        profile_row.append(self.record_time_spin)
 
         # Persisted in state.json so this survives reopening the app --
         # previously reset to off every launch.
@@ -1775,6 +1812,8 @@ class MainWindow(Gtk.ApplicationWindow):
                 on_toggle_enabled=self.on_toggle_enabled,
                 on_repeat_changed=self.on_repeat_changed,
                 on_combo_changed=self.on_combo_changed,
+                on_lock_changed=self.on_lock_changed,
+                on_trigger_edge_changed=self.on_trigger_edge_changed,
             )
             self.list_box.append(row)
 
@@ -1782,6 +1821,18 @@ class MainWindow(Gtk.ApplicationWindow):
         target = self._find_macro(macro["id"])
         if target is not None:
             target["combo"] = combo_names
+            self._mark_dirty()
+
+    def on_lock_changed(self, macro, locked):
+        target = self._find_macro(macro["id"])
+        if target is not None:
+            target["locked"] = locked
+            self._mark_dirty()
+
+    def on_trigger_edge_changed(self, macro, edge):
+        target = self._find_macro(macro["id"])
+        if target is not None:
+            target["trigger_edge"] = edge
             self._mark_dirty()
 
     def _find_macro(self, macro_id):
@@ -1808,6 +1859,15 @@ class MainWindow(Gtk.ApplicationWindow):
         except Exception:
             pass  # non-critical -- worst case the preference doesn't persist this run
 
+    def on_record_time_changed(self, spin_btn):
+        seconds = spin_btn.get_value()
+        ComboRecorder.STABLE_SECONDS = seconds
+        self.state["record_time_seconds"] = seconds
+        try:
+            md.save_state(self.state)
+        except Exception:
+            pass  # non-critical -- worst case the preference doesn't persist this run
+
     def on_toggle_enabled(self, macro, state):
         self.profile.setdefault("enabled", {})[macro["id"]] = state
         self._mark_dirty()
@@ -1819,6 +1879,9 @@ class MainWindow(Gtk.ApplicationWindow):
             self._mark_dirty()
 
     def on_edit_macro(self, macro):
+        if macro.get("locked"):
+            return  # belt-and-suspenders -- the Edit button is already
+            # disabled for a locked row, this just covers any other path in
         editor = MacroEditorWindow(self, macro, is_new=False, on_saved=self.on_macro_saved)
         editor.present()
 

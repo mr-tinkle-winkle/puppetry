@@ -79,6 +79,7 @@ import asyncio
 import json
 import os
 import re
+import shlex
 import socket
 import subprocess
 import sys
@@ -854,18 +855,33 @@ def move_mouse(x_pixels, y_pixels, time_=0.25, easing="inout", async_=False, mov
         _do_move()
 
 
-def command(cmd):
+def command(cmd, *args):
     """Runs a shell command completely detached from the daemon --
     fire-and-forget, same idea as `nohup ... &`: doesn't block the
     macro, doesn't wait for it to finish or check its exit code, and
     keeps running even if the daemon restarts or this macro's own
-    thread ends. Runs through $SHELL (falling back to /bin/sh), so
-    normal shell syntax works (pipes, &&, ~ expansion, etc.) -- same
-    trust model as everything else in a macro: this runs as you, with
-    your own permissions."""
-    shell = os.environ.get("SHELL", "/bin/sh")
+    thread ends.
+
+    Always runs through /bin/sh specifically -- NOT $SHELL. The
+    daemon runs as a systemd user service, and $SHELL there may well
+    be your actual login shell (fish, zsh, whatever) rather than
+    something POSIX-compatible; /bin/sh is the one interpreter this
+    can rely on to actually understand ordinary sh/bash-style command
+    syntax the way people normally type it.
+
+    Extra positional args are shell-quoted automatically and
+    substituted into `cmd` via .format() -- so a value with spaces,
+    quotes, or other special characters in it doesn't need any manual
+    escaping:
+        command("notify-send {0} {1}", "Title", 'a "quoted" value')
+    is exactly as safe as passing those same values straight to
+    subprocess, rather than hand-building a string yourself and
+    hoping the quoting works out.
+    """
+    if args:
+        cmd = cmd.format(*(shlex.quote(str(a)) for a in args))
     subprocess.Popen(
-        [shell, "-c", cmd],
+        ["/bin/sh", "-c", cmd],
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
@@ -919,7 +935,11 @@ for _i in range(26):
 _SHIFT_DIGIT_SYMBOLS = "!@#$%^&*()"
 for _i in range(10):
     _CHAR_TO_KEY[str(_i)] = (f"KEY_{_i}", False)
-    _CHAR_TO_KEY[_SHIFT_DIGIT_SYMBOLS[_i]] = (f"KEY_{_i}", True)
+    # The symbol at string-index _i sits on the digit key ONE TO THE
+    # RIGHT of it on a real keyboard (Shift+1 -> "!", ..., Shift+9 ->
+    # "(", Shift+0 -> ")") -- i.e. index 0 ("!") is physically
+    # KEY_1, not KEY_0; index 9 (")") wraps back around to KEY_0.
+    _CHAR_TO_KEY[_SHIFT_DIGIT_SYMBOLS[_i]] = (f"KEY_{(_i + 1) % 10}", True)
 _CHAR_TO_KEY.update({
     " ": ("KEY_SPACE", False), "\n": ("KEY_ENTER", False), "\t": ("KEY_TAB", False),
     ".": ("KEY_DOT", False), ">": ("KEY_DOT", True),
@@ -1205,25 +1225,57 @@ def compile_macro(macro_def, macro_refs=None):
 # ---------------------------------------------------------------------------
 
 class RunningMacro:
-    __slots__ = ("thread", "stop_event", "active_hold")
+    __slots__ = ("thread", "stop_event", "active_hold", "armed_up")
 
     def __init__(self):
         self.thread = None
         self.stop_event = threading.Event()
         self.active_hold = False  # only meaningful for repeat_mode == "hold"
+        self.armed_up = False     # only meaningful for trigger_edge == "up"
 
 
 class Macro:
-    __slots__ = ("id", "name", "enabled", "repeat_mode", "combo", "func", "runtime")
+    __slots__ = ("id", "name", "enabled", "repeat_mode", "combo", "trigger_edge", "func", "runtime")
 
     def __init__(self, macro_def, enabled, macro_refs=None):
         self.id = macro_def.get("id") or str(uuid.uuid4())
         self.name = macro_def.get("name", self.id)
         self.enabled = bool(enabled)
         self.repeat_mode = macro_def.get("repeat_mode", "none")
+        # "down" (default): fires the instant the combo is fully held,
+        # same as always. "up": arms instead of firing when the combo
+        # completes, then actually fires only once EVERY key in the
+        # combo has been released again. Mainly for combos that
+        # collide with something else needing the keys held (so this
+        # fires faster/cleaner once they're all let go), but as a
+        # side effect it also sidesteps the whole "ignore() doesn't
+        # release a stuck held key" problem for a macro using it: by
+        # the time an "up" macro actually starts, none of its own
+        # combo keys are still physically down in the first place, so
+        # there's nothing left to get stuck.
+        self.trigger_edge = macro_def.get("trigger_edge", "down")
         self.combo = frozenset(_resolve(k) for k in macro_def.get("combo", []))
         self.func = compile_macro(macro_def, macro_refs=macro_refs)
         self.runtime = RunningMacro()
+
+
+def _trigger_macro(macro):
+    """Dispatches a completed trigger (combo just completed for a
+    "down" macro, or fully released for an "up" one) according to
+    repeat_mode -- shared by both trigger paths in _handle_key_event()
+    so they can't drift out of sync with each other."""
+    if macro.repeat_mode == "none":
+        _fire_once(macro)
+    elif macro.repeat_mode == "hold":
+        if not _is_looping(macro):
+            _start_loop(macro)
+        # if already looping, a repeated combo-complete press (e.g.
+        # from key repeat semantics elsewhere) is a no-op
+    elif macro.repeat_mode == "toggle":
+        if _is_looping(macro):
+            _stop_loop(macro)
+        else:
+            _start_loop(macro)
 
 
 def _fire_once(macro):
@@ -1377,20 +1429,10 @@ def _handle_key_event(code, value):
         ]
 
         for macro in maximal:
-            if macro.repeat_mode == "none":
-                _fire_once(macro)
-
-            elif macro.repeat_mode == "hold":
-                if not _is_looping(macro):
-                    _start_loop(macro)
-                # if already looping, a repeated combo-complete press
-                # (e.g. from key repeat semantics elsewhere) is a no-op
-
-            elif macro.repeat_mode == "toggle":
-                if _is_looping(macro):
-                    _stop_loop(macro)
-                else:
-                    _start_loop(macro)
+            if macro.trigger_edge == "up":
+                macro.runtime.armed_up = True  # fires later, on full release
+            else:
+                _trigger_macro(macro)
 
     elif value == 0:  # key up
         with _lock:
@@ -1404,6 +1446,16 @@ def _handle_key_event(code, value):
             if macro.repeat_mode == "hold" and macro.runtime.active_hold:
                 if code in macro.combo and not (macro.combo <= current):
                     _stop_loop(macro)
+
+            # "up"-triggered macros: fire once every key in the combo
+            # has been released, not before -- `code in macro.combo`
+            # narrows this to only re-check on a release that's
+            # actually part of the combo, and the intersection check
+            # confirms NONE of them are still held (not just this one).
+            if macro.trigger_edge == "up" and macro.runtime.armed_up:
+                if code in macro.combo and not (macro.combo & current):
+                    macro.runtime.armed_up = False
+                    _trigger_macro(macro)
 
     # value == 2 (autorepeat) ignored
 
@@ -1622,25 +1674,49 @@ async def main():
     macros_data = load_macros()
     macro_defs = macros_data.get("macros", [])
 
-    # Pass 1: compile every macro once, without cross-references, just
-    # to build a {sanitized_name: callable} map other macros can call
-    # into. (Two-pass rather than trying to thread a mutable shared
-    # namespace through -- simpler and avoids compile-order edge cases.)
-    macro_refs = {}
-    for macro_def in macro_defs:
-        try:
-            macro_refs[sanitize_macro_name(macro_def.get("name"))] = compile_macro(macro_def)
-        except Exception:
-            pass  # real errors get reported for real in pass 2 below
+    # Every macro is callable by name from every other macro's code,
+    # to any nesting depth (A calls B calls C calls ... -- Python's own
+    # recursion limit is the only practical ceiling, same as it would
+    # be for any other recursive Python call chain).
+    #
+    # The trick: macro_refs maps each sanitized name to a small
+    # trampoline function that looks up the REAL compiled function in
+    # `_FINAL_FUNCS` at CALL time, not at compile time. That lookup
+    # dict is a plain mutable dict captured by reference in every
+    # trampoline's closure, so it doesn't matter that most of its
+    # entries don't exist yet while the compiling loop below is still
+    # in progress -- by the time any macro actually RUNS (well after
+    # every macro here has finished compiling), every name resolves to
+    # its real final function. This replaces an earlier two-pass
+    # scheme that only supported one level of macro-calls-macro,
+    # because the compiled-into-a-fixed-globals-dict approach means
+    # later additions to a shared dict just aren't visible to a
+    # function whose globals were already `dict(...)`-copied before
+    # those additions happened.
+    def _make_trampoline(name):
+        def _call(*args, **kwargs):
+            try:
+                target = _FINAL_FUNCS[name]
+            except KeyError:
+                raise NameError(f"macro {name!r} failed to compile -- see the startup log")
+            return target(*args, **kwargs)
+        return _call
 
-    # Pass 2: compile for real, this time with every other macro
-    # callable by name from within each macro's code.
+    _FINAL_FUNCS = {}
+    macro_refs = {
+        sanitize_macro_name(macro_def.get("name")): _make_trampoline(sanitize_macro_name(macro_def.get("name")))
+        for macro_def in macro_defs
+    }
+
     global MACROS
     MACROS = []
     for macro_def in macro_defs:
         try:
             mid = macro_def.get("id")
-            MACROS.append(Macro(macro_def, enabled_map.get(mid, False), macro_refs=macro_refs))
+            name = sanitize_macro_name(macro_def.get("name"))
+            m = Macro(macro_def, enabled_map.get(mid, False), macro_refs=macro_refs)
+            _FINAL_FUNCS[name] = m.func
+            MACROS.append(m)
         except Exception as exc:
             # A bad macro shouldn't take down the whole daemon.
             print(f"Skipping macro {macro_def.get('name', macro_def.get('id'))!r}: {exc}")
