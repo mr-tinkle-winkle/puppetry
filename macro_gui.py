@@ -299,7 +299,7 @@ class ComboRecorder:
         # Best-effort -- if the daemon isn't running there's nothing
         # to pause anyway, and send_control_command() fails fast (no
         # blocking network attempt) when the socket doesn't exist.
-        md.send_control_command("PAUSE")
+        md.send_control_command({"cmd": "PAUSE"})
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
 
@@ -361,7 +361,7 @@ class ComboRecorder:
                     dev.close()
                 except Exception:
                     pass
-            md.send_control_command("RESUME")  # unconditionally, however we got here
+            md.send_control_command({"cmd": "RESUME"})  # unconditionally, however we got here
             if finalized is not None:
                 GLib.idle_add(self.on_done, [_key_name(c) for c in finalized], "ok")
             else:
@@ -2255,22 +2255,36 @@ class MacroApp(Gtk.Application):
 
 
 def _run_as_cli(argv):
-    """Handles `puppetry --name="Macro Name"` and `puppetry --abort`
-    without ever touching GTK -- these talk straight to an already-
-    running daemon over its control socket and exit immediately.
-    Returns an exit code if this was a CLI invocation, or None if argv
-    didn't match either flag (meaning: fall through to the normal GUI).
+    """Handles `puppetry --name="Macro Name" [arg1 arg2 ...]` and
+    `puppetry --abort` without ever touching GTK -- these talk
+    straight to an already-running daemon over its control socket and
+    exit immediately. Any argv token that isn't `--name=...`, `--abort`,
+    or another `--flag` is passed through as a positional argument to
+    the macro (for one that declared arguments(...) -- see its
+    docstring in the in-app dictionary). Returns an exit code if this
+    was a CLI invocation, or None if argv didn't match either flag
+    (meaning: fall through to the normal GUI).
     """
+    if "--abort" in argv:
+        ok, msg = md.send_control_command({"cmd": "ABORT"})
+        print("Aborted." if ok else f"puppetry --abort failed: {msg}")
+        return 0 if ok else 1
+
+    name = None
+    extra_args = []
     for arg in argv:
-        if arg == "--abort":
-            ok, msg = md.send_control_command("ABORT")
-            print("Aborted." if ok else f"puppetry --abort failed: {msg}")
-            return 0 if ok else 1
         if arg.startswith("--name="):
             name = arg[len("--name="):]
-            ok, msg = md.send_control_command(f"FIRE {name}")
-            print(f"Triggered {name!r}." if ok else f"puppetry --name failed: {msg}")
-            return 0 if ok else 1
+        elif arg.startswith("--"):
+            continue  # some other flag (e.g. --testing) -- not a macro argument
+        else:
+            extra_args.append(arg)
+
+    if name is not None:
+        ok, msg = md.send_control_command({"cmd": "FIRE", "name": name, "args": extra_args})
+        print(f"Triggered {name!r}." if ok else f"puppetry --name failed: {msg}")
+        return 0 if ok else 1
+
     return None
 
 

@@ -863,11 +863,9 @@ def command(cmd, *args):
     thread ends.
 
     Always runs through /bin/sh specifically -- NOT $SHELL. The
-    daemon runs as a systemd user service, and $SHELL there may well
-    be your actual login shell (fish, zsh, whatever) rather than
-    something POSIX-compatible; /bin/sh is the one interpreter this
-    can rely on to actually understand ordinary sh/bash-style command
-    syntax the way people normally type it.
+    daemon runs as a systemd user service; on some setups $SHELL there
+    may not even be your interactive shell at all, so /bin/sh is the
+    one interpreter this can reliably count on.
 
     Extra positional args are shell-quoted automatically and
     substituted into `cmd` via .format() -- so a value with spaces,
@@ -877,14 +875,38 @@ def command(cmd, *args):
     is exactly as safe as passing those same values straight to
     subprocess, rather than hand-building a string yourself and
     hoping the quoting works out.
+
+    A couple of NixOS-specific things this works around, since a
+    systemd --user service's environment is much sparser than an
+    interactive shell's:
+      - PATH: gets a few common NixOS binary locations appended (your
+        actual system PATH still comes first) so ordinary commands
+        resolve even though this process's own PATH is whatever
+        minimal one systemd started it with.
+      - stdout/stderr aren't discarded -- they inherit the daemon's
+        own, which (as a systemd service) end up in `journalctl --user
+        -u macro-daemon` -- so if a command actually fails (typo,
+        missing binary, whatever), that shows up there instead of
+        silently doing nothing. Fire-and-forget only ever meant "don't
+        block on it or check its exit code", never "throw its output
+        away where nobody can see it went wrong."
     """
     if args:
         cmd = cmd.format(*(shlex.quote(str(a)) for a in args))
+
+    env = dict(os.environ)
+    nix_user = os.environ.get("USER", "")
+    extra_paths = [
+        "/run/current-system/sw/bin",
+        f"/etc/profiles/per-user/{nix_user}/bin" if nix_user else "",
+        str(Path.home() / ".nix-profile" / "bin"),
+    ]
+    env["PATH"] = ":".join(p for p in extra_paths if p) + ":" + env.get("PATH", "")
+
     subprocess.Popen(
         ["/bin/sh", "-c", cmd],
         stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        env=env,
         start_new_session=True,
     )
 
@@ -1259,36 +1281,41 @@ class Macro:
         self.runtime = RunningMacro()
 
 
-def _trigger_macro(macro):
+def _trigger_macro(macro, args=()):
     """Dispatches a completed trigger (combo just completed for a
-    "down" macro, or fully released for an "up" one) according to
-    repeat_mode -- shared by both trigger paths in _handle_key_event()
-    so they can't drift out of sync with each other."""
+    "down" macro, or fully released for an "up" one, or a FIRE command
+    over the control socket) according to repeat_mode -- shared by
+    every trigger path so they can't drift out of sync with each
+    other. `args` are extra positional args for a macro that declared
+    arguments(...) -- always empty for a hotkey-combo trigger (there's
+    nowhere for a combo press to carry them from), only ever non-empty
+    for a `puppetry --name=... arg1 arg2` / FIRE-from-another-source
+    trigger."""
     if macro.repeat_mode == "none":
-        _fire_once(macro)
+        _fire_once(macro, args)
     elif macro.repeat_mode == "hold":
         if not _is_looping(macro):
-            _start_loop(macro)
+            _start_loop(macro, args)
         # if already looping, a repeated combo-complete press (e.g.
         # from key repeat semantics elsewhere) is a no-op
     elif macro.repeat_mode == "toggle":
         if _is_looping(macro):
             _stop_loop(macro)
         else:
-            _start_loop(macro)
+            _start_loop(macro, args)
 
 
-def _fire_once(macro):
+def _fire_once(macro, args=()):
     def _run():
         _speed_local.value = 1.0  # fresh 1x for every top-level trigger
         try:
-            macro.func()
+            macro.func(*args)
         except _MacroAborted:
             pass  # panic-button abort -- clean stop, not an error
     threading.Thread(target=_run, daemon=True).start()
 
 
-def _loop_until_stopped(macro):
+def _loop_until_stopped(macro, args=()):
     """Runs the macro body repeatedly. Checks the ordinary per-macro
     stop flag (combo released, toggled off) BETWEEN iterations only --
     so a running iteration always finishes naturally, and no new one
@@ -1302,17 +1329,17 @@ def _loop_until_stopped(macro):
             _speed_local.value = 1.0  # fresh 1x every iteration -- a
             # speed() call left active at the end of one loop pass must
             # not silently carry into the next.
-            macro.func()
+            macro.func(*args)
     except _MacroAborted:
         pass  # panic-button abort -- clean stop, not an error
     rt.active_hold = False
 
 
-def _start_loop(macro):
+def _start_loop(macro, args=()):
     rt = macro.runtime
     rt.stop_event.clear()
     rt.active_hold = True
-    rt.thread = threading.Thread(target=_loop_until_stopped, args=(macro,), daemon=True)
+    rt.thread = threading.Thread(target=_loop_until_stopped, args=(macro, args), daemon=True)
     rt.thread.start()
 
 
@@ -1528,56 +1555,66 @@ async def watch_device(path, kind):
 
 
 async def _handle_control_client(reader, writer):
-    """One line in, one line out, then close. Commands:
-      FIRE <macro name>   -- trigger a macro by its exact display name,
-                              same semantics as its combo completing
-                              (fire-once / start-or-noop hold / toggle).
-      ABORT                -- same as the abort hotkey.
-      PAUSE / RESUME        -- suppress/restore new macro triggers
-                              (used by the GUI while recording a combo).
+    """One JSON line in, one JSON line out, then close. Requests:
+      {"cmd": "FIRE", "name": "<macro name>", "args": [...]}
+        Trigger a macro by its exact display name, same semantics as
+        its combo completing (fire-once / start-or-noop hold /
+        toggle). "args" are extra positional args for a macro that
+        declared arguments(...) -- always optional, default [].
+      {"cmd": "ABORT"}
+        Same as the abort hotkey.
+      {"cmd": "PAUSE"} / {"cmd": "RESUME"}
+        Suppress/restore new macro triggers (used by the GUI while
+        recording a combo).
+    Responses are always {"ok": true, ...} or {"ok": false, "error": "..."}.
+    JSON (rather than a hand-parsed line of text) specifically so
+    "args" can carry arbitrary strings -- spaces, quotes, unicode,
+    whatever -- without inventing an escaping scheme of our own.
     """
     try:
         line = await reader.readline()
-        cmd = line.decode("utf-8", "replace").strip()
+        try:
+            payload = json.loads(line.decode("utf-8", "replace").strip())
+        except (ValueError, TypeError):
+            writer.write((json.dumps({"ok": False, "error": "malformed request"}) + "\n").encode())
+            await writer.drain()
+            return
 
+        cmd = payload.get("cmd")
         if cmd == "ABORT":
             abort_all()
-            writer.write(b"OK\n")
+            resp = {"ok": True}
 
         elif cmd == "PAUSE":
             _external_pause.set()
-            writer.write(b"OK\n")
+            resp = {"ok": True}
 
         elif cmd == "RESUME":
             _external_pause.clear()
-            writer.write(b"OK\n")
+            resp = {"ok": True}
 
-        elif cmd.startswith("FIRE "):
-            name = cmd[len("FIRE "):]
+        elif cmd == "FIRE":
+            name = payload.get("name", "")
+            args = payload.get("args") or []
             match = next((m for m in MACROS if m.name == name), None)
             if match is None:
-                writer.write(f"ERR no macro named {name!r}\n".encode())
+                resp = {"ok": False, "error": f"no macro named {name!r}"}
             elif not match.enabled:
-                writer.write(f"ERR {name!r} is disabled in the active profile\n".encode())
+                resp = {"ok": False, "error": f"{name!r} is disabled in the active profile"}
             else:
-                if match.repeat_mode == "none":
-                    _fire_once(match)
-                elif match.repeat_mode == "hold":
-                    if not _is_looping(match):
-                        _start_loop(match)
-                elif match.repeat_mode == "toggle":
-                    if _is_looping(match):
-                        _stop_loop(match)
-                    else:
-                        _start_loop(match)
-                writer.write(b"OK\n")
+                try:
+                    _trigger_macro(match, tuple(args))
+                    resp = {"ok": True}
+                except Exception as exc:
+                    resp = {"ok": False, "error": f"{name!r} failed to start: {exc}"}
         else:
-            writer.write(b"ERR unknown command\n")
+            resp = {"ok": False, "error": "unknown command"}
 
+        writer.write((json.dumps(resp) + "\n").encode())
         await writer.drain()
     except Exception as exc:
         try:
-            writer.write(f"ERR {exc}\n".encode())
+            writer.write((json.dumps({"ok": False, "error": str(exc)}) + "\n").encode())
             await writer.drain()
         except Exception:
             pass
@@ -1600,14 +1637,16 @@ async def _control_server():
         await server.serve_forever()
 
 
-def send_control_command(cmd, timeout=3.0):
+def send_control_command(payload, timeout=3.0):
     """Synchronous client for the control socket above -- used by the
     `puppetry --name=...`/`--abort` CLI and by the GUI's combo
     recorder (PAUSE/RESUME), NOT by the GUI's normal editing flow
     (that still only ever touches disk + `systemctl --user restart`,
-    same as always). Returns (ok, message); ok=False (with a message
-    explaining why) if the daemon isn't running, the socket doesn't
-    exist, the connection failed, or the daemon replied with an error.
+    same as always). `payload` is a dict, e.g. {"cmd": "ABORT"} or
+    {"cmd": "FIRE", "name": "...", "args": [...]}. Returns (ok,
+    message); ok=False (with a message explaining why) if the daemon
+    isn't running, the socket doesn't exist, the connection failed, or
+    the daemon replied with an error.
     """
     if not CONTROL_SOCKET.exists():
         return False, "macro-daemon isn't running (no control socket found)"
@@ -1615,14 +1654,18 @@ def send_control_command(cmd, timeout=3.0):
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         sock.settimeout(timeout)
         sock.connect(str(CONTROL_SOCKET))
-        sock.sendall((cmd + "\n").encode("utf-8"))
-        resp = sock.recv(4096).decode("utf-8", "replace").strip()
+        sock.sendall((json.dumps(payload) + "\n").encode("utf-8"))
+        raw = sock.recv(65536).decode("utf-8", "replace").strip()
         sock.close()
     except OSError as exc:
         return False, f"couldn't reach macro-daemon: {exc}"
-    if resp.startswith("OK"):
-        return True, resp
-    return False, resp or "no response from macro-daemon"
+    try:
+        resp = json.loads(raw)
+    except (ValueError, TypeError):
+        return False, raw or "no response from macro-daemon"
+    if resp.get("ok"):
+        return True, resp.get("message", "OK")
+    return False, resp.get("error", "unknown error")
 
 
 async def main():
