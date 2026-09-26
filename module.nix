@@ -1,5 +1,14 @@
 # Puppetry -- NixOS module
 #
+# UPDATED THIS SESSION: the daemon is now a C++ binary (native/) instead
+# of the pure-Python macro_daemon.py, and the editor is PySide6 (Qt)
+# instead of GTK4 -- see HANDOFF_README.md for what's verified vs not.
+# This file has NOT been evaluated against a real `nixos-rebuild`/`nix
+# build` (no `nix` binary in the sandbox this was written in) -- treat
+# the derivations below as a careful draft, not a proven-working
+# package, and do a real `nixos-rebuild build --flake .` before trusting
+# it on a machine.
+#
 # Exposes services.puppetry.* options. See this repo's README.md for
 # the full setup walkthrough; short version:
 #
@@ -18,42 +27,56 @@
 let
   cfg = config.services.puppetry;
 
-  # evdev is all the background daemon needs.
-  daemonPython = pkgs.python3.withPackages (ps: [ ps.evdev ]);
+  # The daemon: CMake + a C++17 compiler + embedded CPython (via
+  # python3-embed through pkg-config) + pthreads. No GUI toolkit
+  # dependency at all now -- that's entirely on the GUI derivation
+  # below, and the two processes only ever talk over the control
+  # socket + shared JSON config files, same as the old Python
+  # daemon/GTK GUI pair did.
+  puppetryDaemon = pkgs.stdenv.mkDerivation {
+    pname = "puppetry-daemon";
+    version = "2.0";
+    src = ./native;
+    nativeBuildInputs = [ pkgs.cmake pkgs.pkg-config pkgs.python3 ];
+    buildInputs = [ pkgs.python3 ];
+    # tools/gen_keycodes.py reads THIS BUILD's own
+    # linux/input-event-codes.h at build time (see that script's
+    # docstring for why this isn't a committed static table) --
+    # glibc's kernel headers package provides it in the sandboxed
+    # build environment same as any other libc header.
+    cmakeFlags = [ "-DCMAKE_BUILD_TYPE=Release" ];
+    doCheck = true;
+    checkPhase = ''
+      ctest --output-on-failure
+    '';
+    installPhase = ''
+      mkdir -p $out/bin
+      cp puppetry-daemon $out/bin/puppetry-daemon
+    '';
+  };
 
-  # The GUI additionally needs PyGObject (gi) to talk to GTK4.
-  guiPython = pkgs.python3.withPackages (ps: [ ps.evdev ps.pygobject3 ]);
+  # The GUI: PySide6 + python-evdev (combo recorder) + the C++
+  # daemon's own CLI contract (--name=.../--abort), all still through
+  # `import`able plain files rather than a wheel -- same "ship the
+  # scripts declaratively" approach the old module used, just for a
+  # bigger file set (app.py, puppetry_config.py, combo_recorder.py,
+  # gui/ui_kit/**).
+  guiPython = pkgs.python3.withPackages (ps: [ ps.evdev ps.pyside6 ]);
 
-  # wrapGAppsHook4 walks the full runtime closure of buildInputs and
-  # sets GI_TYPELIB_PATH / XDG_DATA_DIRS / etc. correctly on its own --
-  # far more reliable than hand-listing typelib packages.
-  #
-  # Also installs the icon here (into the standard hicolor theme
-  # layout) rather than as a bare file elsewhere -- icon lookup by
-  # name (as used in the .desktop entry below) walks
-  # share/icons/hicolor/<size>/apps/<name>.<ext> under each
-  # XDG_DATA_DIRS entry, so it has to live at exactly this path to be
-  # found at all.
-  #
-  # assets/puppetry_small_logo.png is the source for every size here
-  # (16px up to 256px) -- it's the simplified/high-contrast variant
-  # designed to stay legible small, and even a 256px app-grid tile is
-  # "small" next to the level of detail in the full logo. Resized at
-  # build time with ImageMagick rather than committing a pile of
-  # pre-scaled duplicates to the repo.
   puppetryIconSizes = [ 16 24 32 48 64 128 256 ];
 
   puppetryGui = pkgs.stdenv.mkDerivation {
     pname = "puppetry";
-    version = "1.0";
+    version = "2.0";
     dontUnpack = true;
-    nativeBuildInputs = [ pkgs.makeWrapper pkgs.wrapGAppsHook4 pkgs.imagemagick ];
-    buildInputs = [ pkgs.gtk4 pkgs.gobject-introspection pkgs.adwaita-icon-theme pkgs.hicolor-icon-theme ];
+    nativeBuildInputs = [ pkgs.makeWrapper pkgs.imagemagick ];
     installPhase = ''
+      mkdir -p $out/share/puppetry
+      cp -r ${./gui}/* $out/share/puppetry/
       mkdir -p $out/bin
       makeWrapper ${guiPython}/bin/python3 $out/bin/puppetry \
-        --set PYTHONPATH /etc/macro-daemon \
-        --add-flags /etc/macro-daemon/macro_gui.py
+        --set PYTHONPATH $out/share/puppetry \
+        --add-flags $out/share/puppetry/app.py
 
       ${lib.concatMapStringsSep "\n" (sz: ''
         mkdir -p $out/share/icons/hicolor/${toString sz}x${toString sz}/apps
@@ -63,14 +86,6 @@ let
     '';
   };
 
-  # A proper .desktop entry, as its own package output rather than a
-  # bare /etc file -- app launchers (KRunner, Hyprland's
-  # wofi/rofi-likes) only scan $XDG_DATA_DIRS/applications, which on
-  # NixOS resolves to /run/current-system/sw/share/applications --
-  # i.e. wherever environment.systemPackages gets aggregated to. A
-  # file dropped at /etc/xdg/applications (an earlier version of this
-  # module did exactly that) is NOT on that path and silently never
-  # shows up in any launcher.
   puppetryDesktopItem = pkgs.makeDesktopItem {
     name = "puppetry";
     exec = "puppetry";
@@ -78,16 +93,16 @@ let
     desktopName = "Puppetry";
     comment = "Configure keyboard/mouse macros";
     categories = [ "Utility" ];
-    startupWMClass = "org.puppetry.Puppetry";  # must match MacroApp's
-                                                 # application_id in
-                                                 # macro_gui.py -- see
-                                                 # comment there for why
-                                                 # it has to be dotted.
+    # Qt's own default WM_CLASS derivation is used now (no PyGObject
+    # application_id to match anymore) -- confirm this still resolves
+    # correctly under real KWin/Hyprland alt-tab/launcher lookups; it's
+    # untested (see HANDOFF_README.md).
+    startupWMClass = "puppetry";
   };
 in
 {
   options.services.puppetry = {
-    enable = lib.mkEnableOption "the Puppetry macro daemon and its GTK4 editor";
+    enable = lib.mkEnableOption "the Puppetry macro daemon and its Qt editor";
 
     user = lib.mkOption {
       type = lib.types.str;
@@ -102,71 +117,29 @@ in
   };
 
   config = lib.mkIf cfg.enable {
-    # uinput isn't loaded by default on most kernels -- needed to
-    # create the virtual output device the daemon writes synthetic
-    # input to.
     boot.kernelModules = [ "uinput" ];
 
-    # /dev/uinput defaults to root-only. This opens it to the "input"
-    # group instead.
-    #
-    # The second rule fixes a real (and non-obvious) classification
-    # bug: udev's built-in input_id heuristic tags our virtual mouse
-    # device as ID_INPUT_JOYSTICK instead of ID_INPUT_MOUSE, which
-    # makes Hyprland/KDE's libinput silently ignore its movement/click
-    # events even though the daemon is emitting them correctly. This
-    # is the same override pattern used for other virtual/uinput
-    # devices (e.g. VR controllers, Steam Controller) that hit the
-    # same heuristic quirk. It must sort after udev's own
-    # classification rules (60-*) to take effect, which NixOS's
-    # extraRules already guarantees by numbering this file higher.
     services.udev.extraRules = ''
       KERNEL=="uinput", MODE="0660", GROUP="input", TAG+="uaccess"
       SUBSYSTEM=="input", ATTRS{name}=="macro-daemon-virtual-mouse", ENV{ID_INPUT_JOYSTICK}="", ENV{ID_INPUT_MOUSE}="1"
     '';
 
-    # Real keyboard/touchpad/mouse event nodes (/dev/input/eventN) are
-    # already group "input" by default on NixOS -- this is what
-    # actually grants read access to them.
     users.users.${cfg.user}.extraGroups = [ "input" ];
-
-    # Ship both scripts declaratively -- `nixos-rebuild switch` is the
-    # only thing that ever updates them. macro_gui.py imports
-    # macro_daemon.py from the same directory at runtime, so both need
-    # to land in /etc/macro-daemon/ together.
-    environment.etc = {
-      "macro-daemon/macro_daemon.py".source = ./macro_daemon.py;
-      "macro-daemon/macro_gui.py".source = ./macro_gui.py;
-    };
 
     environment.systemPackages = [
       puppetryGui
       puppetryDesktopItem
-      pkgs.kdotool  # move_mouse(..., move_to=True) and the editor's
-                    # live "Mouse position" readout both shell out to
-                    # this -- it's how KWin's cursor position gets
-                    # read on Wayland at all (there's no other
-                    # portable way). Requires a KDE Plasma/KWin
-                    # session; Hyprland users can still use everything
-                    # else, move_to will just fall back to its
-                    # corner-anchored path every time.
+      pkgs.kdotool
     ];
 
-    # Runs as a per-user service (not system-wide) -- starts with the
-    # user's login session, on either Hyprland or Plasma, and dies
-    # with it. That's the right lifetime: it only ever needs to run
-    # while someone's actually at the machine using input devices.
     systemd.user.services.macro-daemon = {
       description = "Puppetry macro daemon";
       wantedBy = [ "default.target" ];
-      path = [ pkgs.kdotool ];  # systemd user services don't reliably
-                                 # inherit the interactive shell's
-                                 # PATH, so this makes it explicit.
+      path = [ pkgs.kdotool ];
       serviceConfig = {
-        ExecStart = "${daemonPython}/bin/python3 /etc/macro-daemon/macro_daemon.py";
+        ExecStart = "${puppetryDaemon}/bin/puppetry-daemon";
         Restart = "on-failure";
         RestartSec = 2;
-        Environment = "PYTHONUNBUFFERED=1";
       };
     };
   };
