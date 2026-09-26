@@ -43,6 +43,7 @@ set(CORE_SOURCES
     src/primitives.cpp
     src/python_embed.cpp
     src/simplified_names.cpp
+    src/transcriber.cpp
     src/uinput_device.cpp
 )
 
@@ -61,6 +62,9 @@ target_link_directories(puppetry_core PUBLIC ${PYTHON_LIBRARY_DIRS})
 add_executable(puppetry-daemon src/main.cpp)
 target_link_libraries(puppetry-daemon PRIVATE puppetry_core)
 
+add_executable(puppetry-transcribe src/transcribe_main.cpp)
+target_link_libraries(puppetry-transcribe PRIVATE puppetry_core)
+
 # ---------------------------------------------------------------------
 # Tests -- all runnable without real /dev/input or /dev/uinput access
 # (see the project handoff for exactly what each one does and doesn't
@@ -78,5 +82,15 @@ puppetry_test(test_control_socket tests/test_control_socket.cpp)
 puppetry_test(test_python_embed tests/test_python_embed.cpp)
 puppetry_test(test_native_vm tests/test_native_vm.cpp)
 puppetry_test(test_mixed_calls tests/test_mixed_calls.cpp)
+puppetry_test(test_timing tests/test_timing.cpp)
+# Timing-sensitive: meaningful on a desktop, but a loaded build machine can
+# deschedule it. Labelled so packaged builds can skip it (ctest -LE timing).
+set_tests_properties(test_timing PROPERTIES LABELS timing)
+puppetry_test(test_transcriber tests/test_transcriber.cpp)
 
-install(TARGETS puppetry-daemon RUNTIME DESTINATION bin)
+# Timing benchmark -- built, but NOT a ctest test (numbers depend on the
+# machine). ./bench_cps [iterations]
+add_executable(bench_cps tests/bench_cps.cpp)
+target_link_libraries(bench_cps PRIVATE puppetry_core)
+
+install(TARGETS puppetry-daemon puppetry-transcribe RUNTIME DESTINATION bin)

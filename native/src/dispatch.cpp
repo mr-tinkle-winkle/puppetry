@@ -140,48 +140,59 @@ static bool should_forward(Runtime& rt, const std::string& kind, int code, bool 
 
 void watch_device(Runtime& rt, MacroRegistry& registry, std::vector<std::unique_ptr<Macro>>& macros,
                    InputDevice& dev, const std::string& kind, int abort_code) {
-    (void)registry;
-    if (kind == "keyboard") {
+    {
         std::lock_guard<std::mutex> lock(rt.grab_mutex);
-        rt.watched_keyboard = &dev;
-    } else {
-        std::lock_guard<std::mutex> lock(rt.grab_mutex);
-        rt.watched_mouse = &dev;
+        (kind == "keyboard" ? rt.watched_keyboard : rt.watched_mouse) = &dev;
     }
     std::fprintf(stderr, "Watching %s -- read-only, not grabbed\n", dev.path().c_str());
 
-    RawEvent ev;
-    while (dev.read_event(ev)) {
-        if (ev.type == EV_KEY) {
-            bool original_wants_forward = apply_act_as(rt, ev.code, ev.value);
+    auto on_trigger = [&](Macro& m) { trigger_macro(rt, registry, m); };
 
-            handle_key_event(rt, macros, abort_code, ev.code, ev.value, [&](Macro& m) {
-                trigger_macro(rt, registry, m);
-            });
+    // While the real device is grabbed (ignore()/actAs suppression), we
+    // re-emit whatever isn't suppressed. Events are collected per
+    // hardware frame and written as ONE frame on the real SYN_REPORT --
+    // the first C++ version wrote each event + its own SYN separately,
+    // which split a diagonal mouse movement (REL_X + REL_Y) into two
+    // frames and cost a syscall per event.
+    std::vector<struct input_event> out_kb, out_mouse;
+    out_kb.reserve(16);
+    out_mouse.reserve(16);
+    auto push = [](std::vector<struct input_event>& v, unsigned short type, unsigned short code, int value) {
+        struct input_event e = {};
+        e.type = type; e.code = code; e.value = value;
+        v.push_back(e);
+    };
 
-            bool grabbed = (kind == "keyboard") ? rt.keyboard_grabbed : rt.mouse_grabbed;
-            if (grabbed) {
-                // Mirrors watch_device()'s forwarding rules exactly: a
-                // real key-up is ALWAYS forwarded regardless of
-                // suppression (the stuck-key safety net), a real
-                // key-down is forwarded only if nothing is currently
-                // suppressing it.
-                bool forward = (ev.value == 0) || should_forward(rt, kind, ev.code, original_wants_forward);
-                if (forward) {
-                    UinputDevice& out = is_button_code(ev.code) ? rt.ui_mouse : rt.ui_keyboard;
-                    out.write_key(ev.code, ev.value);
-                    out.syn();
+    RawEvent evs[64];
+    while (true) {
+        int n = dev.read_events(evs, 64);
+        if (n < 0) break;
+        for (int i = 0; i < n; ++i) {
+            const RawEvent& ev = evs[i];
+            if (ev.type == EV_KEY) {
+                bool original_wants_forward = apply_act_as(rt, ev.code, ev.value);
+                handle_key_event(rt, macros, abort_code, ev.code, ev.value, on_trigger);
+
+                bool grabbed = (kind == "keyboard") ? rt.keyboard_grabbed.load() : rt.mouse_grabbed.load();
+                if (grabbed) {
+                    // A real key-UP is ALWAYS forwarded (stuck-key safety
+                    // net), a key-DOWN only if nothing suppresses it.
+                    bool forward = (ev.value == 0) || should_forward(rt, kind, ev.code, original_wants_forward);
+                    if (forward) push(is_mouse_button(ev.code) ? out_mouse : out_kb, EV_KEY, ev.code, ev.value);
                 }
-            }
-        } else if (ev.type == EV_REL && kind == "mouse") {
-            bool movement_ignored;
-            {
-                std::lock_guard<std::mutex> lock(rt.ignore_mutex);
-                movement_ignored = rt.ignore_mouse_movement;
-            }
-            if (rt.mouse_grabbed && !movement_ignored) {
-                rt.ui_mouse.write_rel(ev.code, ev.value);
-                rt.ui_mouse.syn();
+            } else if (ev.type == EV_REL && kind == "mouse") {
+                if (rt.mouse_grabbed.load()) {
+                    bool movement_ignored;
+                    {
+                        std::lock_guard<std::mutex> lock(rt.ignore_mutex);
+                        movement_ignored = rt.ignore_mouse_movement;
+                    }
+                    bool is_motion = ev.code == REL_X || ev.code == REL_Y;
+                    if (!(is_motion && movement_ignored)) push(out_mouse, EV_REL, ev.code, ev.value);
+                }
+            } else if (ev.type == EV_SYN && ev.code == SYN_REPORT) {
+                if (!out_kb.empty()) { rt.ui_keyboard.frame(out_kb.data(), out_kb.size(), true); out_kb.clear(); }
+                if (!out_mouse.empty()) { rt.ui_mouse.frame(out_mouse.data(), out_mouse.size(), true); out_mouse.clear(); }
             }
         }
     }

@@ -26,6 +26,13 @@ namespace puppetry {
 void python_embed_init(Runtime& rt);
 void python_embed_shutdown();
 
+// Attach/detach the calling thread to the interpreter for its lifetime
+// (one PyThreadState per thread instead of one per macro call). Nests.
+// python_embed_init() installs these as the macro-thread hooks; exposed
+// for threads that run macros outside trigger_macro() (benchmarks).
+void python_thread_enter();
+void python_thread_exit();
+
 // Compiles ONE macro's body into a PythonMacroBody. `macro_def` is the
 // macro's JSON object from macros.json (code, simplified_names,
 // ignore_keyboard/ignore_mouse_buttons/ignore_mouse_movement).

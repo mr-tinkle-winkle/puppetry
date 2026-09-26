@@ -29,6 +29,22 @@ namespace puppetry {
 
 using json = nlohmann::json;
 
+// Tolerant JSON field readers. nlohmann's value(key, default) THROWS if
+// the key exists but holds another type -- e.g. a brand-new macro whose
+// "id" is still null made the whole macro fail to compile. Config is
+// hand-editable too, so a wrong type falls back instead of throwing.
+inline std::string json_str(const json& j, const char* key, const std::string& fallback) {
+    auto it = j.find(key);
+    return (it != j.end() && it->is_string()) ? it->get<std::string>() : fallback;
+}
+inline bool json_bool(const json& j, const char* key, bool fallback) {
+    auto it = j.find(key);
+    if (it == j.end()) return fallback;
+    if (it->is_boolean()) return it->get<bool>();
+    if (it->is_number()) return it->get<double>() != 0;
+    return fallback;
+}
+
 class MacroCompileError : public std::runtime_error {
 public:
     explicit MacroCompileError(const std::string& msg) : std::runtime_error(msg) {}
@@ -134,6 +150,18 @@ public:
 
     bool combo_is_subset_of(const std::vector<int>& held_set) const;
 };
+
+// Called at the start/end of every macro thread (fire-once or loop).
+// python_embed installs these so each macro thread gets ONE Python
+// thread state for its whole life -- without it, every loop iteration
+// of a python_on macro created and destroyed a PyThreadState
+// (PyGILState_Ensure/Release on a thread that has none), which is real
+// allocation + interpreter-lock work per iteration.
+struct MacroThreadHooks {
+    void (*enter)() = nullptr;
+    void (*exit)() = nullptr;
+};
+MacroThreadHooks& macro_thread_hooks();
 
 // Dispatches a completed trigger according to repeat_mode -- mirrors
 // _trigger_macro()/_fire_once()/_loop_until_stopped()/_start_loop()/

@@ -9,6 +9,7 @@
 #include <cassert>
 #include <chrono>
 #include <cstdio>
+#include <thread>
 #include "macro.hpp"
 #include "python_embed.hpp"
 
@@ -83,6 +84,45 @@ int main() {
         compile_python_macro(syntax_bad, registry, {});
     } catch (const std::runtime_error&) { threw = true; }
     CHECK(threw);
+
+    // Regression: abort mid-tap() used to throw a C++ exception straight
+    // through CPython's C frames (undefined behavior / crash). It must
+    // come back out of run() as a clean MacroAborted instead.
+    {
+        json long_tap = {{"id", "m5"}, {"name", "Long Tap"}, {"code", "tap(KEY_A, 5)\n"}};
+        auto m = compile_python_macro(long_tap, registry, {});
+        std::thread aborter([&] { std::this_thread::sleep_for(std::chrono::milliseconds(50)); rt.abort_flag = true; });
+        bool aborted = false;
+        python_thread_enter();
+        try { m->run(rt, registry, {}); } catch (const MacroAborted&) { aborted = true; }
+        python_thread_exit();
+        aborter.join();
+        CHECK(aborted);
+        rt.abort_flag = false;
+    }
+
+    // Regression: abort during type(..., async_=True) used to let the
+    // exception escape a background std::thread -> std::terminate(),
+    // killing the whole daemon. Surviving to the next line is the check.
+    {
+        json async_type = {{"id", "m6"}, {"name", "Async Type"}, {"code", "type('hello world', 0.5, async_=True)\n"}};
+        auto m = compile_python_macro(async_type, registry, {});
+        m->run(rt, registry, {});
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        rt.abort_flag = true;
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        rt.abort_flag = false;
+        CHECK(true);
+    }
+
+    // Unknown keyword arguments are rejected instead of silently ignored.
+    {
+        json typo = {{"id", "m7"}, {"name", "Typo"}, {"code", "tap(KEY_A, time=0.1)\n"}};
+        auto m = compile_python_macro(typo, registry, {});
+        rt.synth_held.take_all(); // the aborted async 'h' above was left down on purpose
+        m->run(rt, registry, {}); // prints the TypeError; must not crash
+        CHECK(rt.synth_held.empty()); // rejected before kd() -- nothing pressed
+    }
 
     // Correct shutdown order: drop every CompiledMacro (which may hold
     // a live PyObject*) BEFORE tearing down the interpreter. main.cpp

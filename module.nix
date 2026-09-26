@@ -46,13 +46,12 @@ let
     # build environment same as any other libc header.
     cmakeFlags = [ "-DCMAKE_BUILD_TYPE=Release" ];
     doCheck = true;
+    # -LE timing: skip the timing-accuracy test inside the build
+    # sandbox (a loaded builder can deschedule it); it's for desktops.
     checkPhase = ''
-      ctest --output-on-failure
+      ctest --output-on-failure -LE timing
     '';
-    installPhase = ''
-      mkdir -p $out/bin
-      cp puppetry-daemon $out/bin/puppetry-daemon
-    '';
+    # (default cmake install: puppetry-daemon + puppetry-transcribe)
   };
 
   # The GUI: PySide6 + python-evdev (combo recorder) + the C++
@@ -76,6 +75,7 @@ let
       mkdir -p $out/bin
       makeWrapper ${guiPython}/bin/python3 $out/bin/puppetry \
         --set PYTHONPATH $out/share/puppetry \
+        --set PUPPETRY_BIN_DIR ${puppetryDaemon}/bin \
         --add-flags $out/share/puppetry/app.py
 
       ${lib.concatMapStringsSep "\n" (sz: ''
@@ -139,6 +139,9 @@ in
       serviceConfig = {
         ExecStart = "${puppetryDaemon}/bin/puppetry-daemon";
         Restart = "on-failure";
+        # Kernel timer slack 1ns for the daemon (main() also sets this
+        # itself; belt and braces so it holds from the first instruction).
+        TimerSlackNSec = 1;
         RestartSec = 2;
       };
     };

@@ -90,7 +90,7 @@ std::string ControlSocketServer::handle_line(const std::string& line) {
         return json{{"ok", false}, {"error", "malformed request"}}.dump();
     }
 
-    std::string cmd = payload.value("cmd", "");
+    std::string cmd = json_str(payload, "cmd", "");
     json resp;
 
     if (cmd == "ABORT") {
@@ -103,7 +103,7 @@ std::string ControlSocketServer::handle_line(const std::string& line) {
         rt_.external_pause.store(false);
         resp = {{"ok", true}};
     } else if (cmd == "FIRE") {
-        std::string name = payload.value("name", "");
+        std::string name = json_str(payload, "name", "");
         std::vector<std::string> args;
         if (payload.contains("args") && payload["args"].is_array()) {
             for (const auto& a : payload["args"]) {

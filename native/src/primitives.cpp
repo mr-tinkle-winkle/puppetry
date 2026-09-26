@@ -1,5 +1,7 @@
 #include "primitives.hpp"
 #include <algorithm>
+#include <cerrno>
+#include <ctime>
 #include <chrono>
 #include <cctype>
 #include <cmath>
@@ -17,24 +19,24 @@
 #include <unistd.h>
 #include "keycodes.hpp"
 
+extern char** environ;
+
 namespace puppetry {
 
-static UinputDevice& device_for_code(Runtime& rt, int code) {
-    return is_button_code(code) ? rt.ui_mouse : rt.ui_keyboard;
+using Clock = std::chrono::steady_clock;
+
+static inline UinputDevice& device_for_code(Runtime& rt, int code) {
+    return is_mouse_button(code) ? rt.ui_mouse : rt.ui_keyboard;
 }
 
 void kd(Runtime& rt, int code) {
-    device_for_code(rt, code).write_key(code, 1);
-    device_for_code(rt, code).syn();
-    std::lock_guard<std::mutex> lock(rt.synth_held_mutex);
-    rt.synth_held.insert(code);
+    device_for_code(rt, code).key_frame(code, 1);
+    rt.synth_held.set(code);
 }
 
 void ku(Runtime& rt, int code) {
-    device_for_code(rt, code).write_key(code, 0);
-    device_for_code(rt, code).syn();
-    std::lock_guard<std::mutex> lock(rt.synth_held_mutex);
-    rt.synth_held.erase(code);
+    device_for_code(rt, code).key_frame(code, 0);
+    rt.synth_held.clear(code);
 }
 
 void tap(Runtime& rt, int code, double time_) {
@@ -50,28 +52,97 @@ void combo_fn(Runtime& rt, const std::vector<int>& keys, double time_) {
 }
 
 void wheel(Runtime& rt, int amount) {
-    rt.ui_mouse.write_rel(REL_WHEEL, amount);
-    rt.ui_mouse.syn();
+    rt.ui_mouse.wheel_frame(amount);
+}
+
+// ---------------------------------------------------------------------
+// Waiting.
+//
+// Why this isn't just sleep_for(): the kernel's sleep call has a floor
+// of tens of microseconds (timer slack + scheduler wakeup) no matter how
+// small the request, so every tiny wait() used to cost ~30-75us. That
+// floor, paid twice per tap cycle (tap's hold + the loop's wait), is
+// exactly what capped the autoclicker at ~16k/s. Now:
+//   - waits shorter than a margin are spun on the (vDSO, ~20ns) clock
+//     instead of slept -- sleeping could never have been that short;
+//   - longer waits sleep to an ABSOLUTE deadline (no drift from
+//     re-computing "now"), minus that margin, then spin the rest, so
+//     they land within ~1us instead of overshooting by the wakeup
+//     latency;
+//   - precise=True just uses a bigger margin (1ms), so it also rides
+//     out scheduler hiccups on a busy system -- same accuracy goal as
+//     the old full busy-wait, a fraction of the CPU.
+// main() also drops the daemon's timer slack to 1ns (PR_SET_TIMERSLACK),
+// which shrinks the sleep-overshoot the margin has to cover.
+// ---------------------------------------------------------------------
+
+static constexpr auto kSpinMargin = std::chrono::microseconds(100);
+static constexpr auto kPreciseMargin = std::chrono::milliseconds(1);
+static constexpr auto kMaxSleepChunk = std::chrono::milliseconds(30); // abort responsiveness
+static constexpr auto kAnchorWindow = std::chrono::milliseconds(2);
+
+static inline void cpu_relax() {
+#if defined(__x86_64__) || defined(__i386__)
+    __builtin_ia32_pause();
+#endif
+}
+
+static void sleep_abs(Clock::time_point tp) {
+    // libstdc++'s steady_clock IS CLOCK_MONOTONIC on Linux.
+    auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(tp.time_since_epoch()).count();
+    struct timespec ts;
+    ts.tv_sec = ns / 1000000000LL;
+    ts.tv_nsec = ns % 1000000000LL;
+    while (clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &ts, nullptr) == EINTR) {}
+}
+
+void wait_until(Runtime& rt, Clock::time_point target, bool precise) {
+    const auto margin = precise ? Clock::duration(kPreciseMargin) : Clock::duration(kSpinMargin);
+    while (true) {
+        rt.check_abort();
+        auto now = Clock::now();
+        if (now >= target) return;
+        if (target - now <= margin) {
+            while (Clock::now() < target) {
+                rt.check_abort();
+                cpu_relax();
+            }
+            return;
+        }
+        sleep_abs(std::min(target - margin, now + Clock::duration(kMaxSleepChunk)));
+    }
 }
 
 void wait_fn(Runtime& rt, double time_, bool precise) {
-    time_ = time_ * Runtime::speed_multiplier();
-    if (!precise) {
-        double remaining = time_;
-        const double chunk = 0.03;
-        while (remaining > 0) {
-            rt.check_abort();
-            double this_chunk = remaining > chunk ? chunk : remaining;
-            std::this_thread::sleep_for(std::chrono::duration<double>(this_chunk));
-            remaining -= this_chunk;
-        }
+    double d = time_ * Runtime::speed_multiplier();
+    auto now = Clock::now();
+    auto dur = (d > 0) ? std::chrono::duration_cast<Clock::duration>(std::chrono::duration<double>(d))
+                       : Clock::duration::zero();
+
+    // Timeline anchoring: if the previous wait() on this thread ended
+    // very recently, measure this wait from THAT deadline instead of
+    // from now, so the few microseconds each line in between costs
+    // (a uinput write, the Python call) don't pile up as drift -- e.g.
+    // a transcribed recording replays on its original timeline instead
+    // of slowly falling behind. Lag is never carried forward: if the
+    // overhead already exceeded this wait, it just doesn't wait, and
+    // the timeline re-bases on "now".
+    auto& anchor = Runtime::wait_anchor();
+    Clock::time_point base = now;
+    if (anchor && now >= *anchor && now - *anchor <= kAnchorWindow) base = *anchor;
+    Clock::time_point target = base + dur;
+    if (target <= now) {
+        anchor = now;
         rt.check_abort();
         return;
     }
-    auto start = std::chrono::steady_clock::now();
-    while (std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count() < time_) {
-        rt.check_abort();
-    }
+    anchor = target;
+    wait_until(rt, target, precise);
+}
+
+bool wait_is_short(double time_) {
+    double d = time_ * Runtime::speed_multiplier();
+    return d < 0.0002;
 }
 
 void speed_fn(Runtime& rt, double multiplier) {
@@ -86,7 +157,7 @@ static void release_held_from(Runtime& rt, const std::string& kind) {
     {
         std::lock_guard<std::mutex> lock(rt.held_mutex);
         for (int code : rt.held) {
-            bool is_button = is_button_code(code);
+            bool is_button = is_mouse_button(code);
             if ((kind == "keyboard" && !is_button) || (kind == "mouse" && is_button)) {
                 stuck.push_back(code);
             }
@@ -94,10 +165,7 @@ static void release_held_from(Runtime& rt, const std::string& kind) {
         for (int code : stuck) rt.held.erase(code);
     }
     UinputDevice& out = (kind == "keyboard") ? rt.ui_keyboard : rt.ui_mouse;
-    for (int code : stuck) {
-        out.write_key(code, 0);
-        out.syn();
-    }
+    for (int code : stuck) out.key_frame(code, 0);
 }
 
 static void apply_grab_state(Runtime& rt) {
@@ -233,9 +301,7 @@ void act_as_fn(Runtime& rt, int key_pressing, bool ignore_original, const std::v
 }
 
 static void move_rel_step(Runtime& rt, int dx, int dy) {
-    if (dx) rt.ui_mouse.write_rel(REL_X, dx);
-    if (dy) rt.ui_mouse.write_rel(REL_Y, dy);
-    rt.ui_mouse.syn();
+    rt.ui_mouse.rel_frame(dx, dy); // X and Y in ONE frame -> a true diagonal, not two stair-steps
 }
 
 static double ease(double t, const std::string& style) {
@@ -251,7 +317,7 @@ static double ease(double t, const std::string& style) {
 // untouched) if kdotool isn't installed, times out, or its output can't
 // be parsed -- callers fall back to the corner-anchored move, same as
 // the original.
-static bool get_cursor_pos_kde(int& x, int& y, double timeout_s = 1.0) {
+bool get_cursor_pos_kde(int& x, int& y, double timeout_s) {
     int out_pipe[2];
     if (pipe(out_pipe) != 0) return false;
     pid_t pid = fork();
@@ -321,16 +387,25 @@ void move_mouse_fn(Runtime& rt, int x_pixels, int y_pixels, double time_,
     if (easing == "none" || scaled_time <= 0) {
         move_rel_step(rt, dx, dy);
     } else {
+        // Paced against absolute per-step deadlines (start + i*step),
+        // not "sleep step_time after each write", so write/wakeup costs
+        // don't stretch the move. Positions are also rounded from the
+        // CUMULATIVE eased target rather than per-step deltas, so
+        // rounding error can't accumulate into a short/long move.
         int steps = std::max(1, (int)(scaled_time * 120));
-        double prev = 0.0;
+        auto start = Clock::now();
+        auto total = std::chrono::duration_cast<Clock::duration>(std::chrono::duration<double>(scaled_time));
+        long sent_x = 0, sent_y = 0;
         for (int i = 1; i <= steps; ++i) {
             rt.check_abort();
-            double t = (double)i / steps;
-            double cur = ease(t, easing);
-            move_rel_step(rt, (int)std::lround(dx * (cur - prev)), (int)std::lround(dy * (cur - prev)));
-            prev = cur;
-            std::this_thread::sleep_for(std::chrono::duration<double>(scaled_time / steps));
+            double cur = ease((double)i / steps, easing);
+            long want_x = std::lround(dx * cur), want_y = std::lround(dy * cur);
+            move_rel_step(rt, (int)(want_x - sent_x), (int)(want_y - sent_y));
+            sent_x = want_x;
+            sent_y = want_y;
+            wait_until(rt, start + total * i / steps, false);
         }
+        Runtime::wait_anchor() = start + total; // a following wait() continues this timeline
     }
 
     if (move_to && had_position) {
@@ -381,31 +456,44 @@ std::string format_command(const std::string& cmd, const std::vector<std::string
 }
 
 void command_fn(const std::string& cmd) {
+    // Everything allocating is prepared BEFORE fork(): after fork() in a
+    // multithreaded process only async-signal-safe calls are safe.
+    std::string path = std::getenv("PATH") ? std::getenv("PATH") : "";
+    std::string extra = "/run/current-system/sw/bin:";
+    if (const char* user = std::getenv("USER"); user && *user)
+        extra += std::string("/etc/profiles/per-user/") + user + "/bin:";
+    if (const char* home = std::getenv("HOME")) extra += std::string(home) + "/.nix-profile/bin:";
+    std::string path_var = "PATH=" + extra + path;
+
+    std::vector<std::string> env_strings;
+    for (char** e = environ; e && *e; ++e) {
+        if (std::strncmp(*e, "PATH=", 5) != 0) env_strings.emplace_back(*e);
+    }
+    env_strings.push_back(path_var);
+    std::vector<char*> envp;
+    for (auto& str : env_strings) envp.push_back(str.data());
+    envp.push_back(nullptr);
+
+    // Double fork: the intermediate child exits immediately and is
+    // reaped right here, so the real command is re-parented to init and
+    // never becomes a zombie of the daemon. (The first C++ version's
+    // comment promised a reaper thread that didn't exist -- every
+    // command() leaked a zombie until the daemon restarted.)
     pid_t pid = fork();
     if (pid < 0) return;
     if (pid == 0) {
-        // Detach fully: new session, stdin from /dev/null, stdout/stderr
-        // inherited from the daemon (so failures show up in
-        // `journalctl --user -u macro-daemon`, per the original's
-        // rationale) -- never DEVNULL'd.
+        pid_t grandchild = fork();
+        if (grandchild != 0) _exit(0);
         setsid();
         int devnull = open("/dev/null", O_RDONLY);
         if (devnull >= 0) { dup2(devnull, STDIN_FILENO); close(devnull); }
-
-        std::string path = std::getenv("PATH") ? std::getenv("PATH") : "";
-        const char* user = std::getenv("USER");
-        std::string extra = "/run/current-system/sw/bin:";
-        if (user && *user) extra += std::string("/etc/profiles/per-user/") + user + "/bin:";
-        const char* home = std::getenv("HOME");
-        if (home) extra += std::string(home) + "/.nix-profile/bin:";
-        setenv("PATH", (extra + path).c_str(), 1);
-
-        execl("/bin/sh", "sh", "-c", cmd.c_str(), (char*)nullptr);
+        // stdout/stderr stay inherited -> failures show up in
+        // `journalctl --user -u macro-daemon`, same as the original.
+        execle("/bin/sh", "sh", "-c", cmd.c_str(), (char*)nullptr, envp.data());
         _exit(127);
     }
-    // Fire-and-forget: don't wait, don't check the exit code. A
-    // background reaper thread (see daemon.cpp) periodically waitpid()s
-    // with WNOHANG so these don't accumulate as zombies.
+    int status;
+    while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {}
 }
 
 // Character -> (code, needs_shift), US QWERTY, built once. Mirrors
@@ -460,10 +548,9 @@ void type_text_fn(Runtime& rt, const std::string& text, double time_per_letter) 
         auto it = char_to_key().find(ch);
         if (it == char_to_key().end()) continue; // unsupported char -- silently skipped
         auto [code, needs_shift] = it->second;
-        int shift_code = key_name_to_code().at("KEY_LEFTSHIFT");
-        if (needs_shift) kd(rt, shift_code);
+        if (needs_shift) kd(rt, KEY_LEFTSHIFT);
         tap(rt, code, time_per_letter);
-        if (needs_shift) ku(rt, shift_code);
+        if (needs_shift) ku(rt, KEY_LEFTSHIFT);
     }
 }
 
@@ -495,17 +582,7 @@ void abort_all(Runtime& rt) {
 
     std::thread([&rt] {
         std::this_thread::sleep_for(std::chrono::milliseconds(300));
-        std::vector<int> stuck;
-        {
-            std::lock_guard<std::mutex> lock(rt.synth_held_mutex);
-            stuck.assign(rt.synth_held.begin(), rt.synth_held.end());
-            rt.synth_held.clear();
-        }
-        for (int code : stuck) {
-            UinputDevice& dev = device_for_code(rt, code);
-            dev.write_key(code, 0);
-            dev.syn();
-        }
+        for (int code : rt.synth_held.take_all()) device_for_code(rt, code).key_frame(code, 0);
         rt.abort_flag.store(false);
     }).detach();
 }

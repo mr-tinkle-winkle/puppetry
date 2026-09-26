@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cctype>
 #include <chrono>
+#include <cstdio>
 #include <regex>
 #include <sstream>
 #include <thread>
@@ -162,31 +163,50 @@ bool Macro::combo_is_subset_of(const std::vector<int>& held_set) const {
     return true;
 }
 
+MacroThreadHooks& macro_thread_hooks() {
+    static MacroThreadHooks hooks;
+    return hooks;
+}
+
+namespace {
+struct ThreadHookScope {
+    ThreadHookScope() { if (macro_thread_hooks().enter) macro_thread_hooks().enter(); }
+    ~ThreadHookScope() { if (macro_thread_hooks().exit) macro_thread_hooks().exit(); }
+};
+} // namespace
+
+static void run_guarded(Runtime& rt, MacroRegistry& registry, Macro& macro, const std::vector<std::string>& args) {
+    try {
+        macro.func->run(rt, registry, args);
+    } catch (const MacroAborted&) {
+        throw;
+    } catch (const std::exception& exc) {
+        std::fprintf(stderr, "Macro '%s' failed: %s\n", macro.name.c_str(), exc.what());
+    }
+}
+
 static void fire_once(Runtime& rt, MacroRegistry& registry, Macro& macro, std::vector<std::string> args) {
-    std::thread([&rt, &registry, &macro, args = std::move(args)]() mutable {
+    std::thread([&rt, &registry, &macro, args = std::move(args)]() {
+        ThreadHookScope scope;
         Runtime::speed_multiplier() = 1.0;
         try {
-            macro.func->run(rt, registry, args);
+            run_guarded(rt, registry, macro, args);
         } catch (const MacroAborted&) {
             // clean stop, not an error -- same as the Python version
-        } catch (const std::exception&) {
-            // A macro's own runtime error shouldn't take the daemon
-            // down; surfaces via the backend's own logging (see
-            // python_embed.cpp/native_vm.cpp) before unwinding here.
         }
     }).detach();
 }
 
-static void loop_until_stopped(Runtime& rt, MacroRegistry& registry, std::shared_ptr<Macro> macro_ptr,
+static void loop_until_stopped(Runtime& rt, MacroRegistry& registry, Macro* macro,
                                 std::vector<std::string> args) {
-    auto rts = macro_ptr->runtime;
+    ThreadHookScope scope;
+    auto rts = macro->runtime;
     try {
-        while (!rts->stop_flag.load()) {
+        while (!rts->stop_flag.load(std::memory_order_relaxed)) {
             Runtime::speed_multiplier() = 1.0;
-            macro_ptr->func->run(rt, registry, args);
+            run_guarded(rt, registry, *macro, args);
         }
     } catch (const MacroAborted&) {
-    } catch (const std::exception&) {
     }
     rts->active_hold.store(false);
 }
@@ -204,15 +224,9 @@ static void start_loop(Runtime& rt, MacroRegistry& registry, Macro& macro, std::
     rts->stop_flag.store(false);
     rts->active_hold.store(true);
     if (rts->thread.joinable()) rts->thread.detach();
-    // loop_until_stopped needs a stable reference to the Macro across
-    // the life of the loop; callers own Macro objects in a container
-    // that outlives the daemon's whole run (MACROS in daemon.cpp), so a
-    // raw pointer wrapped in a non-owning shared_ptr aliasing ctor is
-    // safe here and avoids restructuring Macro storage into
-    // shared_ptr<Macro> everywhere else.
-    Macro* raw = &macro;
-    std::shared_ptr<Macro> alias(std::shared_ptr<void>(), raw);
-    rts->thread = std::thread(loop_until_stopped, std::ref(rt), std::ref(registry), alias, std::move(args));
+    // Macro objects live in a container that outlives the daemon's whole
+    // run (see main.cpp), so a plain pointer is safe here.
+    rts->thread = std::thread(loop_until_stopped, std::ref(rt), std::ref(registry), &macro, std::move(args));
 }
 
 void trigger_macro(Runtime& rt, MacroRegistry& registry, Macro& macro, const std::vector<std::string>& args) {

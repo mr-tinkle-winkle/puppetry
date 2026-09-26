@@ -3,6 +3,9 @@
 // the `puppetry` CLI/GUI (PySide6, see gui/) talks to it purely over
 // the control socket and never links against this binary.
 #include <cstdio>
+#include <iostream>
+#include <iterator>
+#include <sys/prctl.h>
 #include <thread>
 #include <vector>
 #include "config.hpp"
@@ -14,6 +17,7 @@
 #include "native_vm.hpp"
 #include "python_embed.hpp"
 #include "runtime.hpp"
+#include "simplified_names.hpp"
 
 using namespace puppetry;
 
@@ -49,10 +53,47 @@ static std::vector<int> mouse_button_codes() {
 
 static std::shared_ptr<CompiledMacro> compile_macro_body(const json& macro_def, MacroRegistry& registry,
                                                           const std::vector<std::string>& all_macro_names) {
-    if (macro_def.value("python_on", true)) {
+    if (json_bool(macro_def, "python_on", true)) {
         return compile_python_macro(macro_def, registry, all_macro_names);
     }
     return compile_native_macro(macro_def, registry);
+}
+
+// `puppetry-daemon --check`: reads ONE macro's JSON object on stdin,
+// compiles it with exactly the backend the daemon would use (embedded
+// Python or the native fast path), prints "OK" or the error, and exits
+// 0/1. The editor calls this on Save, so a macro that the daemon would
+// reject never gets saved -- the only fully reliable check for
+// python_off macros, whose grammar Python itself doesn't know.
+static int check_mode() {
+    std::string input((std::istreambuf_iterator<char>(std::cin)), std::istreambuf_iterator<char>());
+    json macro_def;
+    try {
+        macro_def = json::parse(input);
+    } catch (const std::exception& exc) {
+        std::printf("invalid JSON: %s\n", exc.what());
+        return 1;
+    }
+    Runtime rt; // never creates devices -- compiling doesn't touch them
+    int rc = 0;
+    MacroRegistry registry;
+    {
+        std::shared_ptr<CompiledMacro> compiled;
+        try {
+            if (json_bool(macro_def, "python_on", true)) {
+                python_embed_init(rt);
+                compiled = compile_python_macro(macro_def, registry, {});
+            } else {
+                compiled = compile_native_macro(macro_def, registry);
+            }
+            std::printf("OK\n");
+        } catch (const std::exception& exc) {
+            std::printf("%s\n", exc.what());
+            rc = 1;
+        }
+    }
+    python_embed_shutdown();
+    return rc;
 }
 
 int main(int argc, char** argv) {
@@ -60,13 +101,34 @@ int main(int argc, char** argv) {
         list_devices_mode();
         return 0;
     }
+    if (argc > 1 && std::string(argv[1]) == "--check") {
+        return check_mode();
+    }
+    if (argc > 1 && std::string(argv[1]) == "--dump-names") {
+        // For the GUI's reference panels / alias pickers: the C++ tables
+        // are the single source of truth, so the GUI never keeps its own
+        // copy that could drift out of sync with what the daemon resolves.
+        json out;
+        out["simplified"] = json::object();
+        for (const auto& [simple, real] : simplified_names_table()) out["simplified"][simple] = real;
+        out["keys"] = json::array();
+        for (const auto& [name, code] : key_name_to_code()) out["keys"].push_back(name);
+        std::printf("%s\n", out.dump().c_str());
+        return 0;
+    }
+
+    // Timer slack 1ns (default 50us): the kernel may otherwise delay
+    // every sleep's wakeup by up to 50us to batch timers -- pure latency
+    // for a daemon whose whole job is timing. Inherited by every thread
+    // created after this point (all of them).
+    prctl(PR_SET_TIMERSLACK, 1UL, 0, 0, 0);
 
     ensure_config_exists();
     json state = load_state();
 
     int abort_code;
     {
-        std::string abort_key = state.value("abort_key", std::string("KEY_PAUSE"));
+        std::string abort_key = json_str(state, "abort_key", "KEY_PAUSE");
         if (abort_key.empty() || !resolve_key_name(abort_key, abort_code)) {
             resolve_key_name("KEY_PAUSE", abort_code);
         }
@@ -118,16 +180,24 @@ int main(int argc, char** argv) {
     state["mouse_name"] = mouse.name;
     save_state(state);
 
-    json profile = load_profile(state.value("active_profile", "profile_1"));
-    std::printf("Loaded profile: %s\n", profile.value("name", state.value("active_profile", "profile_1")).c_str());
-    json enabled_map = profile.value("enabled", json::object());
+    std::string active_profile = json_str(state, "active_profile", "profile_1");
+    json profile;
+    try {
+        profile = load_profile(active_profile);
+    } catch (const std::exception& exc) {
+        std::fprintf(stderr, "Couldn't read profile '%s' (%s) -- running with every macro disabled.\n",
+                     active_profile.c_str(), exc.what());
+        profile = json::object();
+    }
+    std::printf("Loaded profile: %s\n", json_str(profile, "name", active_profile).c_str());
+    json enabled_map = (profile.contains("enabled") && profile["enabled"].is_object()) ? profile["enabled"] : json::object();
 
     json macros_doc = load_macros();
-    json macro_defs = macros_doc.value("macros", json::array());
+    json macro_defs = (macros_doc.contains("macros") && macros_doc["macros"].is_array()) ? macros_doc["macros"] : json::array();
 
     std::vector<std::string> all_macro_names;
     for (const auto& macro_def : macro_defs) {
-        all_macro_names.push_back(sanitize_macro_name(macro_def.value("name", "")));
+        all_macro_names.push_back(sanitize_macro_name(json_str(macro_def, "name", "")));
     }
 
     python_embed_init(rt);
@@ -137,21 +207,23 @@ int main(int argc, char** argv) {
     for (const auto& macro_def : macro_defs) {
         try {
             auto m = std::make_unique<Macro>();
-            m->id = macro_def.value("id", "");
-            m->name = macro_def.value("name", m->id);
-            m->enabled = enabled_map.value(m->id, false);
-            m->repeat_mode = parse_repeat_mode(macro_def.value("repeat_mode", "none"));
-            m->trigger_edge = parse_trigger_edge(macro_def.value("trigger_edge", "down"));
-            for (const auto& key_name : macro_def.value("combo", json::array())) {
-                int code;
-                if (resolve_key_name(key_name.get<std::string>(), code)) m->combo.push_back(code);
+            m->id = json_str(macro_def, "id", "");
+            m->name = json_str(macro_def, "name", m->id);
+            m->enabled = json_bool(enabled_map, m->id.c_str(), false);
+            m->repeat_mode = parse_repeat_mode(json_str(macro_def, "repeat_mode", "none"));
+            m->trigger_edge = parse_trigger_edge(json_str(macro_def, "trigger_edge", "down"));
+            if (macro_def.contains("combo") && macro_def["combo"].is_array()) {
+                for (const auto& key_name : macro_def["combo"]) {
+                    int code;
+                    if (key_name.is_string() && resolve_key_name(key_name.get<std::string>(), code)) m->combo.push_back(code);
+                }
             }
             m->func = compile_macro_body(macro_def, registry, all_macro_names);
             registry.set(sanitize_macro_name(m->name), m->func);
             macros.push_back(std::move(m));
         } catch (const std::exception& exc) {
             std::fprintf(stderr, "Skipping macro '%s': %s\n",
-                          macro_def.value("name", macro_def.value("id", "?")).c_str(), exc.what());
+                          json_str(macro_def, "name", json_str(macro_def, "id", "?")).c_str(), exc.what());
         }
     }
 

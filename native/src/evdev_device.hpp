@@ -70,6 +70,10 @@ struct RawEvent {
     unsigned short type;
     unsigned short code;
     int value;
+    // Kernel timestamp (set when the kernel received the event from the
+    // hardware), microsecond resolution -- the finest timing the OS
+    // itself has for input. CLOCK_MONOTONIC after use_monotonic_clock().
+    long long time_us = 0;
 };
 
 class InputDevice {
@@ -89,6 +93,16 @@ public:
     // or a fatal read error (device unplugged, etc.) -- caller should
     // stop watching this device.
     bool read_event(RawEvent& out);
+
+    // Reads every event currently available, up to `max`, in ONE
+    // read() syscall (blocking until at least one is available).
+    // Returns the count, or -1 on EOF/fatal error.
+    int read_events(RawEvent* out, int max);
+
+    // EVIOCSCLOCKID(CLOCK_MONOTONIC): stamp this fd's events on the
+    // monotonic clock instead of wall-clock time, so timestamps from
+    // two devices share one timeline and can't jump with NTP/DST.
+    bool use_monotonic_clock();
 
     // EVIOCGRAB -- exclusive grab. Best-effort: throws on failure so
     // the caller can log it and treat the ignore() request as

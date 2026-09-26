@@ -1,28 +1,28 @@
 """
-Puppetry's own config I/O for the Qt GUI -- reads/writes the exact same
-on-disk files the C++ daemon uses (~/.config/macro-daemon/state.json,
-macros.json, profiles/*.json, aliases.json), so the GUI and the daemon
-never disagree about where config lives. Mirrors native/src/config.cpp's
-paths and defaults exactly.
+Puppetry's on-disk config I/O for the Qt GUI -- reads/writes the exact
+same files the C++ daemon uses (~/.config/macro-daemon/state.json,
+macros.json, profiles/*.json, aliases.json), same paths and format as
+native/src/config.cpp and the old Python daemon.
 
-Also hosts Puppetry's ThemeSettings storage: rather than a separate TOML
-file, theme values live under state.json's "theme" key -- one config
-location for the whole app, matching how state.json already holds
-device paths / active profile / abort key.
+Theme settings live under state.json's "theme" key (one config location
+for the whole app). Kit widgets call the theme provider from
+constructors AND paintEvents, so state.json reads are cached by mtime
+(UI_THEMING_GUIDE.md pitfall #1).
 
-Caching per UI_THEMING_GUIDE.md pitfall #1: kit widgets call
-get_settings() (theme_config.py) from constructors AND paintEvents, so
-re-parsing JSON on every call is a measured, real performance problem
-(afterglow: 400+ calls per refresh, over half the refresh time). This
-module caches state.json by mtime and only re-reads when it actually
-changed.
+Also: locating the native helper binaries (daemon, transcriber), and
+the two things the GUI asks them for -- validating a macro exactly the
+way the daemon will compile it, and the key-name tables.
 """
 from __future__ import annotations
 
+import copy
 import json
 import os
+import shutil
 import socket as _socket
+import subprocess
 from dataclasses import asdict
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -35,23 +35,23 @@ ALIASES_FILE = CONFIG_DIR / "aliases.json"
 PROFILES_DIR = CONFIG_DIR / "profiles"
 CONTROL_SOCKET = CONFIG_DIR / "control.sock"
 
-# Puppetry's own placeholder theme -- swap these hex values for
-# whatever the user provides (see UI_THEMING_GUIDE.md section 2). Left
-# as the kit's own monochrome placeholder until real colors are given;
-# ask which role each provided color maps to rather than guessing.
+# Puppetry's own placeholder theme -- swap these hex values for whatever
+# the user provides (see UI_THEMING_GUIDE.md section 2).
 PUPPETRY_THEME_DEFAULTS = ThemeSettings()
 
+DEFAULT_PROFILE_NAMES = ["Profile 1", "Profile 2", "Profile 3"]
+
+
+# ---------------------------------------------------------------------------
+# state.json (cached)
+# ---------------------------------------------------------------------------
 
 class _StateCache:
-    """Caches state.json by (mtime, size), same two-entry-point shape as
-    the guide's own pitfall #1 fix: `load()` for a mutate-and-save copy,
-    `load_readonly()` for the shared cached object kit widgets pull
-    through via the theme provider. Never mutate what load_readonly()
-    returns."""
+    """load_readonly() returns a shared cached object (never mutate it);
+    load() returns a deep copy that's safe to change and save."""
 
     def __init__(self) -> None:
-        self._mtime: float | None = None
-        self._size: int | None = None
+        self._key = None
         self._data: dict[str, Any] | None = None
 
     def load_readonly(self) -> dict[str, Any]:
@@ -59,14 +59,16 @@ class _StateCache:
             stat = STATE_FILE.stat()
         except FileNotFoundError:
             return _default_state()
-        if self._data is not None and stat.st_mtime == self._mtime and stat.st_size == self._size:
-            return self._data
-        self._data = json.loads(STATE_FILE.read_text())
-        self._mtime, self._size = stat.st_mtime, stat.st_size
+        key = (stat.st_mtime_ns, stat.st_size)
+        if self._data is None or key != self._key:
+            try:
+                self._data = json.loads(STATE_FILE.read_text())
+            except (OSError, ValueError):
+                return _default_state()
+            self._key = key
         return self._data
 
     def load(self) -> dict[str, Any]:
-        import copy
         return copy.deepcopy(self.load_readonly())
 
     def invalidate(self) -> None:
@@ -82,6 +84,7 @@ def _default_state() -> dict[str, Any]:
         "mouse_path": None, "mouse_name": None,
         "active_profile": "profile_1", "autosave": False,
         "abort_key": "KEY_PAUSE",
+        "record_time_seconds": 3.0,
         "theme": asdict(PUPPETRY_THEME_DEFAULTS),
     }
 
@@ -94,7 +97,7 @@ def ensure_config_exists() -> None:
         MACROS_FILE.write_text(json.dumps({"macros": []}, indent=2))
     if not ALIASES_FILE.exists():
         ALIASES_FILE.write_text(json.dumps({"aliases": {}}, indent=2))
-    for i, name in enumerate(["Profile 1", "Profile 2", "Profile 3"], start=1):
+    for i, name in enumerate(DEFAULT_PROFILE_NAMES, start=1):
         path = PROFILES_DIR / f"profile_{i}.json"
         if not path.exists():
             path.write_text(json.dumps({"name": name, "enabled": {}}, indent=2))
@@ -109,27 +112,27 @@ def save_state(state: dict[str, Any]) -> None:
     _state_cache.invalidate()
 
 
+_theme_cache: tuple[Any, ThemeSettings | None] = (None, None)
+
+
 def load_theme_settings() -> ThemeSettings:
-    """The function to hand to ui_kit.theme_config.set_settings_provider().
-    Returns the SHARED cached object underlying load_readonly()'s
-    "theme" key, turned into a ThemeSettings -- cheap enough to call
-    from paintEvent, per the guide's own requirement."""
+    """The theme provider (ui_kit.theme_config.set_settings_provider).
+    Called from paintEvents, so it's an identity check in the common
+    case: rebuilt only when state.json itself was re-read."""
+    global _theme_cache
     state = _state_cache.load_readonly()
-    theme_dict = state.get("theme") or {}
-    # Merge onto defaults so a state.json saved before a new theme field
-    # existed doesn't crash -- same "stale saved config" concern the
-    # guide's pitfall #11 warns about, just for missing keys rather than
-    # a stale default value.
+    if _theme_cache[0] is state and _theme_cache[1] is not None:
+        return _theme_cache[1]
     merged = asdict(PUPPETRY_THEME_DEFAULTS)
-    merged.update(theme_dict)
-    return ThemeSettings(**{k: merged[k] for k in asdict(PUPPETRY_THEME_DEFAULTS)})
+    merged.update({k: v for k, v in (state.get("theme") or {}).items() if k in merged})
+    theme = ThemeSettings(**merged)
+    _theme_cache = (state, theme)
+    return theme
 
 
-def save_theme_settings(theme: ThemeSettings) -> None:
-    state = load_state()
-    state["theme"] = asdict(theme)
-    save_state(state)
-
+# ---------------------------------------------------------------------------
+# macros / aliases / profiles
+# ---------------------------------------------------------------------------
 
 def load_macros() -> dict[str, Any]:
     if not MACROS_FILE.exists():
@@ -172,26 +175,35 @@ def load_profile(profile_id: str) -> dict[str, Any]:
 
 
 def save_profile(profile_id: str, profile: dict[str, Any]) -> None:
+    (PROFILES_DIR / f"{profile_id}.json").write_text(json.dumps(profile, indent=2))
+
+
+def delete_profile(profile_id: str) -> None:
     path = PROFILES_DIR / f"{profile_id}.json"
-    path.write_text(json.dumps(profile, indent=2))
+    if path.exists():
+        path.unlink()
 
 
-def restart_daemon_service() -> None:
-    """Applies an on-disk config change the same way the old GTK editor
-    did: `systemctl --user restart macro-daemon`, NOT a live-reload
-    message -- the C++ daemon has no live-reload logic either, same
-    design as the Python one it replaces."""
-    os.system("systemctl --user restart macro-daemon")
+# ---------------------------------------------------------------------------
+# daemon process + control socket
+# ---------------------------------------------------------------------------
+
+def restart_daemon_service() -> tuple[bool, str]:
+    """Applies saved config the same way the old GTK editor did: restart
+    the service (the daemon has no live-reload, by design)."""
+    try:
+        result = subprocess.run(["systemctl", "--user", "restart", "macro-daemon.service"],
+                                capture_output=True, text=True, timeout=10)
+    except Exception as exc:
+        return False, f"couldn't restart daemon: {exc}"
+    if result.returncode == 0:
+        return True, "Saved. Daemon restarted."
+    return False, f"Saved, but restart failed: {result.stderr.strip() or result.returncode}"
 
 
 def send_control_command(payload: dict[str, Any], timeout: float = 3.0) -> tuple[bool, str]:
-    """Synchronous client for the daemon's control socket -- replaces
-    macro_daemon.py's send_control_command() now that the daemon is a
-    separate C++ process this GUI never links against. Same JSON-line
-    protocol (see native/src/control_socket.cpp): one line in, one line
-    out. Used by the `puppetry --name=.../--abort` CLI and by the combo
-    recorder's PAUSE/RESUME, NOT by ordinary editing (that still only
-    touches disk + restart_daemon_service(), same as before)."""
+    """Client for the daemon's JSON-line control socket (FIRE / ABORT /
+    PAUSE / RESUME -- see native/src/control_socket.cpp)."""
     if not CONTROL_SOCKET.exists():
         return False, "macro-daemon isn't running (no control socket found)"
     try:
@@ -210,3 +222,60 @@ def send_control_command(payload: dict[str, Any], timeout: float = 3.0) -> tuple
     if resp.get("ok"):
         return True, resp.get("message", "OK")
     return False, resp.get("error", "unknown error")
+
+
+# ---------------------------------------------------------------------------
+# native helper binaries
+# ---------------------------------------------------------------------------
+
+def find_binary(name: str) -> str | None:
+    """$PUPPETRY_BIN_DIR (set by the Nix wrapper), then a dev build next
+    to this checkout (native/build), then $PATH."""
+    candidates = []
+    if os.environ.get("PUPPETRY_BIN_DIR"):
+        candidates.append(Path(os.environ["PUPPETRY_BIN_DIR"]) / name)
+    candidates.append(Path(__file__).resolve().parent.parent / "native" / "build" / name)
+    for c in candidates:
+        if c.is_file() and os.access(c, os.X_OK):
+            return str(c)
+    return shutil.which(name)
+
+
+def check_macro(macro_def: dict[str, Any]) -> tuple[bool, str]:
+    """Compiles the macro with EXACTLY the daemon's compilers (embedded
+    Python or the native fast path) via `puppetry-daemon --check`. If the
+    daemon binary can't be found, falls back to a Python syntax check
+    for python_on macros (python_off can't be checked without it)."""
+    daemon = find_binary("puppetry-daemon")
+    if daemon:
+        try:
+            result = subprocess.run([daemon, "--check"], input=json.dumps(macro_def),
+                                    capture_output=True, text=True, timeout=15)
+            msg = (result.stdout.strip() or result.stderr.strip())
+            return result.returncode == 0, msg or "OK"
+        except Exception as exc:
+            return False, f"couldn't run the macro checker: {exc}"
+    if macro_def.get("python_on", True):
+        import textwrap
+        body = macro_def.get("code") or "pass"
+        try:
+            compile("def _macro(*_a, **_k):\n" + textwrap.indent(body, "    ") + "\n", "<macro>", "exec")
+        except SyntaxError as exc:
+            return False, f"SyntaxError: {exc}"
+        return True, "OK (daemon binary not found -- only Python syntax was checked)"
+    return True, "not checked (daemon binary not found)"
+
+
+@lru_cache(maxsize=1)
+def name_tables() -> dict[str, Any]:
+    """{"simplified": {short: KEY_*}, "keys": [every KEY_*/BTN_* name]},
+    straight from the daemon's own tables (`puppetry-daemon --dump-names`)
+    so the reference panels can't drift from what the daemon resolves."""
+    daemon = find_binary("puppetry-daemon")
+    if daemon:
+        try:
+            out = subprocess.run([daemon, "--dump-names"], capture_output=True, text=True, timeout=10).stdout
+            return json.loads(out)
+        except Exception:
+            pass
+    return {"simplified": {}, "keys": []}

@@ -37,11 +37,8 @@
           nativeBuildInputs = [ pkgs.cmake pkgs.pkg-config pkgs.python3 ];
           buildInputs = [ pkgs.python3 ];
           doCheck = true;
-          checkPhase = "ctest --output-on-failure";
-          installPhase = ''
-            mkdir -p $out/bin
-            cp puppetry-daemon $out/bin/puppetry-daemon
-          '';
+          checkPhase = "ctest --output-on-failure -LE timing";
+          # (default cmake install: puppetry-daemon + puppetry-transcribe)
         };
 
         puppetry = pkgs.stdenv.mkDerivation {
@@ -58,6 +55,7 @@
               cp -r ${./gui}/* $out/share/puppetry/
               makeWrapper ${guiPython}/bin/python3 $out/bin/puppetry \
                 --set PYTHONPATH $out/share/puppetry \
+                --set PUPPETRY_BIN_DIR ${self.packages.${system}.puppetry-daemon}/bin \
                 --add-flags $out/share/puppetry/app.py
 
               ${pkgs.lib.concatMapStringsSep "\n" (sz: ''

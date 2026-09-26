@@ -106,7 +106,12 @@ class CustomButton(QToolButton):
             radius = min(radius, rect.height() / 2) if radius else 0
 
         bg = self._fill_override if self._fill_override is not None else self._theme.button_color()
-        if self.isDown():
+        if not self.isEnabled():
+            # Puppetry addition: disabled state (e.g. a locked macro's
+            # Edit/Delete). Derived from the fill like every other state
+            # shade -- darker(150), same factor as SegmentButton "loading".
+            bg = bg.darker(150)
+        elif self.isDown():
             bg = bg.darker(125)
         elif self.underMouse():
             bg = bg.lighter(115)
@@ -156,7 +161,10 @@ class CustomButton(QToolButton):
             # fill override like the action buttons' card-text-color
             # could land on text that reads fine against the theme's
             # normal accent but not against this button's own fill.
-            painter.setPen(contrast_text(bg))
+            text_color = contrast_text(bg)
+            if not self.isEnabled():
+                text_color.setAlphaF(0.45)
+            painter.setPen(text_color)
             painter.drawText(self.rect(), Qt.AlignCenter, self.text())
         painter.end()
         # Deliberately NOT calling super().paintEvent() -- this fully

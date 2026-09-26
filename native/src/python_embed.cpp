@@ -1,6 +1,7 @@
 #define PY_SSIZE_T_CLEAN
 #include "python_embed.hpp"
 #include <Python.h>
+#include <cstdio>
 #include <sstream>
 #include <thread>
 #include <vector>
@@ -11,233 +12,315 @@
 namespace puppetry {
 
 // Process-lifetime Runtime pointer -- every exposed primitive operates
-// on this. Mirrors the original module's own bare-global design (its
-// ui_keyboard/held/etc. were already daemon-lifetime globals); the
-// embedding just needs one place to reach them from C-level Python
-// callables, which don't get to carry C++ closures.
+// on this (C-level Python callables can't carry C++ closures).
 static Runtime* g_runtime = nullptr;
 static PyThreadState* g_main_thread_state = nullptr;
 
 // ---------------------------------------------------------------------
-// Argument helpers
+// Argument access for METH_FASTCALL | METH_KEYWORDS functions.
+//
+// HOT PATH: the first version used METH_VARARGS + PyArg_Parse*, which
+// builds an argument tuple (and a kwargs dict) per call and runs a
+// format-string parser. Fastcall hands us a plain C array instead.
 // ---------------------------------------------------------------------
 
-static bool resolve_key_arg(PyObject* obj, int& out_code) {
+namespace {
+
+struct FastArgs {
+    PyObject* const* args;
+    Py_ssize_t nargs;
+    PyObject* kwnames;
+
+    // Positional slot `pos`, else keyword `kw`, else nullptr.
+    PyObject* get(Py_ssize_t pos, const char* kw) const {
+        if (pos >= 0 && pos < nargs) return args[pos];
+        if (kwnames && kw) {
+            Py_ssize_t nk = PyTuple_GET_SIZE(kwnames);
+            for (Py_ssize_t i = 0; i < nk; ++i) {
+                if (PyUnicode_CompareWithASCIIString(PyTuple_GET_ITEM(kwnames, i), kw) == 0) return args[nargs + i];
+            }
+        }
+        return nullptr;
+    }
+
+    // Rejects unknown keyword names (a typo like time=0.1 instead of
+    // time_=0.1 would otherwise be silently ignored).
+    bool check_kwargs(const char* fn, std::initializer_list<const char*> allowed) const {
+        if (!kwnames) return true;
+        Py_ssize_t nk = PyTuple_GET_SIZE(kwnames);
+        for (Py_ssize_t i = 0; i < nk; ++i) {
+            PyObject* name = PyTuple_GET_ITEM(kwnames, i);
+            bool ok = false;
+            for (const char* a : allowed) if (PyUnicode_CompareWithASCIIString(name, a) == 0) { ok = true; break; }
+            if (!ok) {
+                PyErr_Format(PyExc_TypeError, "%s() got an unexpected keyword argument '%U'", fn, name);
+                return false;
+            }
+        }
+        return true;
+    }
+};
+
+bool resolve_key_arg(PyObject* obj, int& out_code) {
     if (PyLong_Check(obj)) {
         out_code = (int)PyLong_AsLong(obj);
         return true;
     }
     if (PyUnicode_Check(obj)) {
-        std::string name = PyUnicode_AsUTF8(obj);
-        return resolve_key_name(name, out_code);
+        const char* s = PyUnicode_AsUTF8(obj);
+        return s && resolve_key_name(s, out_code);
     }
     return false;
 }
 
-static bool parse_key_codes(PyObject* args_tuple, Py_ssize_t start, std::vector<int>& out) {
-    for (Py_ssize_t i = start; i < PyTuple_Size(args_tuple); ++i) {
-        int code;
-        if (!resolve_key_arg(PyTuple_GetItem(args_tuple, i), code)) return false;
-        out.push_back(code);
+bool key_arg(PyObject* obj, const char* fn, int& out) {
+    if (!obj) { PyErr_Format(PyExc_TypeError, "%s() missing required argument 'key'", fn); return false; }
+    if (!resolve_key_arg(obj, out)) {
+        PyErr_Format(PyExc_ValueError, "%s(): unknown key %R", fn, obj);
+        return false;
     }
     return true;
 }
+
+bool double_arg(PyObject* obj, double fallback, double& out) {
+    if (!obj) { out = fallback; return true; }
+    out = PyFloat_AsDouble(obj);
+    return !(out == -1.0 && PyErr_Occurred());
+}
+
+bool bool_arg(PyObject* obj, bool fallback, bool& out) {
+    if (!obj) { out = fallback; return true; }
+    int r = PyObject_IsTrue(obj);
+    if (r < 0) return false;
+    out = r != 0;
+    return true;
+}
+
+// Runs `f` (pure C++, never touches Python objects), translating C++
+// exceptions into Python ones. They must NEVER propagate through
+// CPython's C frames -- the first version let MacroAborted fly out of
+// Py_BEGIN_ALLOW_THREADS blocks, which is undefined behavior (crash on
+// abort mid-tap). The GIL is released only when `release` is set: for
+// sub-200us work, releasing and re-taking it costs more than it buys.
+template <class F>
+PyObject* run_native(bool release, F&& f) {
+    PyThreadState* ts = release ? PyEval_SaveThread() : nullptr;
+    const char* err = nullptr;
+    std::string msg;
+    try {
+        f();
+    } catch (const MacroAborted&) {
+        err = "abort";
+    } catch (const std::exception& exc) {
+        err = "error";
+        msg = exc.what();
+    }
+    if (ts) PyEval_RestoreThread(ts);
+    if (err) {
+        if (err[0] == 'a') PyErr_SetString(PyExc_KeyboardInterrupt, "puppetry: aborted");
+        else PyErr_SetString(PyExc_RuntimeError, msg.c_str());
+        return nullptr;
+    }
+    Py_RETURN_NONE;
+}
+
+// Background work (async_=True) must swallow MacroAborted itself -- an
+// exception escaping a std::thread calls std::terminate(), i.e. an abort
+// during async typing used to kill the whole daemon.
+template <class F>
+void spawn_background(F f) {
+    std::thread([f = std::move(f)]() mutable {
+        try { f(); } catch (...) {}
+    }).detach();
+}
+
+} // namespace
 
 // ---------------------------------------------------------------------
 // Exposed primitives
 // ---------------------------------------------------------------------
 
-static PyObject* py_kd(PyObject*, PyObject* args) {
-    PyObject* key;
-    if (!PyArg_ParseTuple(args, "O", &key)) return nullptr;
+#define FASTCALL_SIG(name) static PyObject* name(PyObject*, PyObject* const* args, Py_ssize_t nargs, PyObject* kwnames)
+#define ARGS FastArgs a{args, nargs, kwnames}
+
+FASTCALL_SIG(py_kd) {
+    ARGS;
+    if (!a.check_kwargs("kd", {"key"})) return nullptr;
     int code;
-    if (!resolve_key_arg(key, code)) { PyErr_SetString(PyExc_ValueError, "kd(): unknown key"); return nullptr; }
-    Py_BEGIN_ALLOW_THREADS
-    kd(*g_runtime, code);
-    Py_END_ALLOW_THREADS
-    Py_RETURN_NONE;
+    if (!key_arg(a.get(0, "key"), "kd", code)) return nullptr;
+    return run_native(false, [&] { kd(*g_runtime, code); });
 }
 
-static PyObject* py_ku(PyObject*, PyObject* args) {
-    PyObject* key;
-    if (!PyArg_ParseTuple(args, "O", &key)) return nullptr;
+FASTCALL_SIG(py_ku) {
+    ARGS;
+    if (!a.check_kwargs("ku", {"key"})) return nullptr;
     int code;
-    if (!resolve_key_arg(key, code)) { PyErr_SetString(PyExc_ValueError, "ku(): unknown key"); return nullptr; }
-    Py_BEGIN_ALLOW_THREADS
-    ku(*g_runtime, code);
-    Py_END_ALLOW_THREADS
-    Py_RETURN_NONE;
+    if (!key_arg(a.get(0, "key"), "ku", code)) return nullptr;
+    return run_native(false, [&] { ku(*g_runtime, code); });
 }
 
-static PyObject* py_tap(PyObject*, PyObject* args, PyObject* kwargs) {
-    PyObject* key;
-    double time_ = 0.1;
-    static const char* kwlist[] = {"key", "time_", nullptr};
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O|d", (char**)kwlist, &key, &time_)) return nullptr;
+FASTCALL_SIG(py_tap) {
+    ARGS;
+    if (!a.check_kwargs("tap", {"key", "time_"})) return nullptr;
     int code;
-    if (!resolve_key_arg(key, code)) { PyErr_SetString(PyExc_ValueError, "tap(): unknown key"); return nullptr; }
-    Py_BEGIN_ALLOW_THREADS
-    tap(*g_runtime, code, time_);
-    Py_END_ALLOW_THREADS
-    Py_RETURN_NONE;
+    double t;
+    if (!key_arg(a.get(0, "key"), "tap", code) || !double_arg(a.get(1, "time_"), 0.1, t)) return nullptr;
+    return run_native(!wait_is_short(t), [&] { tap(*g_runtime, code, t); });
 }
 
-static PyObject* py_combo(PyObject*, PyObject* args, PyObject* kwargs) {
-    double time_ = 0.1;
-    if (kwargs) {
-        PyObject* t = PyDict_GetItemString(kwargs, "time_");
-        if (t) time_ = PyFloat_AsDouble(t);
-    }
+FASTCALL_SIG(py_combo) {
+    ARGS;
+    if (!a.check_kwargs("combo", {"time_"})) return nullptr;
+    double t;
+    if (!double_arg(a.get(-1, "time_"), 0.1, t)) return nullptr;
     std::vector<int> keys;
-    if (!parse_key_codes(args, 0, keys)) { PyErr_SetString(PyExc_ValueError, "combo(): unknown key"); return nullptr; }
-    Py_BEGIN_ALLOW_THREADS
-    combo_fn(*g_runtime, keys, time_);
-    Py_END_ALLOW_THREADS
-    Py_RETURN_NONE;
+    for (Py_ssize_t i = 0; i < nargs; ++i) {
+        int code;
+        if (!key_arg(args[i], "combo", code)) return nullptr;
+        keys.push_back(code);
+    }
+    return run_native(!wait_is_short(t), [&] { combo_fn(*g_runtime, keys, t); });
 }
 
-static PyObject* py_type(PyObject*, PyObject* args, PyObject* kwargs) {
-    const char* text;
-    double time_per_letter = 0.05;
-    int async_ = 0;
-    static const char* kwlist[] = {"text", "time_per_letter", "async_", nullptr};
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "s|dp", (char**)kwlist, &text, &time_per_letter, &async_))
-        return nullptr;
-    std::string text_str(text);
+FASTCALL_SIG(py_type) {
+    ARGS;
+    if (!a.check_kwargs("type", {"text", "time_per_letter", "async_"})) return nullptr;
+    PyObject* text_obj = a.get(0, "text");
+    if (!text_obj || !PyUnicode_Check(text_obj)) { PyErr_SetString(PyExc_TypeError, "type(): text must be a string"); return nullptr; }
+    std::string text = PyUnicode_AsUTF8(text_obj);
+    double tpl;
+    bool async_;
+    if (!double_arg(a.get(1, "time_per_letter"), 0.05, tpl) || !bool_arg(a.get(2, "async_"), false, async_)) return nullptr;
     if (async_) {
-        std::thread([text_str, time_per_letter] { type_text_fn(*g_runtime, text_str, time_per_letter); }).detach();
-    } else {
-        Py_BEGIN_ALLOW_THREADS
-        type_text_fn(*g_runtime, text_str, time_per_letter);
-        Py_END_ALLOW_THREADS
+        // The background thread's speed() starts at 1.0 -- capture ours.
+        double mult = Runtime::speed_multiplier();
+        spawn_background([text, tpl, mult] { Runtime::speed_multiplier() = mult; type_text_fn(*g_runtime, text, tpl); });
+        Py_RETURN_NONE;
     }
-    Py_RETURN_NONE;
+    return run_native(true, [&] { type_text_fn(*g_runtime, text, tpl); });
 }
 
-static PyObject* py_move_mouse(PyObject*, PyObject* args, PyObject* kwargs) {
-    int x, y;
-    double time_ = 0.25;
-    const char* easing = "inout";
-    int async_ = 0, move_to = 0;
-    static const char* kwlist[] = {"x_pixels", "y_pixels", "time_", "easing", "async_", "move_to", nullptr};
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "ii|dsp p", (char**)kwlist,
-                                      &x, &y, &time_, &easing, &async_, &move_to))
+FASTCALL_SIG(py_move_mouse) {
+    ARGS;
+    if (!a.check_kwargs("move_mouse", {"x_pixels", "y_pixels", "time_", "easing", "async_", "move_to"})) return nullptr;
+    PyObject* xo = a.get(0, "x_pixels");
+    PyObject* yo = a.get(1, "y_pixels");
+    if (!xo || !yo) { PyErr_SetString(PyExc_TypeError, "move_mouse() needs x_pixels and y_pixels"); return nullptr; }
+    int x = (int)PyLong_AsLong(xo), y = (int)PyLong_AsLong(yo);
+    if (PyErr_Occurred()) return nullptr;
+    double t;
+    bool async_, move_to;
+    if (!double_arg(a.get(2, "time_"), 0.25, t) || !bool_arg(a.get(4, "async_"), false, async_) ||
+        !bool_arg(a.get(5, "move_to"), false, move_to))
         return nullptr;
-    std::string easing_str(easing);
+    std::string easing = "inout";
+    if (PyObject* e = a.get(3, "easing")) {
+        if (!PyUnicode_Check(e)) { PyErr_SetString(PyExc_TypeError, "move_mouse(): easing must be a string"); return nullptr; }
+        easing = PyUnicode_AsUTF8(e);
+    }
     if (async_) {
-        std::thread([x, y, time_, easing_str, move_to] {
-            move_mouse_fn(*g_runtime, x, y, time_, easing_str, move_to != 0);
-        }).detach();
-    } else {
-        Py_BEGIN_ALLOW_THREADS
-        move_mouse_fn(*g_runtime, x, y, time_, easing_str, move_to != 0);
-        Py_END_ALLOW_THREADS
+        double mult = Runtime::speed_multiplier();
+        spawn_background([=] { Runtime::speed_multiplier() = mult; move_mouse_fn(*g_runtime, x, y, t, easing, move_to); });
+        Py_RETURN_NONE;
     }
+    // An instant relative move (transcribed raw mouse lines, up to ~1000/s)
+    // is one write -- don't pay GIL churn for it.
+    bool instant = !move_to && (easing == "none" || wait_is_short(t));
+    return run_native(!instant, [&] { move_mouse_fn(*g_runtime, x, y, t, easing, move_to); });
+}
+
+FASTCALL_SIG(py_wheel) {
+    ARGS;
+    if (!a.check_kwargs("wheel", {"amount"})) return nullptr;
+    PyObject* o = a.get(0, "amount");
+    if (!o) { PyErr_SetString(PyExc_TypeError, "wheel() needs amount"); return nullptr; }
+    int amount = (int)PyLong_AsLong(o);
+    if (PyErr_Occurred()) return nullptr;
+    return run_native(false, [&] { wheel(*g_runtime, amount); });
+}
+
+FASTCALL_SIG(py_wait) {
+    ARGS;
+    if (!a.check_kwargs("wait", {"time_", "precise"})) return nullptr;
+    PyObject* to = a.get(0, "time_");
+    if (!to) { PyErr_SetString(PyExc_TypeError, "wait() needs time_"); return nullptr; }
+    double t;
+    bool precise;
+    if (!double_arg(to, 0, t) || !bool_arg(a.get(1, "precise"), false, precise)) return nullptr;
+    return run_native(!wait_is_short(t), [&] { wait_fn(*g_runtime, t, precise); });
+}
+
+FASTCALL_SIG(py_speed) {
+    ARGS;
+    double m;
+    PyObject* o = a.get(0, "multiplier");
+    if (!o) { PyErr_SetString(PyExc_TypeError, "speed() needs multiplier"); return nullptr; }
+    if (!double_arg(o, 1, m)) return nullptr;
+    speed_fn(*g_runtime, m);
     Py_RETURN_NONE;
 }
 
-static PyObject* py_wheel(PyObject*, PyObject* args) {
-    int amount;
-    if (!PyArg_ParseTuple(args, "i", &amount)) return nullptr;
-    wheel(*g_runtime, amount);
-    Py_RETURN_NONE;
+FASTCALL_SIG(py_ignore) {
+    ARGS;
+    PyObject* o = a.get(0, "what");
+    if (!o || !PyUnicode_Check(o)) { PyErr_SetString(PyExc_TypeError, "ignore() needs a target string"); return nullptr; }
+    std::string what = PyUnicode_AsUTF8(o);
+    return run_native(false, [&] { ignore_fn(*g_runtime, what); });
 }
 
-static PyObject* py_wait(PyObject*, PyObject* args, PyObject* kwargs) {
-    double time_;
-    int precise = 0;
-    static const char* kwlist[] = {"time_", "precise", nullptr};
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "d|p", (char**)kwlist, &time_, &precise)) return nullptr;
-    PyThreadState* save = PyEval_SaveThread();
-    try {
-        wait_fn(*g_runtime, time_, precise != 0);
-    } catch (const MacroAborted&) {
-        PyEval_RestoreThread(save);
-        PyErr_SetString(PyExc_KeyboardInterrupt, "puppetry: aborted");
-        return nullptr;
-    }
-    PyEval_RestoreThread(save);
-    Py_RETURN_NONE;
-}
-
-static PyObject* py_speed(PyObject*, PyObject* args) {
-    double multiplier;
-    if (!PyArg_ParseTuple(args, "d", &multiplier)) return nullptr;
-    speed_fn(*g_runtime, multiplier);
-    Py_RETURN_NONE;
-}
-
-static PyObject* py_ignore(PyObject*, PyObject* args) {
-    const char* what;
-    if (!PyArg_ParseTuple(args, "s", &what)) return nullptr;
-    try {
-        ignore_fn(*g_runtime, what);
-    } catch (const std::exception& exc) {
-        PyErr_SetString(PyExc_ValueError, exc.what());
-        return nullptr;
-    }
-    Py_RETURN_NONE;
-}
-
-static PyObject* py_ignore_keys(PyObject*, PyObject* args) {
+FASTCALL_SIG(py_ignore_keys) {
     std::vector<int> codes;
-    if (!parse_key_codes(args, 0, codes)) { PyErr_SetString(PyExc_ValueError, "ignore_keys(): unknown key"); return nullptr; }
-    ignore_keys_fn(*g_runtime, codes);
-    Py_RETURN_NONE;
+    for (Py_ssize_t i = 0; i < nargs; ++i) {
+        int code;
+        if (!key_arg(args[i], "ignore_keys", code)) return nullptr;
+        codes.push_back(code);
+    }
+    (void)kwnames;
+    return run_native(false, [&] { ignore_keys_fn(*g_runtime, codes); });
 }
 
-static PyObject* py_act_as(PyObject*, PyObject* args) {
-    if (PyTuple_Size(args) < 2) {
+FASTCALL_SIG(py_act_as) {
+    (void)kwnames;
+    if (nargs < 2) {
         PyErr_SetString(PyExc_TypeError, "actAs(key_pressing, ignore, *acting_keys) needs at least 2 arguments");
         return nullptr;
     }
     int key_pressing;
-    if (!resolve_key_arg(PyTuple_GetItem(args, 0), key_pressing)) {
-        PyErr_SetString(PyExc_ValueError, "actAs(): unknown key_pressing");
-        return nullptr;
+    if (!key_arg(args[0], "actAs", key_pressing)) return nullptr;
+    int ignore_val = PyObject_IsTrue(args[1]);
+    if (ignore_val < 0) return nullptr;
+    std::vector<int> acting;
+    for (Py_ssize_t i = 2; i < nargs; ++i) {
+        int code;
+        if (!key_arg(args[i], "actAs", code)) return nullptr;
+        acting.push_back(code);
     }
-    int ignore_val = PyObject_IsTrue(PyTuple_GetItem(args, 1));
-    std::vector<int> acting_keys;
-    if (!parse_key_codes(args, 2, acting_keys)) {
-        PyErr_SetString(PyExc_ValueError, "actAs(): unknown acting key");
-        return nullptr;
-    }
-    act_as_fn(*g_runtime, key_pressing, ignore_val != 0, acting_keys);
-    Py_RETURN_NONE;
+    return run_native(false, [&] { act_as_fn(*g_runtime, key_pressing, ignore_val != 0, acting); });
 }
 
-static PyObject* py_command(PyObject*, PyObject* args) {
-    if (PyTuple_Size(args) < 1) { PyErr_SetString(PyExc_TypeError, "command() needs at least 1 argument"); return nullptr; }
-    PyObject* cmd_obj = PyTuple_GetItem(args, 0);
-    if (!PyUnicode_Check(cmd_obj)) { PyErr_SetString(PyExc_TypeError, "command(): cmd must be a string"); return nullptr; }
-    std::string cmd = PyUnicode_AsUTF8(cmd_obj);
+FASTCALL_SIG(py_command) {
+    (void)kwnames;
+    if (nargs < 1 || !PyUnicode_Check(args[0])) { PyErr_SetString(PyExc_TypeError, "command(cmd, *args): cmd must be a string"); return nullptr; }
+    std::string cmd = PyUnicode_AsUTF8(args[0]);
     std::vector<std::string> extra;
-    for (Py_ssize_t i = 1; i < PyTuple_Size(args); ++i) {
-        PyObject* item = PyTuple_GetItem(args, i);
-        PyObject* str_obj = PyObject_Str(item);
-        extra.push_back(str_obj ? PyUnicode_AsUTF8(str_obj) : "");
-        Py_XDECREF(str_obj);
+    for (Py_ssize_t i = 1; i < nargs; ++i) {
+        PyObject* s = PyObject_Str(args[i]);
+        if (!s) return nullptr;
+        extra.push_back(PyUnicode_AsUTF8(s));
+        Py_DECREF(s);
     }
-    command_fn(format_command(cmd, extra));
-    Py_RETURN_NONE;
+    return run_native(false, [&] { command_fn(format_command(cmd, extra)); });
 }
 
+#define FC(name, fn) {name, (PyCFunction)(void (*)(void))fn, METH_FASTCALL | METH_KEYWORDS, nullptr}
 static PyMethodDef kMethods[] = {
-    {"kd", py_kd, METH_VARARGS, nullptr},
-    {"ku", py_ku, METH_VARARGS, nullptr},
-    {"tap", (PyCFunction)(void*)py_tap, METH_VARARGS | METH_KEYWORDS, nullptr},
-    {"combo", (PyCFunction)(void*)py_combo, METH_VARARGS | METH_KEYWORDS, nullptr},
-    {"type", (PyCFunction)(void*)py_type, METH_VARARGS | METH_KEYWORDS, nullptr},
-    {"move_mouse", (PyCFunction)(void*)py_move_mouse, METH_VARARGS | METH_KEYWORDS, nullptr},
-    {"wheel", py_wheel, METH_VARARGS, nullptr},
-    {"wait", (PyCFunction)(void*)py_wait, METH_VARARGS | METH_KEYWORDS, nullptr},
-    {"speed", py_speed, METH_VARARGS, nullptr},
-    {"ignore", py_ignore, METH_VARARGS, nullptr},
-    {"ignore_keys", py_ignore_keys, METH_VARARGS, nullptr},
-    {"actAs", py_act_as, METH_VARARGS, nullptr},
-    {"command", py_command, METH_VARARGS, nullptr},
+    FC("kd", py_kd), FC("ku", py_ku), FC("tap", py_tap), FC("combo", py_combo),
+    FC("type", py_type), FC("move_mouse", py_move_mouse), FC("wheel", py_wheel),
+    FC("wait", py_wait), FC("speed", py_speed), FC("ignore", py_ignore),
+    FC("ignore_keys", py_ignore_keys), FC("actAs", py_act_as), FC("command", py_command),
     {nullptr, nullptr, 0, nullptr},
 };
+#undef FC
 
 static PyModuleDef kModuleDef = {
     PyModuleDef_HEAD_INIT, "_puppetry_native", nullptr, -1, kMethods,
@@ -246,14 +329,42 @@ static PyModuleDef kModuleDef = {
 
 static PyObject* PyInit__puppetry_native() { return PyModule_Create(&kModuleDef); }
 
+// ---------------------------------------------------------------------
+// Per-thread Python state (see MacroThreadHooks in macro.hpp).
+// ---------------------------------------------------------------------
+
+namespace {
+thread_local int t_attach_depth = 0;
+thread_local PyGILState_STATE t_gil_state;
+thread_local PyThreadState* t_saved = nullptr;
+} // namespace
+
+void python_thread_enter() {
+    if (!Py_IsInitialized()) return;
+    if (t_attach_depth++ > 0) return;
+    t_gil_state = PyGILState_Ensure();  // creates this thread's PyThreadState once
+    t_saved = PyEval_SaveThread();      // ...then drops the GIL, keeping the state alive
+}
+
+void python_thread_exit() {
+    if (t_attach_depth == 0 || --t_attach_depth > 0) return;
+    if (!Py_IsInitialized()) return;
+    PyEval_RestoreThread(t_saved);
+    PyGILState_Release(t_gil_state);
+    t_saved = nullptr;
+}
+
 void python_embed_init(Runtime& rt) {
     g_runtime = &rt;
     PyImport_AppendInittab("_puppetry_native", &PyInit__puppetry_native);
     Py_Initialize();
     g_main_thread_state = PyEval_SaveThread(); // release the GIL -- each macro run acquires it itself
+    macro_thread_hooks().enter = &python_thread_enter;
+    macro_thread_hooks().exit = &python_thread_exit;
 }
 
 void python_embed_shutdown() {
+    macro_thread_hooks() = MacroThreadHooks{};
     if (g_main_thread_state) {
         PyEval_RestoreThread(g_main_thread_state);
         Py_Finalize();
@@ -322,12 +433,17 @@ public:
     void run(Runtime& rt, MacroRegistry&, const std::vector<std::string>& args) override {
         (void)rt;
         GilGuard guard;
-        PyObject* py_args = PyTuple_New((Py_ssize_t)args.size());
-        for (size_t i = 0; i < args.size(); ++i) {
-            PyTuple_SetItem(py_args, (Py_ssize_t)i, PyUnicode_FromString(args[i].c_str()));
+        PyObject* result;
+        if (args.empty()) {
+            result = PyObject_CallNoArgs(func_); // vectorcall, no tuple built
+        } else {
+            PyObject* py_args = PyTuple_New((Py_ssize_t)args.size());
+            for (size_t i = 0; i < args.size(); ++i) {
+                PyTuple_SetItem(py_args, (Py_ssize_t)i, PyUnicode_FromString(args[i].c_str()));
+            }
+            result = PyObject_CallObject(func_, py_args);
+            Py_DECREF(py_args);
         }
-        PyObject* result = PyObject_CallObject(func_, py_args);
-        Py_DECREF(py_args);
         if (!result) {
             if (PyErr_ExceptionMatches(PyExc_KeyboardInterrupt)) {
                 PyErr_Clear();
@@ -397,13 +513,11 @@ PyObject* trampoline_call(PyObject* self, PyObject* args, PyObject* kwargs) {
         str_args.push_back(str_obj ? PyUnicode_AsUTF8(str_obj) : "");
         Py_XDECREF(str_obj);
     }
-    try {
-        target->run(*g_runtime, *ctx->registry, str_args);
-    } catch (const std::exception& exc) {
-        PyErr_SetString(PyExc_RuntimeError, exc.what());
-        return nullptr;
-    }
-    Py_RETURN_NONE;
+    // run_native() translates MacroAborted too -- letting it escape
+    // through this C frame into CPython would be undefined behavior.
+    // The GIL is released: the native macro may itself call back into a
+    // python_on macro, whose run() re-acquires it on this same thread.
+    return run_native(true, [&] { target->run(*g_runtime, *ctx->registry, str_args); });
 }
 
 void trampoline_capsule_destructor(PyObject* capsule) {
@@ -414,9 +528,9 @@ void trampoline_capsule_destructor(PyObject* capsule) {
 
 std::shared_ptr<CompiledMacro> compile_python_macro(const json& macro_def, MacroRegistry& registry,
                                                       const std::vector<std::string>& all_macro_names) {
-    std::string raw_body = macro_def.value("code", "");
+    std::string raw_body = json_str(macro_def, "code", "");
     if (raw_body.empty()) raw_body = "pass";
-    std::string name = macro_def.value("name", macro_def.value("id", std::string("macro")));
+    std::string name = json_str(macro_def, "name", json_str(macro_def, "id", "macro"));
 
     ExtractedBody extracted = extract_arguments_signature(raw_body); // throws MacroCompileError
 
@@ -431,9 +545,9 @@ std::shared_ptr<CompiledMacro> compile_python_macro(const json& macro_def, Macro
     }
 
     std::vector<std::string> ignore_targets;
-    if (macro_def.value("ignore_keyboard", false)) ignore_targets.push_back("keyboard");
-    if (macro_def.value("ignore_mouse_buttons", false)) ignore_targets.push_back("mouse_buttons");
-    if (macro_def.value("ignore_mouse_movement", false)) ignore_targets.push_back("mouse_movement");
+    if (json_bool(macro_def, "ignore_keyboard", false)) ignore_targets.push_back("keyboard");
+    if (json_bool(macro_def, "ignore_mouse_buttons", false)) ignore_targets.push_back("mouse_buttons");
+    if (json_bool(macro_def, "ignore_mouse_movement", false)) ignore_targets.push_back("mouse_movement");
 
     auto indent = [](const std::string& text, const std::string& prefix) {
         std::string out;
@@ -484,7 +598,7 @@ std::shared_ptr<CompiledMacro> compile_python_macro(const json& macro_def, Macro
         Py_DECREF(val);
     }
 
-    if (macro_def.value("simplified_names", false)) {
+    if (json_bool(macro_def, "simplified_names", false)) {
         for (const auto& [simple_name, code] : build_simplified_namespace()) {
             PyObject* val = PyLong_FromLong(code);
             PyDict_SetItemString(globals, simple_name.c_str(), val);

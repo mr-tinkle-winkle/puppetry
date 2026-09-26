@@ -154,7 +154,7 @@ CLI/`FIRE`-supplied macro arguments always arrive as strings — cast
 with `int(...)`/`float(...)` inside the macro if a declared default is
 numeric and the value needs to be used as one.
 
-## Session 3 (this session) — the Qt/C++ rewrite, `actAs`, per-key `ignore`
+## Session 3 — the Qt/C++ rewrite, `actAs`, per-key `ignore`
 
 The postponed "Qt + native-core batch" from Session 2 (below) is what
 this session tackled: the GTK4→PySide6 GUI port and the daemon's
@@ -319,25 +319,121 @@ verified, was:
   Offscreen tests catch construction/logic bugs, not layout or visual
   bugs; a real-desktop pass is still owed before calling the GUI done.
 
+## Session 4 — CPS regression fixed, hot-path optimization, C++ transcriber, GUI restored
+
+**CPS regression (the ~16k ceiling after the C++ port, vs ~50k before).**
+Root cause: every `wait()` (and every `tap()` hold) went through the
+kernel's sleep call, which costs tens of microseconds no matter how small
+the request (timer slack + scheduler wakeup). Paid twice per tap cycle,
+that floor WAS the ceiling -- verified with a before/after benchmark of
+the real daemon code paths (`native/tests/bench_cps.cpp`; in the build
+sandbox: ~6.5k tap cycles/s before, ~1.4-3.4M after, depending on VM
+load; writes go to /dev/null so the uinput write itself isn't included).
+Fixes, all in `native/src`:
+- `wait()`: tiny waits spin on the vDSO clock instead of sleeping;
+  longer waits sleep to an ABSOLUTE deadline minus a margin (100us, or
+  1ms for `precise=True`) then spin the rest. Median error ~0.2us in
+  `test_timing`. Waits also share a per-thread timeline, so per-line
+  overhead doesn't accumulate as drift (200 x wait(1ms) with 100us of
+  work each = 200.1ms). Daemon timer slack set to 1ns (`prctl` in main +
+  `TimerSlackNSec=1` in the service).
+- uinput: one `write()` per event INCLUDING its SYN_REPORT (was one per
+  event plus one per SYN: 4 syscalls per tap -> 2). Mouse moves write X
+  and Y in one frame (real diagonals, not stair-steps).
+- Key routing/button tables are array lookups (was a heap-allocated
+  std::string name + hash lookup per kd()/ku()); synthetic held-key
+  tracking is a lock-free atomic bitset (was mutex + std::set).
+- Python bindings: METH_FASTCALL (no per-call arg tuple / format parser),
+  the GIL is only released around waits >= 200us, and each macro thread
+  keeps ONE PyThreadState for its life (was created/destroyed per loop
+  iteration).
+- Native VM: every line compiled once into a ready-to-call op with
+  arguments pre-resolved (was re-resolved into fresh vectors + a hash map
+  per line per iteration, and dispatched by string compare). Unknown
+  keyword arguments / missing arguments are now compile (save-time)
+  errors.
+- Grabbed-device forwarding (ignore()/actAs suppression) forwards whole
+  hardware frames in one write and reads events in bulk.
+**Past the daemon, the compositor and the receiving app are the limit**,
+and at very high rates the kernel's per-client evdev buffer overflows and
+drops events before any app sees them. That's why the GUI now has an
+Input Visualizer / CPS tester (measures what an app actually receives).
+
+**Bugs found and fixed along the way** (each has a regression test):
+- Aborting during a Python macro's `tap()`/`wait()`/`combo()` threw a C++
+  exception through CPython's C frames (undefined behavior -> crash).
+- Aborting during `type(..., async_=True)` / async `move_mouse` let the
+  exception escape a background thread -> `std::terminate()` killed the
+  daemon.
+- `command()` leaked a zombie process per call (the promised reaper
+  thread never existed) -- now double-forks; env is built before fork().
+- A brand-new macro (id still `null`) failed validation, and a `null`
+  `abort_key` in an older state.json would have crashed the daemon at
+  startup: nlohmann's `value()` throws on a type mismatch. All config
+  reads now go through tolerant `json_str`/`json_bool` helpers.
+
+**Transcription is C++ now** (`native/src/transcriber.*`,
+`puppetry-transcribe` binary, launched by the editor; `gui/transcription.py`
+streams its output in 50ms batches). Timing comes from the kernel's own
+per-event timestamps (microsecond resolution, CLOCK_MONOTONIC via
+EVIOCSCLOCKID) -- the finest timing Linux records for input -- and is
+written with 6 decimals. The old transcriber timed events when Python
+got around to reading them, rounded to 1ms, and DELETED every gap under
+20ms (fast sequences replayed compressed); it could also emit a click
+before the motion that preceded it. All fixed. New: wheel events are
+transcribed; kernel buffer overflows (SYN_DROPPED) are written into the
+script as a comment instead of silently corrupting it. The "Precise
+timing" toggle records every hardware mouse frame at the mouse's real
+polling rate (instead of resampling to the Hz setting) and writes
+`precise=True` waits -- most faithful replay, including pointer
+acceleration, at the cost of ~2 lines per mouse frame and a busy core on
+playback. `test_transcriber` drives the core with synthetic kernel events.
+
+**GUI** (the Session 3 port had silently dropped a lot of the old GTK
+app, because macro_gui.py wasn't read then -- all restored):
+- Sidebar: Macros / Input Visualizer / Settings.
+- Macro rows: `[name box] ... [combo] [x] [On Press/Release] [Repeat]
+  [enabled switch] [Edit] [Delete] [lock]` -- click the name box to
+  rename inline, click the combo to rebind (click again to cancel), x
+  clears it. The lock button wasn't in the requested layout but was kept
+  at the far right, since it's the only way to unlock a locked row --
+  ask before removing it.
+- Settings: profiles (switch / new / rename / delete / reorder -- the
+  user chose all of it here rather than a dropdown), devices (Detect,
+  name/path toggle, full device list with Set as Keyboard/Mouse), abort
+  key, record time, autosave, Save, and the appearance editor.
+  Switching profiles now applies immediately (saves + restarts the
+  daemon); the old app only did so on the next Save.
+- Editor: Save (stays open) / Save and Close / Close bottom-right; Close
+  asks about unsaved changes. Save validates with the daemon's own
+  compilers (`puppetry-daemon --check`) then applies (writes config and
+  restarts the daemon -- which also saves any other pending main-page
+  edits). Restored: description, mouse-position readout, transcription,
+  ignore toggles, function + simplified-name references (tables come from
+  `puppetry-daemon --dump-names`, so they can't drift), custom button
+  names.
+- Kit tweak (allowed per the guide): `CustomButton` now has a disabled
+  look (fill darker(150), dimmed text) -- it had none, so locked rows
+  looked clickable.
+
 ## Known issues / not yet resolved
 
 - `ignore()` does not reliably release a keyboard key that was already
   held down at the moment its grab kicked in. Deprioritized by
   request. `trigger_edge = "up"` sidesteps this for a macro's own
   combo keys specifically, not the general case.
-- A text-rendering ghosting bug in the code editor during live
-  transcribe mode. Deprioritized by request as a minor front-end
-  concern — see "Transcription accuracy" under Planned work, though,
-  since a related-but-distinct transcription concern *is* now queued.
-- This and the prior session's GUI-side changes (lock toggle,
-  trigger-edge dropdowns, Record Time spinner, editor zoom, JSON
-  control-socket wiring on the GUI side) have not been exercised
-  against a real running GTK4 app — only syntax-checked and
-  structurally reviewed. Daemon-side changes have been exercised with
-  real (non-GTK) test harnesses in a sandboxed environment.
-- The `command()` PATH/stderr fix (this session) has not been
-  reconfirmed against the exact originally-reported failure — see
-  above.
+- The old GTK editor's text "ghosting" during transcription: likely
+  gone (the Qt editor inserts transcribed text in 50ms batches instead of
+  per line), but not verified on a real display.
+- Nothing in Sessions 3-4 has run against real /dev/input, /dev/uinput,
+  a compositor, or `nix build` (none exist in the build sandbox). The GUI
+  was checked with offscreen tests AND by rendering each page to an image
+  and looking at it, but a real-desktop pass is still owed.
+- The `command()` PATH/stderr fix from Session 2 still hasn't been
+  reconfirmed against the originally-reported `powerprofiles` failure.
+- The daemon only reads the active profile at startup, so every Save /
+  profile switch restarts it (by design, same as before) -- any running
+  hold/toggle loop stops when that happens.
 
 ## Superseded approaches (don't retry these)
 
@@ -407,26 +503,18 @@ order, now targeting the C++ daemon (`native/`) and the Qt GUI
   alternative authoring mode alongside raw code editing.
 - Whole-app Ctrl+Scroll zoom (window, list, buttons — not just the
   code editor, which already has its own scoped zoom via
-  `ZoomablePlainTextEdit` in `gui/app.py`) and Ctrl+0 to reset it.
+  `ZoomablePlainTextEdit` in `gui/editor_page.py`) and Ctrl+0 to reset it.
 - A real desktop verification pass on the Qt GUI (see "Verified vs.
   not verified" above) — this is the single highest-priority item,
   since nothing about how it actually looks has been checked yet.
-- `native/module.nix`/`native/flake.nix` haven't been evaluated against
+- `module.nix`/`flake.nix` haven't been evaluated against
   a real `nix build` (no `nix` binary in the sandbox this was written
   in) — get a real build working before trusting the derivations.
-- Root-cause the daemon's actual CPS ceiling now that the hot path is
-  native (uinput `write()` syscall cost vs. kernel/evdev vs. compositor
-  polling) — this was deliberately NOT investigated before the C++
-  rewrite (see Session 3 above), so it's now worth doing empirically
-  against the real implementation.
-- Increase the transcriber's recorded decimal precision for
-  timing/position values (the originally-suspected cause of tight-3D-
-  platforming timing issues) — not yet touched; there is no
-  transcriber in this codebase yet at all, native or GUI-side, so this
-  is still fully unbuilt work, not a partial one.
-- `Act As` and per-key `ignore` are DONE this session (see Session 3
-  above) -- keeping this line only so a future skim of this list
-  doesn't wonder where they went.
+- On real hardware: compare the Input Visualizer's CPS against the
+  daemon-side `bench_cps` number to see where the compositor/app limit
+  sits (and whether SYN_DROPPED overflows appear at extreme rates).
+- DONE (Session 4, kept so a skim doesn't wonder): CPS ceiling root
+  cause, transcription precision, `actAs`, per-key `ignore`.
 
 ## Architecture / file map
 
@@ -438,25 +526,35 @@ order, now targeting the C++ daemon (`native/`) and the Qt GUI
   `python_embed.hpp`/`.cpp` the CPython-backed macro path,
   `native_vm.hpp`/`.cpp` the primitives-only fast path,
   `control_socket.hpp`/`.cpp` the daemon's control socket,
-  `config.hpp`/`.cpp` the on-disk JSON I/O, `main.cpp` the entry
-  point). `native/tools/gen_keycodes.py` generates the key/button name
+  `config.hpp`/`.cpp` the on-disk JSON I/O, `transcriber.hpp`/`.cpp` +
+  `transcribe_main.cpp` the `puppetry-transcribe` helper, `main.cpp` the
+  daemon entry point incl. `--check` / `--dump-names` / `--list`). `native/tools/gen_keycodes.py` generates the key/button name
   table at build time. `native/tests/` holds the test suite described
   under "Verified vs. not verified" above — `cmake --build . && ctest
   --output-on-failure` from a `native/build/` directory runs all of it.
 - `gui/` — the Qt (PySide6) editor:
-  - `gui/app.py` — the whole app (`MainWindow`, macro list/editor
-    pages, CLI entry point). Read its own module docstring for
-    this-session's exact feature scope.
-  - `gui/puppetry_config.py` — shared on-disk config I/O + the daemon
-    control-socket client.
-  - `gui/combo_recorder.py` — the combo recorder (flagged above as a
-    fresh implementation, not a line-for-line port).
-  - `gui/test_app.py` — offscreen structural tests (`QT_QPA_PLATFORM=offscreen
-    python3 gui/test_app.py`).
+  - `gui/app.py` — `MainWindow`, sidebar, CLI entry point.
+  - `gui/model.py` — `AppModel`: the one in-memory copy of state/macros/
+    active profile, dirty tracking, autosave, save, profiles.
+  - `gui/macro_list_page.py`, `editor_page.py`, `settings_page.py`,
+    `visualizer_page.py` — the pages.
+  - `gui/widgets.py` — ToggleSwitch, NameBox, LockToggle, themed
+    dialogs, Collapsible, PageBase.
+  - `gui/input_tools.py` — combo recorder, device/key detection, mouse
+    position readout (ports of the old GTK helpers; the Session 3
+    `combo_recorder.py` reconstruction is gone).
+  - `gui/transcription.py` — runs `puppetry-transcribe`.
+  - `gui/reference.py` — function/simplified-name reference text.
+  - `gui/puppetry_config.py` — on-disk config, control-socket client,
+    helper-binary discovery ($PUPPETRY_BIN_DIR, then native/build, then
+    $PATH), macro validation via `puppetry-daemon --check`.
+  - `gui/test_app.py` — 51 offscreen checks (`QT_QPA_PLATFORM=offscreen
+    python3 gui/test_app.py`); uses the native binaries when built.
   - `gui/ui_kit/` — the shared PySide6 theming kit (copy, not a shared
     package — see the guide for why). `gui/UI_THEMING_GUIDE.md` is its
     full spec; `gui/ui_kit_test_kit.py` is its own 26-check offscreen
-    suite, unmodified and still passing.
+    suite, still passing (only `custom_button.py` was tweaked -- see
+    Session 4).
 - `module.nix` — NixOS module: builds the C++ daemon via CMake, wraps
   the Qt GUI with a `pyside6`+`evdev` Python, sets up `uinput`
   permissions and the same udev `ID_INPUT_*` classification fix as
@@ -473,7 +571,10 @@ order, now targeting the C++ daemon (`native/`) and the Qt GUI
 ## Build/run/environment
 
 **Daemon:** `cd native && mkdir build && cd build && cmake .. && cmake
---build . -j && ctest --output-on-failure`. Produces `puppetry-daemon`.
+--build . -j && ctest --output-on-failure`. Produces `puppetry-daemon`
+and `puppetry-transcribe` (+ `bench_cps`, a throughput benchmark that
+isn't a ctest test). `test_timing` is labelled `timing`; packaged builds
+run `ctest -LE timing` since a loaded build machine can deschedule it.
 Needs a C++17 compiler, CMake, and `python3-embed` via pkg-config
 (`python3-dev`/`python3-devel` depending on distro; NixOS gets this
 through `pkgs.python3` in `module.nix`/`flake.nix` already).

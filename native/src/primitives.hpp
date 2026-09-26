@@ -6,6 +6,7 @@
 // "python-off" macro calls them directly from the native fast-path
 // interpreter (native_vm.cpp). Keeping the actual behavior in one place
 // means the two paths can never drift apart on what e.g. tap() does.
+#include <chrono>
 #include <string>
 #include <vector>
 #include "runtime.hpp"
@@ -25,6 +26,17 @@ void wheel(Runtime& rt, int amount);
 void wait_fn(Runtime& rt, double time_, bool precise = false);
 
 void speed_fn(Runtime& rt, double multiplier);
+
+// Waits until an absolute steady_clock deadline (spin/sleep hybrid, see
+// primitives.cpp). Does not touch the wait() timeline anchor.
+void wait_until(Runtime& rt, std::chrono::steady_clock::time_point target, bool precise);
+
+// True if wait(time_) at the current speed() would be short enough that
+// releasing Python's GIL around it costs more than it's worth.
+bool wait_is_short(double time_);
+
+// Asks KWin for the cursor position via kdotool. false if unavailable.
+bool get_cursor_pos_kde(int& x, int& y, double timeout_s = 1.0);
 
 // what: "keyboard" | "mouse" | "mouse_buttons" | "mouse_movement".
 // Throws std::invalid_argument for anything else, same as the Python

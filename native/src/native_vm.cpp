@@ -1,5 +1,8 @@
 #include "native_vm.hpp"
 #include <cctype>
+#include <climits>
+#include <cstdint>
+#include <functional>
 #include <optional>
 #include <regex>
 #include <sstream>
@@ -168,49 +171,66 @@ CompiledStatement parse_call_line(const std::string& line, int line_no,
 }
 
 // ---------------------------------------------------------------------
-// Runtime value + resolution
+// Compiled form.
+//
+// HOT PATH: every line is compiled ONCE into a ready-to-call operation
+// with its arguments already resolved to constants (or to an index into
+// this run's parameter bindings). The first version re-resolved each
+// line's arguments on every execution into freshly allocated vectors
+// and a hash map, and dispatched primitives by string comparison.
 // ---------------------------------------------------------------------
 
-struct RuntimeValue {
-    enum class Kind { Int, Float, Str, Bool } kind;
+struct Value {
+    enum class Kind { Int, Float, Str, Bool } kind = Kind::Int;
     long long i = 0;
     double d = 0;
     std::string s;
     bool b = false;
 
+    static Value of_int(long long v) { Value x; x.kind = Kind::Int; x.i = v; return x; }
+    static Value of_float(double v) { Value x; x.kind = Kind::Float; x.d = v; return x; }
+    static Value of_str(std::string v) { Value x; x.kind = Kind::Str; x.s = std::move(v); return x; }
+    static Value of_bool(bool v) { Value x; x.kind = Kind::Bool; x.b = v; return x; }
+
     int as_int() const {
-        if (kind == Kind::Int) return (int)i;
-        if (kind == Kind::Float) return (int)d;
-        if (kind == Kind::Str) return std::atoi(s.c_str());
-        return b ? 1 : 0;
+        switch (kind) {
+            case Kind::Int: return (int)i;
+            case Kind::Float: return (int)d;
+            case Kind::Str: return std::atoi(s.c_str());
+            case Kind::Bool: return b ? 1 : 0;
+        }
+        return 0;
     }
     double as_double() const {
-        if (kind == Kind::Float) return d;
-        if (kind == Kind::Int) return (double)i;
-        if (kind == Kind::Str) return std::atof(s.c_str());
-        return b ? 1.0 : 0.0;
+        switch (kind) {
+            case Kind::Float: return d;
+            case Kind::Int: return (double)i;
+            case Kind::Str: return std::atof(s.c_str());
+            case Kind::Bool: return b ? 1.0 : 0.0;
+        }
+        return 0;
     }
     std::string as_string() const {
         switch (kind) {
             case Kind::Str: return s;
             case Kind::Int: return std::to_string(i);
-            case Kind::Float: return std::to_string(d);
+            case Kind::Float: { std::ostringstream o; o << d; return o.str(); }
             case Kind::Bool: return b ? "True" : "False";
         }
         return "";
     }
     bool as_bool() const {
-        if (kind == Kind::Bool) return b;
-        if (kind == Kind::Str) return !s.empty();
-        if (kind == Kind::Int) return i != 0;
-        return d != 0;
+        switch (kind) {
+            case Kind::Bool: return b;
+            case Kind::Str: return !s.empty() && s != "False" && s != "0";
+            case Kind::Int: return i != 0;
+            case Kind::Float: return d != 0;
+        }
+        return false;
     }
-    // Resolves to a key/button code: already-int is used directly; a
-    // string is looked up by name first (KEY_A etc.), falling back to
-    // parsing it as a plain integer -- covers a CLI-supplied string
-    // arg like puppetry --name=... "KEY_A" as well as a bare "30".
+    // A string (e.g. a CLI-supplied "KEY_B") is looked up by name first,
+    // then parsed as a plain integer code.
     int as_key_code() const {
-        if (kind == Kind::Int) return (int)i;
         if (kind == Kind::Str) {
             int code;
             if (resolve_key_name(s, code)) return code;
@@ -220,204 +240,266 @@ struct RuntimeValue {
     }
 };
 
-RuntimeValue value_from_string(const std::string& s) { return {RuntimeValue::Kind::Str, 0, 0, s, false}; }
+using Bindings = std::vector<Value>;
 
-RuntimeValue resolve_arg(const CompiledArg& arg, const std::unordered_map<std::string, RuntimeValue>& params) {
-    switch (arg.kind) {
-        case CompiledArg::Kind::IntLit: return {RuntimeValue::Kind::Int, arg.i, 0, "", false};
-        case CompiledArg::Kind::FloatLit: return {RuntimeValue::Kind::Float, 0, arg.d, "", false};
-        case CompiledArg::Kind::StrLit: return {RuntimeValue::Kind::Str, 0, 0, arg.s, false};
-        case CompiledArg::Kind::BoolLit: return {RuntimeValue::Kind::Bool, 0, 0, "", arg.i != 0};
-        case CompiledArg::Kind::KeyCodeLit: return {RuntimeValue::Kind::Int, arg.key_code, 0, "", false};
-        case CompiledArg::Kind::ParamRef: {
-            auto it = params.find(arg.param_name);
-            if (it != params.end()) return it->second;
-            return {RuntimeValue::Kind::Int, 0, 0, "", false};
-        }
+struct Slot {
+    bool is_param = false;
+    int param = -1;
+    Value constant;
+    const Value& get(const Bindings& b) const { return is_param ? b[param] : constant; }
+};
+
+Slot const_slot(Value v) { Slot s; s.constant = std::move(v); return s; }
+
+Slot to_slot(const CompiledArg& a, const std::vector<ArgumentDecl>& params) {
+    switch (a.kind) {
+        case CompiledArg::Kind::IntLit: return const_slot(Value::of_int(a.i));
+        case CompiledArg::Kind::FloatLit: return const_slot(Value::of_float(a.d));
+        case CompiledArg::Kind::StrLit: return const_slot(Value::of_str(a.s));
+        case CompiledArg::Kind::BoolLit: return const_slot(Value::of_bool(a.i != 0));
+        case CompiledArg::Kind::KeyCodeLit: return const_slot(Value::of_int(a.key_code));
+        case CompiledArg::Kind::ParamRef:
+            for (size_t i = 0; i < params.size(); ++i) {
+                if (params[i].name == a.param_name) { Slot s; s.is_param = true; s.param = (int)i; return s; }
+            }
+            break;
     }
-    return {RuntimeValue::Kind::Int, 0, 0, "", false};
+    return const_slot(Value::of_int(0));
 }
 
-// Resolves a compiled call's arguments against the current param
-// bindings, splitting into ordered positionals and a keyword map.
-struct ResolvedArgs {
-    std::vector<RuntimeValue> positional;
-    std::unordered_map<std::string, RuntimeValue> keyword;
+using Op = std::function<void(Runtime&, MacroRegistry&, const Bindings&)>;
 
-    RuntimeValue get(size_t pos_index, const std::string& kw_name, const RuntimeValue& fallback) const {
-        auto it = keyword.find(kw_name);
-        if (it != keyword.end()) return it->second;
-        if (pos_index < positional.size()) return positional[pos_index];
-        return fallback;
+// Argument lookup for one call at COMPILE time: positional index or
+// keyword name, else a default; unknown keywords / missing required
+// arguments are compile errors (surfaced when the macro is saved).
+struct CallArgs {
+    std::vector<Slot> pos;
+    std::unordered_map<std::string, Slot> kw;
+    std::string fn;
+    int line_no;
+
+    void allow(std::initializer_list<const char*> names) const {
+        for (const auto& [k, _] : kw) {
+            bool ok = false;
+            for (const char* n : names) if (k == n) { ok = true; break; }
+            if (!ok) throw MacroCompileError("line " + std::to_string(line_no) + ": " + fn +
+                                             "() got an unexpected keyword argument '" + k + "'");
+        }
+    }
+    Slot at(size_t i, const char* name, std::optional<Value> fallback = std::nullopt) const {
+        auto it = kw.find(name);
+        if (it != kw.end()) return it->second;
+        if (i < pos.size()) return pos[i];
+        if (fallback) return const_slot(*fallback);
+        throw MacroCompileError("line " + std::to_string(line_no) + ": " + fn + "() missing argument '" + name + "'");
     }
 };
 
-ResolvedArgs resolve_args(const CompiledStatement& stmt, const std::unordered_map<std::string, RuntimeValue>& params) {
-    ResolvedArgs out;
+template <class F>
+void spawn_background(F f) {
+    std::thread([f = std::move(f)]() mutable {
+        try { f(); } catch (...) {} // an escaping MacroAborted would std::terminate() the daemon
+    }).detach();
+}
+
+Op compile_op(const CompiledStatement& stmt, const std::vector<ArgumentDecl>& params) {
+    CallArgs c;
+    c.fn = stmt.callee;
+    c.line_no = stmt.line_no;
     for (const auto& a : stmt.args) {
-        RuntimeValue v = resolve_arg(a.value, params);
-        if (a.keyword) out.keyword[*a.keyword] = v;
-        else out.positional.push_back(v);
+        Slot s = to_slot(a.value, params);
+        if (a.keyword) c.kw[*a.keyword] = s;
+        else c.pos.push_back(s);
     }
-    return out;
-}
+    const std::string& n = stmt.callee;
 
-const std::unordered_set<std::string> kKnownPrimitives = {
-    "kd", "ku", "tap", "combo", "type", "move_mouse", "wheel", "wait",
-    "speed", "ignore", "ignore_keys", "actAs", "command",
-};
-
-void execute_primitive(Runtime& rt, const std::string& name, const ResolvedArgs& args, int line_no) {
-    if (name == "kd") { kd(rt, args.get(0, "key", {}).as_key_code()); return; }
-    if (name == "ku") { ku(rt, args.get(0, "key", {}).as_key_code()); return; }
-    if (name == "tap") {
-        int key = args.get(0, "key", {}).as_key_code();
-        double time_ = args.get(1, "time_", {RuntimeValue::Kind::Float, 0, 0.1, "", false}).as_double();
-        tap(rt, key, time_);
-        return;
+    if (n == "kd" || n == "ku") {
+        c.allow({"key"});
+        Slot key = c.at(0, "key");
+        if (n == "kd") return [key](Runtime& rt, MacroRegistry&, const Bindings& b) { kd(rt, key.get(b).as_key_code()); };
+        return [key](Runtime& rt, MacroRegistry&, const Bindings& b) { ku(rt, key.get(b).as_key_code()); };
     }
-    if (name == "combo") {
-        std::vector<int> keys;
-        for (auto& v : args.positional) keys.push_back(v.as_key_code());
-        double time_ = args.keyword.count("time_") ? args.keyword.at("time_").as_double() : 0.1;
-        combo_fn(rt, keys, time_);
-        return;
+    if (n == "tap") {
+        c.allow({"key", "time_"});
+        Slot key = c.at(0, "key"), t = c.at(1, "time_", Value::of_float(0.1));
+        return [key, t](Runtime& rt, MacroRegistry&, const Bindings& b) {
+            tap(rt, key.get(b).as_key_code(), t.get(b).as_double());
+        };
     }
-    if (name == "type") {
-        std::string text = args.get(0, "text", {}).as_string();
-        double tpl = args.get(1, "time_per_letter", {RuntimeValue::Kind::Float, 0, 0.05, "", false}).as_double();
-        bool async_ = args.get(2, "async_", {RuntimeValue::Kind::Bool, 0, 0, "", false}).as_bool();
-        if (async_) std::thread([&rt, text, tpl] { type_text_fn(rt, text, tpl); }).detach();
-        else type_text_fn(rt, text, tpl);
-        return;
+    if (n == "combo") {
+        c.allow({"time_"});
+        Slot t = c.at(SIZE_MAX, "time_", Value::of_float(0.1));
+        std::vector<Slot> keys = c.pos;
+        return [keys, t](Runtime& rt, MacroRegistry&, const Bindings& b) {
+            std::vector<int> codes;
+            codes.reserve(keys.size());
+            for (const auto& k : keys) codes.push_back(k.get(b).as_key_code());
+            combo_fn(rt, codes, t.get(b).as_double());
+        };
     }
-    if (name == "move_mouse") {
-        int x = args.get(0, "x_pixels", {}).as_int();
-        int y = args.get(1, "y_pixels", {}).as_int();
-        double time_ = args.get(2, "time_", {RuntimeValue::Kind::Float, 0, 0.25, "", false}).as_double();
-        std::string easing = args.get(3, "easing", value_from_string("inout")).as_string();
-        bool async_ = args.get(4, "async_", {RuntimeValue::Kind::Bool, 0, 0, "", false}).as_bool();
-        bool move_to = args.get(5, "move_to", {RuntimeValue::Kind::Bool, 0, 0, "", false}).as_bool();
-        if (async_) std::thread([&rt, x, y, time_, easing, move_to] { move_mouse_fn(rt, x, y, time_, easing, move_to); }).detach();
-        else move_mouse_fn(rt, x, y, time_, easing, move_to);
-        return;
+    if (n == "type") {
+        c.allow({"text", "time_per_letter", "async_"});
+        Slot text = c.at(0, "text"), tpl = c.at(1, "time_per_letter", Value::of_float(0.05)),
+             async_ = c.at(2, "async_", Value::of_bool(false));
+        return [text, tpl, async_](Runtime& rt, MacroRegistry&, const Bindings& b) {
+            std::string s = text.get(b).as_string();
+            double t = tpl.get(b).as_double();
+            if (async_.get(b).as_bool()) {
+                double mult = Runtime::speed_multiplier();
+                spawn_background([&rt, s, t, mult] { Runtime::speed_multiplier() = mult; type_text_fn(rt, s, t); });
+            } else {
+                type_text_fn(rt, s, t);
+            }
+        };
     }
-    if (name == "wheel") { wheel(rt, args.get(0, "amount", {}).as_int()); return; }
-    if (name == "wait") {
-        double time_ = args.get(0, "time_", {}).as_double();
-        bool precise = args.get(1, "precise", {RuntimeValue::Kind::Bool, 0, 0, "", false}).as_bool();
-        wait_fn(rt, time_, precise);
-        return;
+    if (n == "move_mouse") {
+        c.allow({"x_pixels", "y_pixels", "time_", "easing", "async_", "move_to"});
+        Slot x = c.at(0, "x_pixels"), y = c.at(1, "y_pixels"), t = c.at(2, "time_", Value::of_float(0.25)),
+             easing = c.at(3, "easing", Value::of_str("inout")), async_ = c.at(4, "async_", Value::of_bool(false)),
+             move_to = c.at(5, "move_to", Value::of_bool(false));
+        return [=](Runtime& rt, MacroRegistry&, const Bindings& b) {
+            int xv = x.get(b).as_int(), yv = y.get(b).as_int();
+            double tv = t.get(b).as_double();
+            const std::string& ev = easing.get(b).kind == Value::Kind::Str ? easing.get(b).s : std::string("inout");
+            bool mt = move_to.get(b).as_bool();
+            if (async_.get(b).as_bool()) {
+                double mult = Runtime::speed_multiplier();
+                std::string e = ev;
+                spawn_background([&rt, xv, yv, tv, e, mt, mult] {
+                    Runtime::speed_multiplier() = mult;
+                    move_mouse_fn(rt, xv, yv, tv, e, mt);
+                });
+            } else {
+                move_mouse_fn(rt, xv, yv, tv, ev, mt);
+            }
+        };
     }
-    if (name == "speed") { speed_fn(rt, args.get(0, "multiplier", {}).as_double()); return; }
-    if (name == "ignore") { ignore_fn(rt, args.get(0, "what", {}).as_string()); return; }
-    if (name == "ignore_keys") {
-        std::vector<int> codes;
-        for (auto& v : args.positional) codes.push_back(v.as_key_code());
-        ignore_keys_fn(rt, codes);
-        return;
+    if (n == "wheel") {
+        c.allow({"amount"});
+        Slot amount = c.at(0, "amount");
+        return [amount](Runtime& rt, MacroRegistry&, const Bindings& b) { wheel(rt, amount.get(b).as_int()); };
     }
-    if (name == "actAs") {
-        if (args.positional.size() < 2) {
-            throw std::runtime_error("line " + std::to_string(line_no) + ": actAs() needs at least 2 arguments");
+    if (n == "wait") {
+        c.allow({"time_", "precise"});
+        Slot t = c.at(0, "time_"), precise = c.at(1, "precise", Value::of_bool(false));
+        return [t, precise](Runtime& rt, MacroRegistry&, const Bindings& b) {
+            wait_fn(rt, t.get(b).as_double(), precise.get(b).as_bool());
+        };
+    }
+    if (n == "speed") {
+        c.allow({"multiplier"});
+        Slot m = c.at(0, "multiplier");
+        return [m](Runtime& rt, MacroRegistry&, const Bindings& b) { speed_fn(rt, m.get(b).as_double()); };
+    }
+    if (n == "ignore") {
+        c.allow({"what"});
+        Slot what = c.at(0, "what");
+        return [what](Runtime& rt, MacroRegistry&, const Bindings& b) { ignore_fn(rt, what.get(b).as_string()); };
+    }
+    if (n == "ignore_keys") {
+        c.allow({});
+        std::vector<Slot> keys = c.pos;
+        return [keys](Runtime& rt, MacroRegistry&, const Bindings& b) {
+            std::vector<int> codes;
+            for (const auto& k : keys) codes.push_back(k.get(b).as_key_code());
+            ignore_keys_fn(rt, codes);
+        };
+    }
+    if (n == "actAs") {
+        c.allow({});
+        if (c.pos.size() < 2) {
+            throw MacroCompileError("line " + std::to_string(stmt.line_no) + ": actAs() needs at least 2 arguments");
         }
-        int key_pressing = args.positional[0].as_key_code();
-        bool ignore_original = args.positional[1].as_bool();
-        std::vector<int> acting;
-        for (size_t i = 2; i < args.positional.size(); ++i) acting.push_back(args.positional[i].as_key_code());
-        act_as_fn(rt, key_pressing, ignore_original, acting);
-        return;
+        std::vector<Slot> all = c.pos;
+        return [all](Runtime& rt, MacroRegistry&, const Bindings& b) {
+            std::vector<int> acting;
+            for (size_t i = 2; i < all.size(); ++i) acting.push_back(all[i].get(b).as_key_code());
+            act_as_fn(rt, all[0].get(b).as_key_code(), all[1].get(b).as_bool(), acting);
+        };
     }
-    if (name == "command") {
-        if (args.positional.empty()) throw std::runtime_error("line " + std::to_string(line_no) + ": command() needs at least 1 argument");
-        std::string cmd = args.positional[0].as_string();
-        std::vector<std::string> extra;
-        for (size_t i = 1; i < args.positional.size(); ++i) extra.push_back(args.positional[i].as_string());
-        command_fn(format_command(cmd, extra));
-        return;
+    if (n == "command") {
+        c.allow({});
+        if (c.pos.empty()) throw MacroCompileError("line " + std::to_string(stmt.line_no) + ": command() needs a command");
+        std::vector<Slot> all = c.pos;
+        return [all](Runtime&, MacroRegistry&, const Bindings& b) {
+            std::vector<std::string> extra;
+            for (size_t i = 1; i < all.size(); ++i) extra.push_back(all[i].get(b).as_string());
+            command_fn(format_command(all[0].get(b).as_string(), extra));
+        };
     }
+
+    // Anything else: a call to another macro by (sanitized) name, looked
+    // up in the registry at CALL time. Crossing macro boundaries in
+    // native mode is positional-strings only (same contract as CLI args).
+    if (!c.kw.empty()) {
+        throw MacroCompileError("line " + std::to_string(stmt.line_no) + ": keyword arguments aren't supported "
+                                "when calling another macro from a python_off macro");
+    }
+    std::vector<Slot> all = c.pos;
+    std::string callee = n;
+    return [all, callee](Runtime& rt, MacroRegistry& reg, const Bindings& b) {
+        std::vector<std::string> call_args;
+        for (const auto& s : all) call_args.push_back(s.get(b).as_string());
+        reg.get(callee)->run(rt, reg, call_args); // throws a clear "failed to compile" if unknown
+    };
 }
 
 } // namespace
 
-// ---------------------------------------------------------------------
-// NativeMacroBody
-// ---------------------------------------------------------------------
-
 class NativeMacroBody : public CompiledMacro {
 public:
-    NativeMacroBody(std::vector<CompiledStatement> statements, std::vector<ArgumentDecl> params,
-                     std::vector<CompiledArg> resolved_defaults, std::string name)
-        : statements_(std::move(statements)), params_(std::move(params)),
-          resolved_defaults_(std::move(resolved_defaults)), name_(std::move(name)) {}
+    NativeMacroBody(std::vector<Op> ops, std::vector<Value> defaults, std::string name)
+        : ops_(std::move(ops)), defaults_(std::move(defaults)), name_(std::move(name)) {}
 
     void run(Runtime& rt, MacroRegistry& registry, const std::vector<std::string>& args) override {
-        std::unordered_map<std::string, RuntimeValue> bound;
-        for (size_t i = 0; i < params_.size(); ++i) {
-            if (i < args.size()) {
-                bound[params_[i].name] = value_from_string(args[i]);
-            } else {
-                bound[params_[i].name] = resolve_arg(resolved_defaults_[i], {});
-            }
+        if (defaults_.empty()) {
+            static const Bindings kEmpty;
+            execute(rt, registry, kEmpty);
+            return;
         }
-
-        try {
-            for (const auto& stmt : statements_) {
-                ResolvedArgs resolved = resolve_args(stmt, bound);
-                if (kKnownPrimitives.count(stmt.callee)) {
-                    execute_primitive(rt, stmt.callee, resolved, stmt.line_no);
-                } else {
-                    std::shared_ptr<CompiledMacro> target;
-                    try {
-                        target = registry.get(stmt.callee);
-                    } catch (const std::exception& exc) {
-                        std::fprintf(stderr, "Macro '%s' line %d: %s\n", name_.c_str(), stmt.line_no, exc.what());
-                        return;
-                    }
-                    std::vector<std::string> call_args;
-                    for (auto& v : resolved.positional) call_args.push_back(v.as_string());
-                    target->run(rt, registry, call_args);
-                }
-                rt.check_abort();
-            }
-        } catch (const MacroAborted&) {
-            throw; // let the caller's fire-once/loop wrapper treat this as a clean stop
-        }
+        Bindings bound = defaults_;
+        for (size_t i = 0; i < bound.size() && i < args.size(); ++i) bound[i] = Value::of_str(args[i]);
+        execute(rt, registry, bound);
     }
 
 private:
-    std::vector<CompiledStatement> statements_;
-    std::vector<ArgumentDecl> params_;
-    std::vector<CompiledArg> resolved_defaults_; // one per params_[i], parsed once at compile time
+    void execute(Runtime& rt, MacroRegistry& registry, const Bindings& b) {
+        for (const auto& op : ops_) {
+            op(rt, registry, b);
+            rt.check_abort();
+        }
+    }
+
+    std::vector<Op> ops_;
+    std::vector<Value> defaults_; // one per declared parameter
     std::string name_;
 };
 
 std::shared_ptr<CompiledMacro> compile_native_macro(const json& macro_def, MacroRegistry&) {
-    std::string raw_body = macro_def.value("code", "");
-    std::string name = macro_def.value("name", macro_def.value("id", std::string("macro")));
-    bool simplified_names = macro_def.value("simplified_names", false);
+    std::string raw_body = json_str(macro_def, "code", "");
+    std::string name = json_str(macro_def, "name", json_str(macro_def, "id", "macro"));
+    bool simplified_names = json_bool(macro_def, "simplified_names", false);
 
     ExtractedBody extracted = extract_arguments_signature(raw_body); // throws MacroCompileError
 
-    std::vector<CompiledArg> resolved_defaults;
+    std::vector<Value> defaults;
     for (const auto& p : extracted.params) {
-        resolved_defaults.push_back(parse_literal_or_ref(p.default_source, {}, simplified_names, 0));
+        Slot s = to_slot(parse_literal_or_ref(p.default_source, {}, simplified_names, 1), {});
+        defaults.push_back(s.constant);
     }
 
-    std::vector<CompiledStatement> statements;
+    std::vector<Op> ops;
     std::istringstream iss(extracted.body);
     std::string line;
-    int line_no = extracted.has_arguments_decl ? 2 : 1; // line 1 was the arguments(...) declaration, if present
+    int line_no = extracted.has_arguments_decl ? 2 : 1;
     while (std::getline(iss, line)) {
         std::string t = trim(line);
         if (!t.empty() && t[0] != '#') {
-            statements.push_back(parse_call_line(t, line_no, extracted.params, simplified_names));
+            ops.push_back(compile_op(parse_call_line(t, line_no, extracted.params, simplified_names), extracted.params));
         }
         ++line_no;
     }
-
-    return std::make_shared<NativeMacroBody>(std::move(statements), extracted.params,
-                                              std::move(resolved_defaults), name);
+    return std::make_shared<NativeMacroBody>(std::move(ops), std::move(defaults), name);
 }
 
 } // namespace puppetry

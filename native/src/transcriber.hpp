@@ -1,0 +1,97 @@
+#pragma once
+// Live input transcription: turns real key/click/movement events into
+// macro code (kd/ku/wait/move_mouse/wheel lines) as you perform them.
+// C++ port of macro_gui.py's InputTranscriber, run as its own process
+// (puppetry-transcribe, see transcribe_main.cpp) that streams lines to
+// the editor on stdout.
+//
+// TIMING -- the reason for the rewrite. Every gap comes from the
+// KERNEL's timestamp on each event (stamped when the kernel received it
+// from the hardware; microsecond resolution, on CLOCK_MONOTONIC), not
+// from when this program got around to reading it. Microseconds are the
+// finest timing Linux itself records for input, so that's the
+// resolution written out: wait(0.001234). The old Python transcriber:
+//   - timed events with time.monotonic() at READ time (adds delivery +
+//     Python jitter),
+//   - rounded to 1ms (3 decimals),
+//   - silently DELETED every gap under 20ms -- and reset its clock
+//     anyway, so fast sequences (rolls, double-taps) replayed compressed,
+//   - polled raw mouse motion on a 10ms select() timeout.
+// None of that survives here; no time is ever dropped.
+//
+// Mouse motion modes (same user-facing options as before):
+//   - not raw: motion isn't recorded; pressing the ping key samples the
+//     cursor (kdotool/KWin) and emits one move_mouse(x, y, move_to=True,
+//     time_=<gap>).
+//   - raw, default: raw deltas are accumulated and emitted at most
+//     raw_hz times a second (fewer, more readable lines).
+//   - raw + precise: one line per HARDWARE FRAME at the mouse's own
+//     polling rate, with wait(..., precise=True). This matters beyond
+//     resolution: pointer acceleration depends on per-frame deltas and
+//     their timing, so replaying the exact original frames reproduces
+//     the original cursor path, while resampled (merged) frames get
+//     accelerated differently. Costs CPU on playback (spin-waits) and
+//     produces ~2 lines per mouse frame.
+#include <functional>
+#include <string>
+#include "evdev_device.hpp"
+
+namespace puppetry {
+
+struct TranscribeOptions {
+    bool keyboard = false;       // transcribe KEY_* presses
+    bool mouse = false;          // transcribe BTN_* clicks, wheel, and (per mode) motion
+    bool raw = false;            // record raw motion instead of ping waypoints
+    bool set_positions = false;  // raw: absolute move_to coordinates per line
+    bool same_start = false;     // raw: one absolute move_to at the start, then relative
+    bool precise = false;        // per-frame motion + precise=True waits
+    double raw_hz = 60;          // raw, non-precise: max motion lines per second
+    int ping_code = 110;         // KEY_INSERT
+};
+
+enum class Source { Keyboard, Mouse, Both };
+
+class TranscriberCore {
+public:
+    using Emit = std::function<void(const std::string&)>;
+    using CursorQuery = std::function<bool(int& x, int& y)>;
+
+    TranscriberCore(TranscribeOptions opts, Emit emit, CursorQuery query);
+
+    // Call once before any events. `now_us` on the same clock as event
+    // timestamps (CLOCK_MONOTONIC). Emits the same_start line if asked.
+    void start(long long now_us);
+
+    void feed(Source src, const RawEvent& ev);
+
+    // set_positions drift correction: the caller queries the cursor
+    // asynchronously (never blocking the event loop) and reports it here
+    // together with the motion totals captured when the query started.
+    bool wants_resync(long long now_us) const;
+    void mark_resync_started(long long now_us, long long& snap_x, long long& snap_y);
+    void apply_resync(int x, int y, long long snap_x, long long snap_y);
+
+    // Formatting helpers (exposed for tests).
+    static std::string format_seconds(long long us);
+    std::string wait_line(long long gap_us) const;
+
+private:
+    void emit_timed(long long ts_us, const std::string& line);
+    void flush_motion(); // emits pending motion at the time it actually happened
+
+    TranscribeOptions opts_;
+    Emit emit_;
+    CursorQuery query_;
+    long long last_us_ = 0;
+    long long tick_us_;
+    long long next_tick_us_ = 0;
+    int acc_dx_ = 0, acc_dy_ = 0;
+    long long acc_ts_ = 0; // kernel time of the latest accumulated motion
+    long long total_dx_ = 0, total_dy_ = 0;
+    bool tracking_ = false;
+    long long pos_x_ = 0, pos_y_ = 0;
+    long long next_resync_us_ = 0;
+    bool dropping_kb_ = false, dropping_mouse_ = false;
+};
+
+} // namespace puppetry

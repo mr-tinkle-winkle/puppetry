@@ -5,6 +5,7 @@
 #include <cassert>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <sys/socket.h>
 #include <sys/un.h>
@@ -55,7 +56,9 @@ int main() {
     m->enabled = true;
     macros.push_back(std::move(m));
 
-    std::string sock_path = "/tmp/puppetry_test_control.sock";
+    // $TMPDIR, not /tmp: inside a Nix build sandbox /tmp may not exist.
+    const char* tmp = std::getenv("TMPDIR");
+    std::string sock_path = std::string(tmp && *tmp ? tmp : "/tmp") + "/puppetry_test_control.sock";
     ControlSocketServer server(rt, registry, macros);
     server.start(sock_path);
     // Give the accept thread a beat to actually be listening -- listen()

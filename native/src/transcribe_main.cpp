@@ -1,0 +1,177 @@
+// puppetry-transcribe -- the editor's "Start Transcribing" backend.
+//
+// Streams generated macro code to stdout, one or more complete lines per
+// write, until stdin is closed (the GUI closing its end = "Stop") or it
+// gets SIGTERM/SIGINT. Status/errors go to stderr. Exit codes: 0 ok,
+// 2 couldn't open any requested device, 64 bad arguments.
+//
+//   puppetry-transcribe --keyboard PATH --mouse PATH
+//       [--transcribe-keyboard] [--transcribe-mouse] [--raw]
+//       [--set-positions] [--same-start] [--raw-hz N] [--precise]
+//       [--ping-key KEY_NAME]
+//
+// Device I/O only; all transcription logic is TranscriberCore
+// (transcriber.cpp), which is unit-tested with synthetic events.
+#include <algorithm>
+#include <atomic>
+#include <csignal>
+#include <cstdio>
+#include <cerrno>
+#include <cstring>
+#include <ctime>
+#include <memory>
+#include <poll.h>
+#include <string>
+#include <thread>
+#include <unistd.h>
+#include <vector>
+#include "evdev_device.hpp"
+#include "keycodes.hpp"
+#include "primitives.hpp"
+#include "transcriber.hpp"
+
+using namespace puppetry;
+
+static volatile sig_atomic_t g_stop = 0;
+// static: the detached resync helper may still be finishing when main() returns.
+static std::atomic<bool> resync_busy{false};
+static void on_signal(int) { g_stop = 1; }
+
+static long long now_monotonic_us() {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (long long)ts.tv_sec * 1000000LL + ts.tv_nsec / 1000;
+}
+
+int main(int argc, char** argv) {
+    std::string kb_path, mouse_path;
+    TranscribeOptions opts;
+    for (int i = 1; i < argc; ++i) {
+        std::string a = argv[i];
+        auto next = [&]() -> std::string {
+            if (i + 1 >= argc) { std::fprintf(stderr, "missing value for %s\n", a.c_str()); std::exit(64); }
+            return argv[++i];
+        };
+        if (a == "--keyboard") kb_path = next();
+        else if (a == "--mouse") mouse_path = next();
+        else if (a == "--transcribe-keyboard") opts.keyboard = true;
+        else if (a == "--transcribe-mouse") opts.mouse = true;
+        else if (a == "--raw") opts.raw = true;
+        else if (a == "--set-positions") opts.set_positions = true;
+        else if (a == "--same-start") opts.same_start = true;
+        else if (a == "--precise") opts.precise = true;
+        else if (a == "--raw-hz") opts.raw_hz = std::atof(next().c_str());
+        else if (a == "--ping-key") {
+            std::string name = next();
+            int code;
+            if (!resolve_key_name(name, code)) { std::fprintf(stderr, "unknown ping key %s\n", name.c_str()); return 64; }
+            opts.ping_code = code;
+        } else {
+            std::fprintf(stderr, "unknown argument %s\n", a.c_str());
+            return 64;
+        }
+    }
+
+    struct Dev { std::unique_ptr<InputDevice> dev; Source role; };
+    std::vector<Dev> devs;
+    // The keyboard is opened whenever anything is transcribed -- it also
+    // carries the ping key. Same device for both roles -> opened once.
+    bool want_kb = (opts.keyboard || opts.mouse) && !kb_path.empty();
+    bool want_mouse = opts.mouse && !mouse_path.empty();
+    if (want_kb && want_mouse && kb_path == mouse_path) {
+        devs.push_back({std::make_unique<InputDevice>(), Source::Both});
+        if (!devs.back().dev->open(kb_path)) devs.pop_back();
+    } else {
+        if (want_kb) {
+            devs.push_back({std::make_unique<InputDevice>(), Source::Keyboard});
+            if (!devs.back().dev->open(kb_path)) devs.pop_back();
+        }
+        if (want_mouse) {
+            devs.push_back({std::make_unique<InputDevice>(), Source::Mouse});
+            if (!devs.back().dev->open(mouse_path)) devs.pop_back();
+        }
+    }
+    if (devs.empty()) {
+        std::fprintf(stderr, "no_devices\n");
+        return 2;
+    }
+    for (auto& d : devs) d.dev->use_monotonic_clock(); // one shared timeline, never jumps
+
+    std::signal(SIGTERM, on_signal);
+    std::signal(SIGINT, on_signal);
+    std::signal(SIGPIPE, SIG_IGN);
+
+    std::string out_buf;
+    auto emit = [&](const std::string& s) { out_buf += s; };
+    auto query = [](int& x, int& y) { return get_cursor_pos_kde(x, y, 0.5); };
+    TranscriberCore core(opts, emit, query);
+    core.start(now_monotonic_us());
+
+    // set_positions drift-correction queries run on a helper thread so a
+    // slow kdotool round-trip never stalls event reading (a stalled
+    // reader is exactly how the kernel buffer overflows).
+    int resync_pipe[2];
+    if (pipe(resync_pipe) != 0) return 1;
+    struct ResyncResult { int ok, x, y; long long sx, sy; };
+
+    std::vector<struct pollfd> pfds;
+    pfds.push_back({STDIN_FILENO, POLLIN, 0});
+    pfds.push_back({resync_pipe[0], POLLIN, 0});
+    for (auto& d : devs) pfds.push_back({d.dev->fd(), POLLIN, 0});
+
+    struct Tagged { RawEvent ev; Source role; };
+    std::vector<Tagged> batch;
+    RawEvent buf[64];
+
+    while (!g_stop) {
+        long long now = now_monotonic_us();
+        if (core.wants_resync(now) && !resync_busy.exchange(true)) {
+            long long sx, sy;
+            core.mark_resync_started(now, sx, sy);
+            int wfd = resync_pipe[1];
+            std::thread([wfd, sx, sy] {
+                ResyncResult r{0, 0, 0, sx, sy};
+                r.ok = get_cursor_pos_kde(r.x, r.y, 0.5) ? 1 : 0;
+                ssize_t w = write(wfd, &r, sizeof(r));
+                (void)w;
+                resync_busy = false;
+            }).detach();
+        }
+
+        int rc = poll(pfds.data(), pfds.size(), 250);
+        if (rc < 0) { if (errno == EINTR) continue; break; }
+
+        if (pfds[0].revents & (POLLIN | POLLHUP)) {
+            char c[64];
+            ssize_t n = read(STDIN_FILENO, c, sizeof(c));
+            if (n <= 0) break; // GUI closed our stdin: stop
+        }
+        if (pfds[1].revents & POLLIN) {
+            ResyncResult r;
+            if (read(resync_pipe[0], &r, sizeof(r)) == (ssize_t)sizeof(r) && r.ok) core.apply_resync(r.x, r.y, r.sx, r.sy);
+        }
+
+        // Gather everything ready on every device, then merge by kernel
+        // timestamp so keyboard and mouse events interleave in true order
+        // (a stable sort keeps each device's frames contiguous).
+        batch.clear();
+        bool device_gone = false;
+        for (size_t i = 2; i < pfds.size(); ++i) {
+            if (!(pfds[i].revents & (POLLIN | POLLERR | POLLHUP))) continue;
+            int n = devs[i - 2].dev->read_events(buf, 64);
+            if (n < 0) { device_gone = true; continue; }
+            for (int k = 0; k < n; ++k) batch.push_back({buf[k], devs[i - 2].role});
+        }
+        std::stable_sort(batch.begin(), batch.end(),
+                         [](const Tagged& a, const Tagged& b) { return a.ev.time_us < b.ev.time_us; });
+        for (const auto& t : batch) core.feed(t.role, t.ev);
+
+        if (!out_buf.empty()) {
+            fwrite(out_buf.data(), 1, out_buf.size(), stdout);
+            fflush(stdout);
+            out_buf.clear();
+        }
+        if (device_gone) { std::fprintf(stderr, "device disconnected\n"); break; }
+    }
+    return 0;
+}

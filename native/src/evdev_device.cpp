@@ -1,6 +1,7 @@
 #include "evdev_device.hpp"
 #include <algorithm>
 #include <cerrno>
+#include <ctime>
 #include <cstring>
 #include <fcntl.h>
 #include <filesystem>
@@ -184,14 +185,31 @@ void InputDevice::close() {
 }
 
 bool InputDevice::read_event(RawEvent& out) {
-    if (fd_ < 0) return false;
-    struct input_event ev;
-    ssize_t n = ::read(fd_, &ev, sizeof(ev));
-    if (n != (ssize_t)sizeof(ev)) return false;
-    out.type = ev.type;
-    out.code = ev.code;
-    out.value = ev.value;
-    return true;
+    return read_events(&out, 1) == 1;
+}
+
+int InputDevice::read_events(RawEvent* out, int max) {
+    if (fd_ < 0) return -1;
+    struct input_event evs[64];
+    if (max > 64) max = 64;
+    ssize_t n;
+    do {
+        n = ::read(fd_, evs, sizeof(evs[0]) * max);
+    } while (n < 0 && errno == EINTR);
+    if (n <= 0) return -1;
+    int count = (int)(n / (ssize_t)sizeof(evs[0]));
+    for (int i = 0; i < count; ++i) {
+        out[i].type = evs[i].type;
+        out[i].code = evs[i].code;
+        out[i].value = evs[i].value;
+        out[i].time_us = (long long)evs[i].input_event_sec * 1000000LL + evs[i].input_event_usec;
+    }
+    return count;
+}
+
+bool InputDevice::use_monotonic_clock() {
+    int clk = CLOCK_MONOTONIC;
+    return fd_ >= 0 && ioctl(fd_, EVIOCSCLOCKID, &clk) == 0;
 }
 
 void InputDevice::grab() {

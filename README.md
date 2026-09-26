@@ -1,6 +1,6 @@
 # Puppetry
 
-A keyboard/mouse macro daemon for NixOS, with a GTK4 editor. Watches your
+A keyboard/mouse macro daemon for NixOS (C++, with embedded Python for macros), with a Qt editor. Watches your
 real keyboard/mouse read-only (never grabs them) and fires macros through a
 virtual `uinput` device when you hit a configured combo. Works under both
 KDE Plasma (KWin) and Hyprland on Wayland.
@@ -74,6 +74,9 @@ session to take effect.
 - Config lives at `~/.config/macro-daemon/` (`state.json` + `profiles/*.json`)
   -- created automatically on first run.
 - Hitting **Save** in the editor restarts the service for you automatically.
+- Devices, profiles, the abort key and appearance live in the **Settings** tab.
+- **Input Visualizer** has a CPS tester that measures what an app actually
+  receives (daemon -> kernel -> compositor -> app).
 
 ## Icon / logo
 
