@@ -92,6 +92,19 @@ void TranscriberCore::feed(Source src, const RawEvent& ev) {
     }
 
     if (ev.type == EV_KEY) {
+        // Abort and the toggle hotkey are consumed here, never transcribed
+        // -- same treatment as the ping key below. Abort additionally
+        // flags the session to end, exactly like the daemon's own abort
+        // key ends every running macro (see handle_key_event in
+        // dispatch.cpp); the toggle hotkey needs no action here since the
+        // GUI itself starts/stops this process.
+        if (opts_.abort_code >= 0 && ev.code == opts_.abort_code) {
+            if (ev.value == 1) abort_requested_ = true;
+            return;
+        }
+        if (opts_.hotkey_code >= 0 && ev.code == opts_.hotkey_code) {
+            return;
+        }
         if (ev.code == opts_.ping_code) {
             if (ev.value == 1 && opts_.mouse && !opts_.raw) {
                 int x, y;

@@ -568,6 +568,71 @@ order, now targeting the C++ daemon (`native/`) and the Qt GUI
   verification pass; kept for now specifically so that pass has
   something to compare behavior against if anything regresses.
 
+## Session 5 — abort key stops transcription, transcribe hotkey
+
+Two small additions to transcription, both verified: `native/build`
+rebuilt clean (`test_transcriber` 16/16, everything else unaffected), and
+`gui/test_app.py` 56/56 (5 new checks) under `QT_QPA_PLATFORM=offscreen`.
+
+**Abort key now ends a running transcription session too.** Previously
+the abort key only lived in the daemon (`handle_key_event` in
+`dispatch.cpp`) -- `puppetry-transcribe` is a separate process the GUI
+spawns and never talked to the daemon or knew about the abort key at all,
+so pressing it while transcribing did nothing to the transcript. Fixed at
+the transcriber, not the daemon, since it already reads the same devices
+independently:
+- `TranscriberCore` (`native/src/transcriber.{hpp,cpp}`) gained
+  `TranscribeOptions.abort_code` (-1 = disabled) and `abort_requested()`.
+  In `feed()`, a press of that code is consumed like the ping key (never
+  transcribed) and sets a flag instead of the ping key's cursor-sample
+  behavior.
+- `transcribe_main.cpp` takes a new `--abort-key KEY_NAME` argument,
+  checks `core.abort_requested()` after every batch of fed events, and
+  exits **3** (not 0) if that's why it stopped -- a new exit code
+  alongside the existing 2 (couldn't open a device) and 64 (bad args).
+- `gui/transcription.py`'s `TranscriptionController.start()` takes an
+  `abort_key=` kwarg (passed through as `--abort-key`); `_finished()`
+  treats exit code 3 as "Stopped: abort key pressed." rather than a
+  generic/error stop.
+- `gui/editor_page.py` passes `abort_key=self.model.state.get("abort_key")
+  or "KEY_PAUSE"` on every `_transcribe_clicked()` start -- always the
+  live in-memory abort key, even if Settings hasn't been Saved yet (this
+  is just filtering, not daemon config, so there's no restart to wait
+  for).
+
+**New "Transcribe hotkey"**, in the editor's Transcribe Inputs section
+next to the ping key: press it while the editor page is open to start
+transcribing, press it again to stop -- and it's never itself recorded,
+including the press that stops a running session.
+- Set via a "Change" button that reuses `input_tools.DetectKey` exactly
+  like the abort key / ping key pickers elsewhere; stored with
+  `model.set_pref("transcribe_hotkey", name)` (GUI-only preference, no
+  daemon restart, like the ping key).
+- Listening for it while the page is open is a **new** always-on watcher,
+  `input_tools.HotkeyListener` -- same shape as `DetectKey` (opens the
+  configured keyboard/mouse paths with python-evdev) but doesn't stop
+  after one match or time out; it just emits `pressed` every time the
+  configured code goes down, for as long as the thread runs. Editor page
+  starts/restarts it in `showEvent`/whenever the hotkey or devices change
+  (`_restart_hotkey_listener`), and stops it in `hideEvent` alongside the
+  mouse-position poller -- so it only does anything while that page is
+  actually visible, per the request.
+- The hotkey press itself is filtered out of the transcript the same way
+  the abort key is: `TranscribeOptions.hotkey_code` (-1 = disabled) is
+  consumed silently in `feed()` (no abort-style flag -- the GUI, not the
+  subprocess, decides to start/stop). `transcription.py` passes it as
+  `--hotkey-key` whenever one is configured.
+- `input_tools.resolve_key_code(name)` was added as the reverse of the
+  existing `key_name(code)` (uses `evdev.ecodes.ecodes[name]`) so the
+  stored hotkey name can be turned back into a code to compare against
+  live events.
+
+**Not done / didn't seem asked for:** no "clear hotkey" button (mirrors
+the ping key picker, which doesn't have one either); the hotkey is
+keyboard/mouse-button only, same universe as the abort key and ping key.
+Worth asking the user before adding a way to disable a saved hotkey
+without setting a different one, if that comes up next.
+
 ## Build/run/environment
 
 **Daemon:** `cd native && mkdir build && cd build && cmake .. && cmake

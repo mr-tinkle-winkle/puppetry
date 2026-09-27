@@ -50,6 +50,16 @@ def is_button_name(code: int) -> bool:
     return HAVE_EVDEV and any(n.startswith("BTN_") for n in _names(code))
 
 
+def resolve_key_code(name: str | None) -> int | None:
+    """Name -> numeric code (the reverse of key_name), for turning a
+    stored key name like the transcribe hotkey back into something we can
+    compare evdev event codes against."""
+    if not HAVE_EVDEV or not name:
+        return None
+    code = e.ecodes.get(name)
+    return code if isinstance(code, int) else None
+
+
 def _open(paths):
     sel = selectors.DefaultSelector()
     devices = []
@@ -220,6 +230,44 @@ class DetectKey(QThread):
         finally:
             _close(devices)
         self.found.emit(*result)
+
+
+class HotkeyListener(QThread):
+    """Like DetectKey, but doesn't stop after the first match and doesn't
+    time out -- it watches for one specific code for as long as this
+    thread runs, emitting `pressed` every time it goes down (value == 1).
+    Used for the editor's "transcribe" toggle hotkey: the caller starts
+    one of these while the editor page is open and stops it when leaving,
+    so the hotkey only does anything there."""
+
+    pressed = Signal()
+
+    def __init__(self, keyboard_path, mouse_path, code: int, parent=None):
+        super().__init__(parent)
+        self.paths = (keyboard_path, mouse_path)
+        self.code = code
+        self._stop = False
+
+    def stop(self) -> None:
+        self._stop = True
+
+    def run(self) -> None:
+        if not HAVE_EVDEV or self.code is None:
+            return
+        sel, devices = _open(self.paths)
+        if not devices:
+            return
+        try:
+            while not self._stop:
+                for key, _ in sel.select(timeout=0.2):
+                    try:
+                        for ev in key.data.read():
+                            if ev.type == e.EV_KEY and ev.value == 1 and ev.code == self.code:
+                                self.pressed.emit()
+                    except BlockingIOError:
+                        pass
+        finally:
+            _close(devices)
 
 
 def cursor_position(timeout: float = 0.5):

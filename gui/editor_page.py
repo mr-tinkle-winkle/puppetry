@@ -21,7 +21,7 @@ from PySide6.QtWidgets import (
 )
 
 import puppetry_config as cfg
-from input_tools import ComboRecorder, DetectKey, MousePositionPoller
+from input_tools import ComboRecorder, DetectKey, HotkeyListener, MousePositionPoller, resolve_key_code
 from model import AppModel
 from reference import DICTIONARY_TEXT, alias_targets, simplified_names_reference_text
 from transcription import TranscriptionController
@@ -91,7 +91,9 @@ class MacroEditorPage(QWidget):
         self._snapshot = ""
         self._recorder: ComboRecorder | None = None
         self._ping_detect: DetectKey | None = None
+        self._hotkey_detect: DetectKey | None = None
         self._poller: MousePositionPoller | None = None
+        self._hotkey_listener: HotkeyListener | None = None
         self.transcriber = TranscriptionController(self)
         theme = Theme()
         self._theme = theme
@@ -206,6 +208,18 @@ class MacroEditorPage(QWidget):
         self.ping_btn.clicked.connect(self._change_ping)
         ping_row.addWidget(self.ping_btn)
         col.addLayout(ping_row)
+        hotkey_row = QHBoxLayout()
+        hotkey_row.addWidget(QLabel("Transcribe hotkey"))
+        self.hotkey_label = QLabel()
+        self.hotkey_label.setFont(QFont("monospace"))
+        hotkey_row.addWidget(self.hotkey_label, stretch=1)
+        self.hotkey_btn = CustomButton("Change")
+        self.hotkey_btn.clicked.connect(self._change_hotkey)
+        hotkey_row.addWidget(self.hotkey_btn)
+        col.addLayout(hotkey_row)
+        col.addWidget(dim_label("While this page is open, pressing this key starts/stops transcribing (with "
+                                "whatever's checked above) -- never itself recorded. The abort key always stops "
+                                "transcribing too, from anywhere."))
         tr_row = QHBoxLayout()
         self.tr_btn = CustomButton("Start Transcribing")
         self.tr_btn.clicked.connect(self._transcribe_clicked)
@@ -224,6 +238,7 @@ class MacroEditorPage(QWidget):
         self.tr_precise.setChecked(bool(st.get("transcribe_precise", False)))
         self.tr_hz.setValue(float(st.get("transcribe_raw_hz", 60)))
         self.ping_label.setText(st.get("transcribe_ping_key") or "KEY_INSERT")
+        self.hotkey_label.setText(st.get("transcribe_hotkey") or "(not set)")
         self._sync_transcribe_enabled()
         for cb, key in ((self.tr_kb, "transcribe_keyboard"), (self.tr_mouse, "transcribe_mouse"),
                         (self.tr_raw, "transcribe_raw"), (self.tr_setpos, "transcribe_setpos"),
@@ -415,6 +430,7 @@ class MacroEditorPage(QWidget):
             self._poller = MousePositionPoller(self)
             self._poller.position.connect(self.mouse_pos.setText)
             self._poller.start()
+        self._restart_hotkey_listener()
 
     def hideEvent(self, event) -> None:
         super().hideEvent(event)
@@ -425,7 +441,34 @@ class MacroEditorPage(QWidget):
             self._poller.stop()
             self._poller.wait(1000)
             self._poller = None
+        if self._hotkey_listener is not None:
+            self._hotkey_listener.stop()
+            self._hotkey_listener.wait(500)
+            self._hotkey_listener = None
         self.transcriber.stop()
+
+    def _restart_hotkey_listener(self) -> None:
+        """The transcribe hotkey only does anything while this page is
+        visible -- this listener is (re)started on showEvent and stopped
+        on hideEvent, and restarted here too whenever the hotkey or the
+        devices it watches change."""
+        if self._hotkey_listener is not None:
+            self._hotkey_listener.stop()
+            self._hotkey_listener.wait(500)
+            self._hotkey_listener = None
+        code = resolve_key_code(self.model.state.get("transcribe_hotkey"))
+        if code is None:
+            return
+        kb, _ = self.model.device("keyboard")
+        mouse, _ = self.model.device("mouse")
+        if not kb and not mouse:
+            return
+        self._hotkey_listener = HotkeyListener(kb, mouse, code, self)
+        self._hotkey_listener.pressed.connect(self._hotkey_pressed)
+        self._hotkey_listener.start()
+
+    def _hotkey_pressed(self) -> None:
+        self._transcribe_clicked()
 
     # ------------------------------------------------------------------ combo
 
@@ -510,7 +553,9 @@ class MacroEditorPage(QWidget):
             keyboard_path=kb, mouse_path=mouse, transcribe_keyboard=kb_on, transcribe_mouse=mouse_on,
             raw=self.tr_raw.isChecked(), set_positions=self.tr_setpos.isChecked(),
             same_start=self.tr_samestart.isChecked(), raw_hz=self.tr_hz.value(),
-            precise=self.tr_precise.isChecked(), ping_key=self.ping_label.text())
+            precise=self.tr_precise.isChecked(), ping_key=self.ping_label.text(),
+            abort_key=self.model.state.get("abort_key") or "KEY_PAUSE",
+            hotkey_key=self.model.state.get("transcribe_hotkey") or None)
         if err:
             self.tr_status.setText(err)
             return
@@ -542,6 +587,25 @@ class MacroEditorPage(QWidget):
             return
         self.ping_label.setText(name)
         self.model.set_pref("transcribe_ping_key", name)
+
+    def _change_hotkey(self) -> None:
+        kb, _ = self.model.device("keyboard")
+        mouse, _ = self.model.device("mouse")
+        self.hotkey_btn.setEnabled(False)
+        self.hotkey_label.setText("press a key…")
+        self._hotkey_detect = DetectKey(kb, mouse, parent=self)
+        self._hotkey_detect.found.connect(self._hotkey_found)
+        self._hotkey_detect.start()
+
+    def _hotkey_found(self, code, name) -> None:
+        self.hotkey_btn.setEnabled(True)
+        if code is None:
+            self.hotkey_label.setText(self.model.state.get("transcribe_hotkey") or "(not set)")
+            self.tr_status.setText("No key detected -- kept the previous transcribe hotkey.")
+            return
+        self.hotkey_label.setText(name)
+        self.model.set_pref("transcribe_hotkey", name)
+        self._restart_hotkey_listener()
 
     # ------------------------------------------------------------------ aliases
 

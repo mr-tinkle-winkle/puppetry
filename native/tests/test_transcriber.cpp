@@ -127,6 +127,34 @@ int main() {
         CHECK_EQ(h.take(), "wait(0.001000, precise=True)\nmove_mouse(513, 306, move_to=True, time_=0)\n");
     }
 
+    // Abort key: consumed silently, flags the session to end; a normal
+    // key around it still transcribes fine.
+    {
+        TranscribeOptions o; o.keyboard = true; o.abort_code = KEY_PAUSE;
+        Harness h(o);
+        h.core.start(T0);
+        h.core.feed(Source::Keyboard, ev(T0 + 1000, EV_KEY, KEY_A, 1));
+        if (h.core.abort_requested()) { std::fprintf(stderr, "FAILED: abort flagged too early\n"); std::exit(1); }
+        h.core.feed(Source::Keyboard, ev(T0 + 2000, EV_KEY, KEY_PAUSE, 1));
+        CHECK_EQ(h.take(), "wait(0.001000)\nkd(KEY_A)\n"); // KEY_PAUSE itself never emitted
+        if (!h.core.abort_requested()) { std::fprintf(stderr, "FAILED: abort not flagged\n"); std::exit(1); }
+        h.core.feed(Source::Keyboard, ev(T0 + 3000, EV_KEY, KEY_PAUSE, 0)); // release: still nothing emitted
+        CHECK_EQ(h.take(), "");
+    }
+
+    // Toggle hotkey: filtered from the transcript, but never ends the session.
+    {
+        TranscribeOptions o; o.keyboard = true; o.hotkey_code = KEY_F9;
+        Harness h(o);
+        h.core.start(T0);
+        h.core.feed(Source::Keyboard, ev(T0 + 1000, EV_KEY, KEY_F9, 1));
+        h.core.feed(Source::Keyboard, ev(T0 + 1500, EV_KEY, KEY_F9, 0));
+        CHECK_EQ(h.take(), "");
+        if (h.core.abort_requested()) { std::fprintf(stderr, "FAILED: hotkey must not flag abort\n"); std::exit(1); }
+        h.core.feed(Source::Keyboard, ev(T0 + 2000, EV_KEY, KEY_A, 1));
+        CHECK_EQ(h.take(), "wait(0.002000)\nkd(KEY_A)\n"); // filtered keys never move last_us_ forward
+    }
+
     // same_start emits the one absolute line up front.
     {
         TranscribeOptions o; o.mouse = true; o.raw = true; o.same_start = true;

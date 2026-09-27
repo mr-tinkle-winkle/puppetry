@@ -47,6 +47,8 @@ struct TranscribeOptions {
     bool precise = false;        // per-frame motion + precise=True waits
     double raw_hz = 60;          // raw, non-precise: max motion lines per second
     int ping_code = 110;         // KEY_INSERT
+    int abort_code = -1;         // daemon's abort key -- pressing it ends the session (-1 = none)
+    int hotkey_code = -1;        // the editor's start/stop transcribe toggle (-1 = none)
 };
 
 enum class Source { Keyboard, Mouse, Both };
@@ -71,6 +73,11 @@ public:
     void mark_resync_started(long long now_us, long long& snap_x, long long& snap_y);
     void apply_resync(int x, int y, long long snap_x, long long snap_y);
 
+    // True once the abort key has been seen (checked by the caller after
+    // every feed() to end the process the same way the daemon's abort key
+    // ends every running macro -- see transcribe_main.cpp).
+    bool abort_requested() const { return abort_requested_; }
+
     // Formatting helpers (exposed for tests).
     static std::string format_seconds(long long us);
     std::string wait_line(long long gap_us) const;
@@ -92,6 +99,7 @@ private:
     long long pos_x_ = 0, pos_y_ = 0;
     long long next_resync_us_ = 0;
     bool dropping_kb_ = false, dropping_mouse_ = false;
+    bool abort_requested_ = false;
 };
 
 } // namespace puppetry

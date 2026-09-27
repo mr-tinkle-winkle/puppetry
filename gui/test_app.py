@@ -203,6 +203,18 @@ def main() -> int:
         check("transcribed text is inserted at the cursor", "wait(0.000234)\nkd(KEY_A)" in ed.code.toPlainText())
     else:
         print("SKIP transcriber process check (native/build not built)")
+
+    # Transcribe hotkey: UI round-trips, and the listener starts (and
+    # quietly does nothing) even against our fake device paths.
+    check("transcribe hotkey starts unset", ed.hotkey_label.text() == "(not set)")
+    ed._hotkey_found(ecodes_KEY_F9 := 33, "KEY_F9")  # avoid importing evdev here; any int code will do
+    check("transcribe hotkey label updates", ed.hotkey_label.text() == "KEY_F9")
+    check("transcribe hotkey persists", cfg.load_state().get("transcribe_hotkey") == "KEY_F9")
+    ed._restart_hotkey_listener()
+    check("hotkey listener object created once a hotkey + device paths exist", ed._hotkey_listener is not None)
+    ed.stop_threads()
+    pump(300)
+    check("hotkey listener stopped with the rest of the page's threads", ed._hotkey_listener is None)
     editor_page.ask = lambda *a, **k: 1
     ed.request_close()
     pump(300)

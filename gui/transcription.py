@@ -33,8 +33,15 @@ class TranscriptionController(QObject):
         return self._proc is not None
 
     def start(self, *, keyboard_path, mouse_path, transcribe_keyboard, transcribe_mouse, raw,
-              set_positions, same_start, raw_hz, precise, ping_key) -> str | None:
-        """Returns an error message, or None if started."""
+              set_positions, same_start, raw_hz, precise, ping_key, abort_key=None, hotkey_key=None) -> str | None:
+        """Returns an error message, or None if started.
+
+        `abort_key`, if given, makes the abort key end this session on its
+        own (mirrors the daemon's own abort-key handling) -- see the exit
+        code 3 check in _finished. `hotkey_key`, if given, is filtered out
+        of the transcript like the ping key: the GUI's own toggle hotkey
+        starts/stops this process, so its keypress should never itself be
+        recorded, including the press that stops us."""
         if self._proc is not None:
             return None
         exe = cfg.find_binary("puppetry-transcribe")
@@ -42,6 +49,10 @@ class TranscriptionController(QObject):
             return "Couldn't find the puppetry-transcribe helper (is Puppetry installed/built?)."
         args = ["--keyboard", keyboard_path or "", "--mouse", mouse_path or "",
                 "--raw-hz", str(float(raw_hz)), "--ping-key", ping_key or "KEY_INSERT"]
+        if abort_key:
+            args += ["--abort-key", abort_key]
+        if hotkey_key:
+            args += ["--hotkey-key", hotkey_key]
         for flag, on in (("--transcribe-keyboard", transcribe_keyboard), ("--transcribe-mouse", transcribe_mouse),
                          ("--raw", raw), ("--set-positions", set_positions), ("--same-start", same_start),
                          ("--precise", precise)):
@@ -89,6 +100,8 @@ class TranscriptionController(QObject):
         self._proc = None
         if code == 2:
             self.stopped.emit("Couldn't open keyboard/mouse device -- check paths & permissions.")
+        elif code == 3 or "abort_key_pressed" in err:
+            self.stopped.emit("Stopped: abort key pressed.")
         elif "disconnected" in err:
             self.stopped.emit("Stopped: a device was disconnected.")
         elif code not in (0, 15) and err:

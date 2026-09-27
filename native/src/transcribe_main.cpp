@@ -8,10 +8,15 @@
 //   puppetry-transcribe --keyboard PATH --mouse PATH
 //       [--transcribe-keyboard] [--transcribe-mouse] [--raw]
 //       [--set-positions] [--same-start] [--raw-hz N] [--precise]
-//       [--ping-key KEY_NAME]
+//       [--ping-key KEY_NAME] [--abort-key KEY_NAME] [--hotkey-key KEY_NAME]
 //
 // Device I/O only; all transcription logic is TranscriberCore
 // (transcriber.cpp), which is unit-tested with synthetic events.
+//
+// Exit code 3 means the abort key ended the session (as opposed to the
+// GUI closing our stdin, or a normal SIGTERM) -- the GUI checks for this
+// specifically so it can report "abort key pressed" instead of a generic
+// stop, same distinction it already makes for a disconnected device.
 #include <algorithm>
 #include <atomic>
 #include <csignal>
@@ -66,6 +71,16 @@ int main(int argc, char** argv) {
             int code;
             if (!resolve_key_name(name, code)) { std::fprintf(stderr, "unknown ping key %s\n", name.c_str()); return 64; }
             opts.ping_code = code;
+        } else if (a == "--abort-key") {
+            std::string name = next();
+            int code;
+            if (!resolve_key_name(name, code)) { std::fprintf(stderr, "unknown abort key %s\n", name.c_str()); return 64; }
+            opts.abort_code = code;
+        } else if (a == "--hotkey-key") {
+            std::string name = next();
+            int code;
+            if (!resolve_key_name(name, code)) { std::fprintf(stderr, "unknown hotkey %s\n", name.c_str()); return 64; }
+            opts.hotkey_code = code;
         } else {
             std::fprintf(stderr, "unknown argument %s\n", a.c_str());
             return 64;
@@ -122,6 +137,7 @@ int main(int argc, char** argv) {
     struct Tagged { RawEvent ev; Source role; };
     std::vector<Tagged> batch;
     RawEvent buf[64];
+    bool abort_hit = false;
 
     while (!g_stop) {
         long long now = now_monotonic_us();
@@ -172,6 +188,7 @@ int main(int argc, char** argv) {
             out_buf.clear();
         }
         if (device_gone) { std::fprintf(stderr, "device disconnected\n"); break; }
+        if (core.abort_requested()) { std::fprintf(stderr, "abort_key_pressed\n"); abort_hit = true; break; }
     }
-    return 0;
+    return abort_hit ? 3 : 0;
 }
