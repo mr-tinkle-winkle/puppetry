@@ -44,8 +44,8 @@ void UinputDevice::create(const std::string& name, const std::vector<int>& key_c
     struct uinput_setup usetup;
     memset(&usetup, 0, sizeof(usetup));
     usetup.id.bustype = BUS_VIRTUAL;
-    usetup.id.vendor = 0x1234;
-    usetup.id.product = 0x5678;
+    usetup.id.vendor = kVirtualVendorId;
+    usetup.id.product = kVirtualProductId;
     strncpy(usetup.name, name.c_str(), UINPUT_MAX_NAME_SIZE - 1);
 
     if (ioctl(fd_, UI_DEV_SETUP, &usetup) < 0) {
@@ -64,7 +64,7 @@ void UinputDevice::write_all(const struct input_event* ev, size_t n) {
     // zeroed.
     ssize_t r = ::write(fd_, ev, n * sizeof(*ev));
     (void)r;
-    ++frames_;
+    frames_.fetch_add(1, std::memory_order_relaxed);
 }
 
 void UinputDevice::key_frame(int code, int value) {

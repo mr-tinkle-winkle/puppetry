@@ -181,6 +181,11 @@ void watch_device(Runtime& rt, MacroRegistry& registry, std::vector<std::unique_
                     if (forward) push(is_mouse_button(ev.code) ? out_mouse : out_kb, EV_KEY, ev.code, ev.value);
                 }
             } else if (ev.type == EV_REL && kind == "mouse") {
+                // The user just moved the real mouse, so any position
+                // move_mouse(move_to=True) had cached is now wrong. One
+                // relaxed atomic store; safe to do even when the motion
+                // is being suppressed below (it only costs a later query).
+                if (ev.code == REL_X || ev.code == REL_Y) rt.cursor.invalidate();
                 if (rt.mouse_grabbed.load()) {
                     bool movement_ignored;
                     {

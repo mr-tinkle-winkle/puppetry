@@ -181,6 +181,24 @@ int main() {
         CHECK_EQ(h.take(), "wait(0.000500)\nkd(KEY_A)\n");
     }
 
+    // Alt+Tab, released in the OTHER order (Alt let go while Tab is
+    // still physically held -- people don't always release both keys in
+    // a fixed order): Tab's own release must still be caught later,
+    // instead of leaking through once alt_pending_ is gone.
+    {
+        TranscribeOptions o; o.keyboard = true; o.ignore_alt_tab = true;
+        Harness h(o);
+        h.core.start(T0);
+        h.core.feed(Source::Keyboard, ev(T0 + 1000, EV_KEY, KEY_LEFTALT, 1));
+        h.core.feed(Source::Keyboard, ev(T0 + 1500, EV_KEY, KEY_TAB, 1));
+        h.core.feed(Source::Keyboard, ev(T0 + 2000, EV_KEY, KEY_LEFTALT, 0)); // Alt up FIRST, Tab still held
+        CHECK_EQ(h.take(), "");
+        h.core.feed(Source::Keyboard, ev(T0 + 2200, EV_KEY, KEY_TAB, 0)); // Tab's release, afterward
+        CHECK_EQ(h.take(), ""); // must still be dropped, not transcribed as a lone ku(KEY_TAB)
+        h.core.feed(Source::Keyboard, ev(T0 + 2700, EV_KEY, KEY_A, 1));
+        CHECK_EQ(h.take(), "wait(0.002700)\nkd(KEY_A)\n"); // and normal typing afterward is unaffected
+    }
+
     // Ignore Puppetry: nothing is transcribed while focused, and the
     // paused span is excluded from the next gap once focus moves away.
     {

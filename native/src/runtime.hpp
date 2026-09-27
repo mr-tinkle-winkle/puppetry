@@ -75,10 +75,66 @@ private:
     std::array<std::atomic<uint64_t>, (KEY_CNT + 63) / 64> words_{};
 };
 
+// Last known cursor position, so move_mouse(move_to=True) doesn't have to
+// ask KWin where the cursor is when it already knows.
+//
+// Asking costs a kdotool SUBPROCESS -- tens of milliseconds, by far the
+// most expensive thing any primitive does, and a transcribed
+// "set positions" recording is nothing but back-to-back absolute moves.
+// A move_to already ends by reading back where it actually landed (the
+// correction pass), so that read populates this, and the next move_to
+// starts from it instead of spawning kdotool again: one round-trip per
+// absolute move instead of two, none at all for a move that's already
+// there.
+//
+// Trust rules, deliberately pessimistic -- a wrong cached position would
+// send the cursor to the wrong place, so anything that could have moved
+// it drops the cache: emitting relative motion ourselves, the user
+// touching the real mouse (see dispatch.cpp), or simply time passing
+// (another application can warp the pointer whenever it likes).
+class CursorCache {
+public:
+    static constexpr std::chrono::milliseconds kTtl{250};
+
+    void store(int x, int y, std::chrono::steady_clock::time_point at) {
+        uint64_t packed = ((uint64_t)(uint32_t)x << 32) | (uint32_t)y;
+        packed_.store(packed, std::memory_order_relaxed);
+        // Released after the position, so a reader that sees this
+        // timestamp is guaranteed to see the position that goes with it.
+        at_us_.store(us_of(at), std::memory_order_release);
+    }
+
+    bool get(int& x, int& y, std::chrono::steady_clock::time_point now) const {
+        long long at = at_us_.load(std::memory_order_acquire);
+        if (at == 0) return false;
+        long long age = us_of(now) - at;
+        if (age < 0 || age > std::chrono::duration_cast<std::chrono::microseconds>(kTtl).count()) return false;
+        uint64_t packed = packed_.load(std::memory_order_relaxed);
+        x = (int)(uint32_t)(packed >> 32);
+        y = (int)(uint32_t)(packed & 0xffffffffu);
+        return true;
+    }
+
+    void invalidate() { at_us_.store(0, std::memory_order_relaxed); }
+
+private:
+    static long long us_of(std::chrono::steady_clock::time_point tp) {
+        // +1 so a genuine zero timestamp can't read as "invalid".
+        return std::chrono::duration_cast<std::chrono::microseconds>(tp.time_since_epoch()).count() + 1;
+    }
+    std::atomic<uint64_t> packed_{0};
+    std::atomic<long long> at_us_{0};
+};
+
 class Runtime {
 public:
     UinputDevice ui_keyboard;
     UinputDevice ui_mouse;
+
+    // See CursorCache above. Lives here rather than in primitives.cpp so
+    // the dispatch loop can invalidate it when the user moves the real
+    // mouse, and so a test can drive it without a daemon.
+    CursorCache cursor;
 
     // ---- held keys (real input, for combo matching) ----
     std::mutex held_mutex;

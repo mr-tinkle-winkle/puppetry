@@ -21,25 +21,26 @@ inline bool resolve_key_name(const std::string& name, int& out_code) {
     return true;
 }
 
-inline std::string key_code_name(int code) {
-    const auto& table = key_code_to_name();
-    auto it = table.find(code);
-    return it == table.end() ? ("code:" + std::to_string(code)) : it->second;
-}
-
 namespace detail {
 struct CodeTables {
     std::array<bool, KEY_CNT> is_key{};     // has a KEY_* name
     std::array<bool, KEY_CNT> is_button{};  // has a BTN_* name
     std::array<bool, KEY_CNT> is_mouse{};   // one of the 8 buttons our virtual MOUSE declares
+    // code -> name, pointing into the generated table's own strings
+    // (nullptr for codes with no name). Lets the transcriber name a key
+    // without a hash lookup or a std::string copy per event.
+    std::array<const char*, KEY_CNT> name{};
     CodeTables() {
-        for (const auto& [name, code] : key_name_to_code()) {
+        for (const auto& [name_str, code] : key_name_to_code()) {
             if (code < 0 || code >= KEY_CNT) continue;
-            if (name.rfind("KEY_", 0) == 0) is_key[code] = true;
-            if (name.rfind("BTN_", 0) == 0) is_button[code] = true;
+            if (name_str.rfind("KEY_", 0) == 0) is_key[code] = true;
+            if (name_str.rfind("BTN_", 0) == 0) is_button[code] = true;
         }
         for (int c : {BTN_LEFT, BTN_RIGHT, BTN_MIDDLE, BTN_SIDE, BTN_EXTRA, BTN_FORWARD, BTN_BACK, BTN_TASK})
             is_mouse[c] = true;
+        for (const auto& [code, name_str] : key_code_to_name()) {
+            if (code >= 0 && code < KEY_CNT) name[code] = name_str.c_str();
+        }
     }
 };
 inline const CodeTables& code_tables() {
@@ -47,6 +48,19 @@ inline const CodeTables& code_tables() {
     return t;
 }
 } // namespace detail
+
+// The canonical name for a code, or nullptr if it hasn't got one. Array
+// index, no allocation -- use this on anything per-event (the transcriber
+// names every key it records).
+inline const char* key_code_name_or_null(int code) {
+    if (code < 0 || code >= KEY_CNT) return nullptr;
+    return detail::code_tables().name[code];
+}
+
+inline std::string key_code_name(int code) {
+    const char* n = key_code_name_or_null(code);
+    return n ? std::string(n) : ("code:" + std::to_string(code));
+}
 
 inline bool is_key_code(int code) {
     return code >= 0 && code < KEY_CNT && detail::code_tables().is_key[code];

@@ -82,7 +82,8 @@ class MainWindow(QMainWindow):
 
         self.nav = QButtonGroup(self)
         self.nav.setExclusive(True)
-        for idx, label in ((PAGE_MACROS, "Macros"), (PAGE_VISUALIZER, "Input Visualizer"), (PAGE_SETTINGS, "Settings")):
+        for idx, label in ((PAGE_MACROS, "Macros"), (PAGE_EDITOR, "Macro Editor"),
+                           (PAGE_VISUALIZER, "Input Visualizer"), (PAGE_SETTINGS, "Settings")):
             b = SegmentButton(text=label, position="full")
             b.setMinimumHeight(40)
             self.nav.addButton(b, idx)
@@ -96,6 +97,9 @@ class MainWindow(QMainWindow):
         self.resize(1400, 850)
 
     def _nav_clicked(self, idx: int) -> None:
+        if idx == PAGE_EDITOR:
+            self._open_editor_from_nav()
+            return
         if self.stack.currentIndex() == PAGE_EDITOR:
             # Leaving the editor via the sidebar goes through its own
             # unsaved-changes check first.
@@ -103,11 +107,25 @@ class MainWindow(QMainWindow):
                 choice = ask(self, "Unsaved changes", "Save the macro before leaving the editor?",
                              ["Cancel", "Discard", "Save"], default=2)
                 if choice == 0 or choice == -1 or (choice == 2 and not self.editor_page.save()):
-                    self.nav.button(PAGE_MACROS).setChecked(True)
+                    self.nav.button(PAGE_EDITOR).setChecked(True)  # stay put -- still on the editor
                     return
             self.editor_page.stop_threads()
         if self.stack.currentIndex() != idx:
             crossfade_to_index(self.stack, idx)
+
+    def _open_editor_from_nav(self) -> None:
+        """The sidebar's own "Macro Editor" entry: shows whatever macro
+        the editor already has loaded (same persistence as reopening it
+        via Edit), or, if nothing's been selected yet, bounces back to
+        the Macros page with a toast instead of opening an empty editor."""
+        if self.editor_page.macro.get("id") is None:
+            self.nav.button(PAGE_MACROS).setChecked(True)
+            if self.stack.currentIndex() != PAGE_MACROS:
+                crossfade_to_index(self.stack, PAGE_MACROS)
+            self.macro_page.show_toast("Please select a macro.")
+            return
+        if self.stack.currentIndex() != PAGE_EDITOR:
+            crossfade_to_index(self.stack, PAGE_EDITOR)
 
     def open_editor(self, macro_id: str | None) -> None:
         macro = self.model.find(macro_id)
@@ -122,6 +140,7 @@ class MainWindow(QMainWindow):
             # macro but nothing's unsaved, falling through to a fresh
             # load below is harmless and catches edits made elsewhere,
             # like renaming it from the macro list.)
+            self.nav.button(PAGE_EDITOR).setChecked(True)
             crossfade_to_index(self.stack, PAGE_EDITOR)
             return
         if not same_macro_open and self.editor_page.has_unsaved_changes():
@@ -130,6 +149,7 @@ class MainWindow(QMainWindow):
             if choice == 0 or choice == -1 or (choice == 2 and not self.editor_page.save()):
                 return
         self.editor_page.load_macro(macro_id)
+        self.nav.button(PAGE_EDITOR).setChecked(True)
         crossfade_to_index(self.stack, PAGE_EDITOR)
 
     def close_editor(self) -> None:

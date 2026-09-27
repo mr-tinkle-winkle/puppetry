@@ -12,6 +12,7 @@ and was the likely source of the old "ghosted text" repaint glitch.
 from __future__ import annotations
 
 from PySide6.QtCore import QObject, QProcess, QTimer, Signal
+from PySide6.QtGui import QGuiApplication
 
 import puppetry_config as cfg
 
@@ -25,6 +26,7 @@ class TranscriptionController(QObject):
         super().__init__(parent)
         self._proc: QProcess | None = None
         self._buf = ""
+        self._focus_connected = False
         self._timer = QTimer(self)
         self._timer.setInterval(50)
         self._timer.timeout.connect(self._flush)
@@ -72,16 +74,57 @@ class TranscriptionController(QObject):
             return f"Couldn't start the transcriber: {proc.errorString()}"
         self._proc = proc
         self._timer.start()
+        if ignore_puppetry:
+            self._watch_focus()
         self.started.emit()
         return None
 
     def stop(self) -> None:
         if self._proc is None:
             return
+        self._unwatch_focus()
         self._proc.closeWriteChannel()  # EOF on its stdin = stop cleanly
         if not self._proc.waitForFinished(1000):
             self._proc.terminate()
             self._proc.waitForFinished(1000)
+
+    # -- "Ignore Puppetry": we already know when our own window is focused
+    # Qt tells us for free, so we tell the helper instead of making it ask
+    # KWin (two kdotool subprocesses per poll -- see its header comment).
+    def _watch_focus(self) -> None:
+        app = QGuiApplication.instance()
+        if app is None or self._focus_connected:
+            return
+        app.focusWindowChanged.connect(self._focus_changed)
+        self._focus_connected = True
+        # Whatever the state is right now, before any change happens.
+        self._focus_changed(app.focusWindow())
+
+    def _unwatch_focus(self) -> None:
+        if not self._focus_connected:
+            return
+        app = QGuiApplication.instance()
+        if app is not None:
+            try:
+                app.focusWindowChanged.disconnect(self._focus_changed)
+            except (RuntimeError, TypeError):
+                pass  # already gone (app shutting down)
+        self._focus_connected = False
+
+    def _focus_changed(self, window) -> None:
+        # focusWindow() is None whenever no window of OURS has focus --
+        # exactly the question the transcriber is asking.
+        self.report_focus(window is not None)
+
+    def report_focus(self, focused: bool) -> None:
+        """Tells a running helper whether Puppetry's own window has focus.
+        Harmless (and ignored) if it wasn't started with ignore_puppetry."""
+        if self._proc is None:
+            return
+        try:
+            self._proc.write(b"focus 1\n" if focused else b"focus 0\n")
+        except RuntimeError:
+            pass  # process died between the check and the write
 
     def _read(self) -> None:
         if self._proc is not None:
@@ -95,6 +138,7 @@ class TranscriptionController(QObject):
             self.text_ready.emit(chunk)
 
     def _finished(self, code: int, _status) -> None:
+        self._unwatch_focus()
         self._read()
         if self._buf and not self._buf.endswith("\n"):
             self._buf += "\n"

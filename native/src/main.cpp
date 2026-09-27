@@ -15,6 +15,7 @@
 #include "keycodes.hpp"
 #include "macro.hpp"
 #include "native_vm.hpp"
+#include "pointer_accel.hpp"
 #include "python_embed.hpp"
 #include "runtime.hpp"
 #include "simplified_names.hpp"
@@ -150,10 +151,35 @@ int main(int argc, char** argv) {
     ResolvedDevice keyboard = resolve_device("keyboard", kb_saved_path, kb_saved_name);
     ResolvedDevice mouse = resolve_device("mouse", mouse_saved_path, mouse_saved_name);
 
+    // Pointer acceleration off for our own virtual mouse, BEFORE creating
+    // it: KDE applies a device's saved settings when the device appears,
+    // so writing the config first means a freshly-created virtual mouse
+    // is already unaccelerated -- nothing to fix by hand in System
+    // Settings, and synthetic motion lands where the macro asked. Opt out
+    // with "disable_pointer_accel": false in state.json (Settings has a
+    // checkbox for it). See pointer_accel.hpp for why this can't be done
+    // on the uinput side.
+    if (json_bool(state, "disable_pointer_accel", true)) {
+        switch (ensure_flat_pointer_accel(kVirtualMouseName, kVirtualVendorId, kVirtualProductId)) {
+            case AccelResult::Wrote:
+                std::printf("Pointer acceleration: disabled for %s (wrote kcminputrc)\n", kVirtualMouseName);
+                break;
+            case AccelResult::AlreadySet:
+                std::printf("Pointer acceleration: already disabled for %s\n", kVirtualMouseName);
+                break;
+            case AccelResult::NotKde:
+                break; // not a KDE install -- nothing to write, nothing to say
+            case AccelResult::Failed:
+                std::fprintf(stderr, "Couldn't write kcminputrc to disable pointer acceleration -- "
+                                      "synthetic mouse motion may be accelerated.\n");
+                break;
+        }
+    }
+
     Runtime rt;
     try {
-        rt.ui_keyboard.create("macro-daemon-virtual-keyboard", keyboard_key_codes(), false);
-        rt.ui_mouse.create("macro-daemon-virtual-mouse", mouse_button_codes(), true);
+        rt.ui_keyboard.create(kVirtualKeyboardName, keyboard_key_codes(), false);
+        rt.ui_mouse.create(kVirtualMouseName, mouse_button_codes(), true);
     } catch (const std::exception& exc) {
         std::fprintf(stderr, "Failed to create virtual input devices: %s\n", exc.what());
         return 1;

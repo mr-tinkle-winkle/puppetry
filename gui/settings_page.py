@@ -121,6 +121,19 @@ class SettingsPage(PageBase):
         self.autosave.setChecked(bool(model.state.get("autosave", False)))
         self.autosave.toggled.connect(self._autosave_toggled)
         bl.addWidget(self.autosave)
+
+        self.flat_accel = CustomCheckBox("No pointer acceleration on Puppetry's virtual mouse")
+        self.flat_accel.setChecked(bool(model.state.get("disable_pointer_accel", True)))
+        self.flat_accel.setToolTip("Recommended. KDE otherwise applies its usual mouse acceleration curve to\n"
+                                   "Puppetry's virtual mouse, so a macro asking to move 400px moves however\n"
+                                   "far the curve decides -- and a newly-created virtual mouse starts out\n"
+                                   "accelerated until it's turned off by hand in System Settings.\n\n"
+                                   "The daemon writes this one device's entry in kcminputrc on startup; your\n"
+                                   "real mouse's settings aren't touched. KDE only.")
+        self.flat_accel.toggled.connect(lambda on: model.set_pref("disable_pointer_accel", on))
+        bl.addWidget(self.flat_accel)
+        bl.addWidget(dim_label("Applies on the next daemon start (any Save restarts it). Turning it back "
+                               "off leaves the setting in place -- change it in System Settings -> Mouse."))
         self.content_layout.addWidget(beh)
 
         # ------------------------------------------------------------ appearance

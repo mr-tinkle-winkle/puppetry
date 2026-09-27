@@ -7,7 +7,7 @@ Macros page. Each row:
 """
 from __future__ import annotations
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import QComboBox, QHBoxLayout, QLabel, QVBoxLayout, QWidget
 
 from input_tools import ComboRecorder
@@ -184,11 +184,17 @@ class MacroListPage(PageBase):
         # away with the row list.
         bottom = QHBoxLayout()
         bottom.setContentsMargins(theme.padding, 0, theme.padding, theme.padding)
+        self.toast = QLabel("")
+        self.toast.setStyleSheet(label_style(theme.text()))
+        bottom.addWidget(self.toast)
         bottom.addStretch(1)
         self.new_btn = CustomButton("+ New Macro")
         self.new_btn.clicked.connect(lambda: open_editor(None))
         bottom.addWidget(self.new_btn)
         self.outer_layout.addLayout(bottom)
+        self._toast_timer = QTimer(self)
+        self._toast_timer.setSingleShot(True)
+        self._toast_timer.timeout.connect(lambda: self.toast.setText(""))
 
         model.macros_changed.connect(self.refresh)
         model.profiles_changed.connect(self._update_profile_label)
@@ -197,6 +203,13 @@ class MacroListPage(PageBase):
         self._dirty(model.dirty)
         self._update_profile_label()
         self.refresh()
+
+    def show_toast(self, message: str, ms: int = 2500) -> None:
+        """A brief bottom-of-page notice, next to + New Macro -- e.g. the
+        "Please select a macro" nudge from the sidebar's Macro Editor
+        entry when nothing's open yet."""
+        self.toast.setText(message)
+        self._toast_timer.start(ms)
 
     def _dirty(self, dirty: bool) -> None:
         self.save_btn.setVisible(dirty and not self.model.state.get("autosave"))

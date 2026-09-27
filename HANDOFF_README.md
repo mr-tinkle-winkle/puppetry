@@ -525,6 +525,8 @@ order, now targeting the C++ daemon (`native/`) and the Qt GUI
   `macro.hpp`/`.cpp` the repeat-mode/trigger-edge runtime,
   `python_embed.hpp`/`.cpp` the CPython-backed macro path,
   `native_vm.hpp`/`.cpp` the primitives-only fast path,
+  `pointer_accel.hpp`/`.cpp` the KDE flat-acceleration setup for our own
+  virtual mouse (Session 8),
   `control_socket.hpp`/`.cpp` the daemon's control socket,
   `config.hpp`/`.cpp` the on-disk JSON I/O, `transcriber.hpp`/`.cpp` +
   `transcribe_main.cpp` the `puppetry-transcribe` helper, `main.cpp` the
@@ -548,7 +550,7 @@ order, now targeting the C++ daemon (`native/`) and the Qt GUI
   - `gui/puppetry_config.py` — on-disk config, control-socket client,
     helper-binary discovery ($PUPPETRY_BIN_DIR, then native/build, then
     $PATH), macro validation via `puppetry-daemon --check`.
-  - `gui/test_app.py` — 51 offscreen checks (`QT_QPA_PLATFORM=offscreen
+  - `gui/test_app.py` — 74 offscreen checks (`QT_QPA_PLATFORM=offscreen
     python3 gui/test_app.py`); uses the native binaries when built.
   - `gui/ui_kit/` — the shared PySide6 theming kit (copy, not a shared
     package — see the guide for why). `gui/UI_THEMING_GUIDE.md` is its
@@ -725,12 +727,231 @@ work on a real machine, start by checking those two subcommands (`kdotool
 getactivewindow`, then `kdotool getwindowname <that id>`) directly in a
 terminal.
 
+## Session 7 — Alt+Tab release-order bug, faster Ignore-Puppetry polling, Macro Editor sidebar entry
+
+Verified: `native/build` rebuilt clean (`test_transcriber` now 28/28, +3 new
+cases; `test_core` 33, `test_control_socket` 7, `test_python_embed` 8,
+`test_native_vm` 5, `test_mixed_calls` 2 all still passing), `gui/test_app.py`
+67/67 (+4 new checks) under `QT_QPA_PLATFORM=offscreen`.
+
+**Fixed: "Ignore Alt+Tab" only ignored Alt, Tab still leaked through.** Root
+cause was release-order dependence in `TranscriberCore::feed()`
+(`native/src/transcriber.cpp`): the original code cleared `alt_pending_` the
+instant Alt itself was released, on the assumption Tab would always be
+released first (or already be up). People don't reliably release Alt and Tab
+in a fixed order -- when Alt came up *first*, Tab's own later release arrived
+with `alt_pending_` already false and fell through to normal handling,
+transcribing as a lone `ku(KEY_TAB)`. Fixed in two steps (both are now
+regression tests in `test_transcriber.cpp`):
+1. Added `tab_held_`, tracking whether Tab is still physically down
+   independent of `alt_pending_`; the Tab-suppression condition widened to
+   `(alt_pending_ || tab_held_)` so Tab's release is still caught even after
+   Alt's own pending state is gone.
+2. That first fix broke the pre-existing multi-tap-cycle test: it also reset
+   `alt_tab_seen_ = false` on every Tab release, so if Alt was held through
+   several Tab taps and then released with no Tab currently down, the last
+   Tab-up had already (wrongly) cleared `alt_tab_seen_`, and Alt got flushed
+   as a normal keypress. Fixed by making `alt_tab_seen_` **sticky** -- only
+   the Alt-up resolution branch ever clears it now; Tab's own press/release
+   toggles `tab_held_` but never `alt_tab_seen_`.
+
+**Ignore Puppetry now polls focus every 50ms** (was 300ms) --
+`kFocusCheckIntervalUs` in `transcribe_main.cpp`. Requested explicitly
+("probably every 50ms or 25ms"); picked the safer end of that range given
+each check still round-trips through a `kdotool` subprocess spawn on its own
+detached thread.
+
+**New: "Macro Editor" sidebar entry**, directly under "Macros"
+(`gui/app.py`'s nav loop, `PAGE_EDITOR` now included alongside
+`PAGE_MACROS`/`PAGE_VISUALIZER`/`PAGE_SETTINGS`). Clicking it:
+- If the editor already has a macro loaded (however it got there -- Edit
+  button, +New Macro, or a previous visit to this same entry), just shows
+  the editor page as-is, same persistence as everywhere else in the app.
+- If nothing's loaded (`editor_page.macro["id"] is None`, i.e. still
+  `blank_macro()`), it redirects to the Macros page instead of opening an
+  empty editor, and shows a bottom-of-page toast reading exactly "Please
+  select a macro." -- new `MacroListPage.show_toast(message, ms=2500)`,
+  a `QLabel` + single-shot `QTimer` placed in the page's existing bottom-right
+  fixed bar (left of "+ New Macro").
+- New `MainWindow._open_editor_from_nav()` implements this; `_nav_clicked()`
+  special-cases `idx == PAGE_EDITOR` to call it directly, skipping the
+  existing "leaving the editor" unsaved-changes check (irrelevant when
+  navigating *to* the editor). `open_editor()` now also explicitly checks
+  the `PAGE_EDITOR` nav button on both its "same macro, already showing"
+  shortcut and its normal load-and-crossfade path, so the sidebar reflects
+  reality regardless of which entry point opened the editor. Fixed a small
+  pre-existing quirk in `_nav_clicked()`'s cancel-on-unsaved-changes path
+  while touching this: it used to force-check `PAGE_MACROS` even though the
+  editor was still the page actually shown; now re-checks `PAGE_EDITOR`.
+
+## Session 8 — pointer acceleration off by default, optimization pass
+
+Verified: full native suite green (`test_core` 33 -> **55**, +22 new;
+`test_control_socket` 7, `test_python_embed` 8, `test_native_vm` 5,
+`test_mixed_calls` 2, `test_timing`, `test_transcriber` 28 — all still
+passing), `gui/test_app.py` **74/74** (+7 new) under
+`QT_QPA_PLATFORM=offscreen`.
+
+### The move_to inaccuracy: diagnosed by the user, not a code bug
+
+Reported as "move_mouse with move_to activated seems to be inaccurate now"
+on pre-existing macros. **The user found it before this session did**: a
+newly-created virtual mouse had picked up KDE's default pointer
+acceleration, and it was exact again once that was turned off. No code
+defect — so nothing was "fixed" here, but it did motivate the first item
+below. (Worth remembering as a diagnosis pattern: the daemon destroys and
+recreates its uinput devices on every restart, so a device that KDE has
+never seen before starts from KDE's defaults.)
+
+### Pointer acceleration off by default (new, `native/src/pointer_accel.*`)
+
+libinput applies its acceleration curve to any relative pointing device,
+our virtual mouse included, and there is **no uinput-side way to opt
+out** — the accel profile is a per-device compositor setting. On KDE it
+lives in `kcminputrc`, keyed by vendor id, product id and device name, all
+three of which we pick ourselves. So the daemon now writes that one group
+before creating the mouse (KDE applies a device's saved settings when the
+device appears, so writing first means it comes up already unaccelerated):
+
+```
+[Libinput][4660][22136][macro-daemon-virtual-mouse]
+PointerAcceleration=0
+PointerAccelerationProfile=1     # 1 = flat, i.e. 1:1, no curve
+```
+
+- **Scope is deliberately narrow.** Exactly that group is touched; every
+  other byte of the file (which also holds the user's *real* mouse
+  settings) is preserved. Written atomically via temp file + rename, and
+  only when the contents would actually change, so a restart doesn't
+  rewrite it. `kcminputrc_with_flat_accel()` is a pure text transform
+  precisely so it could be unit-tested — 14 of the new `test_core` checks
+  cover it, including idempotency, foreign groups surviving, a group that
+  follows ours not absorbing our keys, and the trap that
+  `PointerAcceleration` is a *prefix* of `PointerAccelerationProfile`.
+- **Nothing happens on non-KDE systems**: skipped unless an existing
+  `kcminputrc`/`kwinrc` or a KDE-ish `XDG_CURRENT_DESKTOP`/
+  `KDE_FULL_SESSION` says KDE is there, rather than littering a config
+  file on a GNOME box.
+- Opt out with `"disable_pointer_accel": false` in state.json, or the new
+  Settings -> Behavior checkbox ("No pointer acceleration on Puppetry's
+  virtual mouse", on by default). Applies on the next daemon start; any
+  Save restarts it.
+- Device names and ids now live in one place (`uinput_device.hpp`'s
+  `kVirtual*Name`/`kVirtualVendorId`/`kVirtualProductId`), used by
+  `main.cpp`, `evdev_device.cpp`'s auto-detect exclusion list, and the
+  kcminputrc group. **Changing any of them moves the KDE settings group a
+  user's saved preferences live under** — don't, casually.
+- **NOT verified on a real KDE session** (none in this sandbox). The group
+  format and `PointerAccelerationProfile=1` are written from knowledge of
+  KWin's libinput config, not from observation. If it doesn't take effect,
+  check an existing entry for a real mouse in `~/.config/kcminputrc` and
+  compare the shape — that file is the ground truth.
+
+### Optimization pass
+
+Measured with `bench_cps` (now also benchmarks transcription):
+
+| | before | after |
+|---|---|---|
+| tap cycle, python_off | 2.47M/s | **2.52M/s** |
+| tap cycle, python_on | 1.57M/s | **1.62M/s** |
+| transcribe, 60Hz mode | (never measured) | 27.8M frames/s |
+| transcribe, precise mode | (never measured) | 4.3M frames/s |
+
+The tap path was already down to 0.40us/cycle after Session 4, so the few
+percent there is all that was left in it; **the real wins in this pass are
+the subprocess spawns that no longer happen**, which no benchmark here can
+show because they were never CPU time in the first place — they were
+tens of milliseconds of fork/exec plus a KWin round-trip, each.
+
+- **"Ignore Puppetry" stopped polling kdotool.** It was spawning *two*
+  subprocesses (`getactivewindow`, then `getwindowname`) every 50ms —
+  ~40 a second — to ask KWin a question the GUI already knows the answer
+  to: Qt tells it the instant its own window activates. `puppetry-transcribe`
+  now accepts `focus 1` / `focus 0` commands on stdin (which it was
+  already reading, for the EOF-means-stop signal), and
+  `TranscriptionController` reports focus from `focusWindowChanged`.
+  Faster *and* more accurate (no 50ms lag, no dependence on kdotool at
+  all). The poll is kept as a fallback for running the helper standalone
+  from a terminal, and switches itself off permanently the moment a focus
+  command arrives. Unknown stdin commands are ignored on purpose, so a
+  mismatched GUI/helper pair keeps working.
+- **move_to halved its kdotool round-trips** via a cursor-position cache
+  (`CursorCache` in `runtime.hpp`). An absolute move already ends by
+  reading back where it actually landed, so that read now populates the
+  cache and the *next* move_to starts from it instead of asking again: one
+  round-trip per absolute move instead of two, and **none at all** for a
+  move that's already on target (a transcribed "set positions" recording
+  is full of those). Trust rules are pessimistic, because a stale cached
+  position would send the cursor somewhere wrong: dropped when we emit any
+  relative motion ourselves, when the user touches the real mouse
+  (`dispatch.cpp` invalidates on real `REL_X`/`REL_Y`), and after 250ms
+  regardless, since any application can warp the pointer whenever it
+  likes. 8 of the new `test_core` checks cover the expiry/invalidation
+  rules.
+  - Careful subtlety, found while reviewing this: the "already on target,
+    return early" shortcut applies **only to instant moves**. An eased
+    move is also pacing the macro, and returning early would quietly make
+    `move_mouse(x, y, move_to=True, time_=0.25)` take no time at all when
+    the cursor happened to already be there.
+- **LTO** (`CheckIPOSupported`, on by default in Release). Worth more than
+  usual here because the hot paths are deliberately small functions in
+  *separate* translation units — `kd()` -> `key_frame()` -> `write_all()`,
+  `wait_fn()` -> `wait_until()` — which without cross-TU inlining stay
+  real calls through the static library. Also `-DPUPPETRY_MARCH_NATIVE=ON`
+  for a personal build (off by default: it produces a binary that only
+  runs on the machine that built it, wrong for a package).
+- **`run_kdotool()` was forking unsafely.** It built its `argv` vector
+  *after* `fork()`, in the child — and the daemon is multithreaded, where
+  only async-signal-safe calls are legal after a fork. A `push_back` there
+  can block forever on the malloc lock if another thread held it at fork
+  time, which would surface as this query mysteriously timing out and, for
+  move_to, as the cursor going somewhere else entirely. argv is now built
+  before the fork, the way `command_fn()` already did it. Latent rather
+  than the reported bug, but the same shape as it.
+- **No allocation per transcribed line.** Every emission now goes through
+  one reusable buffer (`begin_line()`/`end_line()`) instead of building
+  strings with `+`, and naming a key is an array index
+  (`key_code_name_or_null()`) rather than a hash lookup returning a
+  `std::string` by value. Byte-identical output — which the 28 exact-output
+  transcriber checks are what made this safe to do at all.
+- **Smaller ones**: easing resolved to an enum once per move instead of a
+  string compare per step (120 steps/second); `std::pow(x, 2)` -> `x * x`;
+  `move_rel_step()` returns early on a zero delta; `UinputDevice`'s frame
+  counter is atomic (several macro threads share a device — it was a data
+  race, benign in effect but real).
+
+### Deliberately NOT done
+
+- **Adaptive dead reckoning for move_to** — skipping the read-back
+  entirely after a few consecutive exact landings, re-verifying every Nth
+  move. It would make transcribed absolute-position playback nearly free
+  (one kdotool spawn per N moves instead of one per move), and flat
+  acceleration is exactly the condition that makes it sound. Left alone on
+  purpose: it trades exactness for speed in the one place that just went
+  wrong for the user, and there's no real KDE session here to test it
+  against. This is the obvious next optimization if transcribed
+  set_positions playback feels slow.
+- **Making the virtual mouse an absolute (EV_ABS) device**, which would
+  sidestep pointer acceleration entirely rather than configuring it away,
+  and would let move_to skip kdotool completely. It's how remote-desktop
+  tools do it. Much bigger change: absolute axes need the screen geometry
+  baked into the device, relative moves would need their own virtual
+  cursor, and libinput may reclassify the device as a tablet/touchscreen.
+  Not attempted blind.
+- Micro-optimizations under ~1% that would touch the grabbed-input path
+  (the `ignore_mutex` read per motion event, the thread-safe-static guard
+  in `is_key_code()`), which isn't worth the regression risk against a
+  working system.
+
 ## Build/run/environment
 
 **Daemon:** `cd native && mkdir build && cd build && cmake .. && cmake
 --build . -j && ctest --output-on-failure`. Produces `puppetry-daemon`
 and `puppetry-transcribe` (+ `bench_cps`, a throughput benchmark that
-isn't a ctest test). `test_timing` is labelled `timing`; packaged builds
+isn't a ctest test). Release builds use LTO when the toolchain supports
+it; `-DPUPPETRY_LTO=OFF` disables it and `-DPUPPETRY_MARCH_NATIVE=ON`
+builds for this machine's cpu only (see Session 8). `test_timing` is labelled `timing`; packaged builds
 run `ctest -LE timing` since a loaded build machine can deschedule it.
 Needs a C++17 compiler, CMake, and `python3-embed` via pkg-config
 (`python3-dev`/`python3-devel` depending on distro; NixOS gets this

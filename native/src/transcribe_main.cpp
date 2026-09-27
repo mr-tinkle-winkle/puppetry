@@ -5,6 +5,16 @@
 // gets SIGTERM/SIGINT. Status/errors go to stderr. Exit codes: 0 ok,
 // 2 couldn't open any requested device, 64 bad arguments.
 //
+// STDIN also carries commands, one per line:
+//   focus 1 / focus 0   Puppetry's own window gained/lost focus.
+// Only meaningful with --ignore-puppetry, and it exists because the GUI
+// already knows this for free -- Qt tells it the moment its window
+// activates. Asking KWin instead means spawning kdotool twice per poll,
+// which at a useful polling rate is dozens of subprocesses a second for
+// something the caller could just say. The kdotool poll is still there as
+// a fallback and switches itself off for good as soon as a focus command
+// arrives, so running this by hand from a terminal still works.
+//
 //   puppetry-transcribe --keyboard PATH --mouse PATH
 //       [--transcribe-keyboard] [--transcribe-mouse] [--raw]
 //       [--set-positions] [--same-start] [--raw-hz N] [--precise]
@@ -44,7 +54,10 @@ static std::atomic<bool> resync_busy{false};
 static std::atomic<bool> focus_busy{false};
 static void on_signal(int) { g_stop = 1; }
 
-static constexpr long long kFocusCheckIntervalUs = 300000; // 300ms -- a kdotool round-trip, not per-event
+// Only used until the GUI reports focus itself (see the stdin commands in
+// the header comment). 50ms while it lasts: transcription can afford it,
+// and for a standalone run this poll is the whole mechanism.
+static constexpr long long kFocusCheckIntervalUs = 50000;
 
 static long long now_monotonic_us() {
     struct timespec ts;
@@ -154,6 +167,12 @@ int main(int argc, char** argv) {
     RawEvent buf[64];
     bool abort_hit = false;
 
+    // Set once the GUI has told us about focus; from then on the kdotool
+    // poll is dead weight and stays off.
+    bool focus_reported = false;
+    std::string stdin_buf;
+    bool stdin_closed = false;
+
     while (!g_stop) {
         long long now = now_monotonic_us();
         if (core.wants_resync(now) && !resync_busy.exchange(true)) {
@@ -168,7 +187,7 @@ int main(int argc, char** argv) {
                 resync_busy = false;
             }).detach();
         }
-        if (opts.ignore_puppetry && now >= next_focus_check_us && !focus_busy.exchange(true)) {
+        if (opts.ignore_puppetry && !focus_reported && now >= next_focus_check_us && !focus_busy.exchange(true)) {
             next_focus_check_us = now + kFocusCheckIntervalUs;
             int wfd = focus_pipe[1];
             std::thread([wfd] {
@@ -183,9 +202,30 @@ int main(int argc, char** argv) {
         if (rc < 0) { if (errno == EINTR) continue; break; }
 
         if (pfds[0].revents & (POLLIN | POLLHUP)) {
-            char c[64];
+            char c[256];
             ssize_t n = read(STDIN_FILENO, c, sizeof(c));
-            if (n <= 0) break; // GUI closed our stdin: stop
+            if (n <= 0) { stdin_closed = true; } // GUI closed our stdin: stop
+            else {
+                stdin_buf.append(c, (size_t)n);
+                // Whole lines only; a partial command waits for the rest.
+                size_t start = 0, nl;
+                while ((nl = stdin_buf.find('\n', start)) != std::string::npos) {
+                    std::string line = stdin_buf.substr(start, nl - start);
+                    start = nl + 1;
+                    if (!line.empty() && line.back() == '\r') line.pop_back();
+                    if (line == "focus 1" || line == "focus 0") {
+                        focus_reported = true; // the poll's job is over
+                        if (opts.ignore_puppetry) {
+                            core.set_puppetry_focused(line.back() == '1', now_monotonic_us());
+                        }
+                    }
+                    // Anything else is ignored on purpose: an older GUI
+                    // talking to a newer helper, or vice versa, should
+                    // keep transcribing rather than fall over.
+                }
+                stdin_buf.erase(0, start);
+                if (stdin_buf.size() > 4096) stdin_buf.clear(); // no unbounded growth on garbage
+            }
         }
         if (pfds[1].revents & POLLIN) {
             ResyncResult r;
@@ -218,6 +258,10 @@ int main(int argc, char** argv) {
         }
         if (device_gone) { std::fprintf(stderr, "device disconnected\n"); break; }
         if (core.abort_requested()) { std::fprintf(stderr, "abort_key_pressed\n"); abort_hit = true; break; }
+        // Checked last, after this round's events have been fed and
+        // written out, so a "stop" can't drop input that was already
+        // sitting in the device buffer alongside it.
+        if (stdin_closed) break;
     }
     return abort_hit ? 3 : 0;
 }

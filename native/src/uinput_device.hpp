@@ -9,11 +9,23 @@
 // HOT PATH: every public emit call is exactly ONE write() syscall,
 // including its SYN_REPORT. The first C++ version did one syscall per
 // event plus one for the SYN (so a tap() was 4 syscalls instead of 2).
+#include <atomic>
 #include <linux/input.h>
 #include <string>
 #include <vector>
 
 namespace puppetry {
+
+// Identity of our two virtual devices, in one place: the names are what
+// evdev_device.cpp excludes from auto-detect and what KDE keys its
+// per-device input settings on (see pointer_accel.hpp), and the
+// vendor/product ids are half of that same key. Changing any of these
+// changes the KDE settings group a user's saved preferences live under,
+// so don't, casually.
+inline constexpr const char* kVirtualKeyboardName = "macro-daemon-virtual-keyboard";
+inline constexpr const char* kVirtualMouseName = "macro-daemon-virtual-mouse";
+inline constexpr int kVirtualVendorId = 0x1234;
+inline constexpr int kVirtualProductId = 0x5678;
 
 class UinputDevice {
 public:
@@ -46,14 +58,17 @@ public:
     // syscall cost is still measured on machines without /dev/uinput.
     void open_sink(const std::string& path);
 
-    // Events written since start (benchmark/diagnostics only).
-    unsigned long long frames_written() const { return frames_; }
+    // Events written since start (benchmark/diagnostics only). Atomic
+    // because several macro threads can emit through the same device at
+    // once -- a plain ++ here was a data race (harmless in practice, but
+    // it's also what makes -fsanitize=thread flag the hot path).
+    unsigned long long frames_written() const { return frames_.load(std::memory_order_relaxed); }
 
 private:
     void write_all(const struct input_event* ev, size_t n);
     int fd_ = -1;
     bool is_sink_ = false;
-    unsigned long long frames_ = 0;
+    std::atomic<unsigned long long> frames_{0};
 };
 
 } // namespace puppetry

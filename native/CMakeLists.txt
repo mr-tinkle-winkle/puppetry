@@ -12,6 +12,46 @@ pkg_check_modules(PYTHON REQUIRED python3-embed)
 find_package(Threads REQUIRED)
 
 # ---------------------------------------------------------------------
+# Optimization settings.
+#
+# Release already means -O3 -DNDEBUG. The two additions here:
+#
+# LTO, on when the toolchain supports it. This matters more than usual
+# for this codebase because the hot paths deliberately live in small
+# functions in SEPARATE translation units -- kd() -> key_frame() ->
+# write_all(), wait_fn() -> wait_until(), the native VM's per-op
+# dispatch. Without cross-TU inlining each of those stays a real call
+# through the static library.
+#
+# -march=native, OFF by default: it produces a binary that only runs on
+# the machine that built it, which is wrong for a package (and for a Nix
+# build shared between machines). Worth turning on for a personal build:
+#   cmake -DPUPPETRY_MARCH_NATIVE=ON ..
+# ---------------------------------------------------------------------
+option(PUPPETRY_LTO "Link-time optimization in Release builds" ON)
+option(PUPPETRY_MARCH_NATIVE "Build for THIS cpu only (-march=native)" OFF)
+
+set(PUPPETRY_IPO OFF)
+if(PUPPETRY_LTO AND CMAKE_BUILD_TYPE STREQUAL "Release")
+    include(CheckIPOSupported)
+    check_ipo_supported(RESULT ipo_ok OUTPUT ipo_why)
+    if(ipo_ok)
+        set(PUPPETRY_IPO ON)
+    else()
+        message(STATUS "LTO unavailable, building without it: ${ipo_why}")
+    endif()
+endif()
+# Applies to every target below, tests and bench included -- so the
+# benchmark measures the same code the daemon actually runs, and a
+# mixed LTO/non-LTO link can't come up.
+set(CMAKE_INTERPROCEDURAL_OPTIMIZATION ${PUPPETRY_IPO})
+
+add_library(puppetry_flags INTERFACE)
+if(PUPPETRY_MARCH_NATIVE)
+    target_compile_options(puppetry_flags INTERFACE -march=native)
+endif()
+
+# ---------------------------------------------------------------------
 # Key/button name table -- generated at configure/build time from this
 # system's own kernel headers (see tools/gen_keycodes.py for why this
 # isn't a static committed table).
@@ -40,6 +80,7 @@ set(CORE_SOURCES
     src/evdev_device.cpp
     src/macro.cpp
     src/native_vm.cpp
+    src/pointer_accel.cpp
     src/primitives.cpp
     src/python_embed.cpp
     src/simplified_names.cpp
@@ -56,7 +97,7 @@ target_include_directories(puppetry_core PUBLIC
     ${PYTHON_INCLUDE_DIRS}
 )
 target_compile_options(puppetry_core PUBLIC ${PYTHON_CFLAGS_OTHER})
-target_link_libraries(puppetry_core PUBLIC Threads::Threads ${PYTHON_LIBRARIES})
+target_link_libraries(puppetry_core PUBLIC Threads::Threads ${PYTHON_LIBRARIES} puppetry_flags)
 target_link_directories(puppetry_core PUBLIC ${PYTHON_LIBRARY_DIRS})
 
 add_executable(puppetry-daemon src/main.cpp)

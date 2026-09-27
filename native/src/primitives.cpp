@@ -301,15 +301,36 @@ void act_as_fn(Runtime& rt, int key_pressing, bool ignore_original, const std::v
 }
 
 static void move_rel_step(Runtime& rt, int dx, int dy) {
+    if (dx == 0 && dy == 0) return; // nothing to emit, and nothing to invalidate
     rt.ui_mouse.rel_frame(dx, dy); // X and Y in ONE frame -> a true diagonal, not two stair-steps
+    // We just moved the cursor by an amount the compositor's pointer
+    // acceleration gets the final say over, so any cached position is now
+    // a guess. move_to's correction pass re-reads and re-caches.
+    rt.cursor.invalidate();
 }
 
-static double ease(double t, const std::string& style) {
-    if (style == "linear") return t;
-    if (style == "in") return t * t;
-    if (style == "out") return 1 - (1 - t) * (1 - t);
+// Resolved once per move instead of string-compared per step: an eased
+// move runs this 120 times a second. Anything unrecognized means "inout",
+// exactly as the chain of string compares here used to.
+enum class Easing { Linear, In, Out, InOut };
+
+static Easing parse_easing(const std::string& style) {
+    if (style == "linear") return Easing::Linear;
+    if (style == "in") return Easing::In;
+    if (style == "out") return Easing::Out;
+    return Easing::InOut;
+}
+
+static double ease(double t, Easing style) {
+    switch (style) {
+        case Easing::Linear: return t;
+        case Easing::In: return t * t;
+        case Easing::Out: return 1 - (1 - t) * (1 - t);
+        case Easing::InOut: break;
+    }
     if (t < 0.5) return 2 * t * t;
-    return 1 - std::pow(-2 * t + 2, 2) / 2;
+    double u = -2 * t + 2;
+    return 1 - u * u / 2;
 }
 
 // Runs `kdotool <args...>`, collecting stdout (stderr discarded) with a
@@ -317,6 +338,19 @@ static double ease(double t, const std::string& style) {
 // exit) -- shared by every kdotool-backed query below, all of which fail
 // open (treat "couldn't ask" the same as "no" rather than blocking).
 static bool run_kdotool(const std::vector<std::string>& args, std::string& output, double timeout_s) {
+    // argv is built BEFORE fork(): the daemon is multithreaded, and after
+    // fork() only async-signal-safe calls are legal in the child. A
+    // std::vector push_back there can block forever on the malloc lock if
+    // another thread happened to hold it at fork time -- which would show
+    // up as this query mysteriously timing out (and, for move_to, as the
+    // cursor going somewhere else entirely). command_fn() below already
+    // took this care; this path hadn't.
+    std::vector<char*> argv;
+    argv.reserve(args.size() + 2);
+    argv.push_back(const_cast<char*>("kdotool"));
+    for (const auto& a : args) argv.push_back(const_cast<char*>(a.c_str()));
+    argv.push_back(nullptr);
+
     int out_pipe[2];
     if (pipe(out_pipe) != 0) return false;
     pid_t pid = fork();
@@ -331,10 +365,6 @@ static bool run_kdotool(const std::vector<std::string>& args, std::string& outpu
         close(out_pipe[1]);
         int devnull = open("/dev/null", O_WRONLY);
         if (devnull >= 0) { dup2(devnull, STDERR_FILENO); close(devnull); }
-        std::vector<char*> argv;
-        argv.push_back(const_cast<char*>("kdotool"));
-        for (const auto& a : args) argv.push_back(const_cast<char*>(a.c_str()));
-        argv.push_back(nullptr);
         execvp("kdotool", argv.data());
         _exit(127);
     }
@@ -395,24 +425,44 @@ bool active_window_is_puppetry(double timeout_s) {
     return lower.find("puppetry") != std::string::npos;
 }
 
+// Where the cursor is, from the cache if it can be trusted (see
+// CursorCache) and from KWin otherwise -- one kdotool subprocess saved
+// per absolute move in a run of them.
+static bool cursor_pos_cached(Runtime& rt, int& x, int& y) {
+    if (rt.cursor.get(x, y, Clock::now())) return true;
+    if (!get_cursor_pos_kde(x, y)) return false;
+    rt.cursor.store(x, y, Clock::now());
+    return true;
+}
+
 void move_mouse_fn(Runtime& rt, int x_pixels, int y_pixels, double time_,
-                    const std::string& easing, bool move_to) {
+                    const std::string& easing_name, bool move_to) {
     double scaled_time = time_ * Runtime::speed_multiplier();
+    const Easing easing = parse_easing(easing_name);
     int dx = x_pixels, dy = y_pixels;
     bool had_position = false;
 
+    const bool instant = easing_name == "none" || scaled_time <= 0;
+
     if (move_to) {
         int cx, cy;
-        if (get_cursor_pos_kde(cx, cy)) {
+        if (cursor_pos_cached(rt, cx, cy)) {
             had_position = true;
             dx = x_pixels - cx;
             dy = y_pixels - cy;
+            // Already there: nothing to emit and nothing for the
+            // correction pass to correct, so skip both (a transcribed
+            // recording is full of these -- the mouse sat still for a
+            // frame). Only for an instant move: an EASED one is also
+            // pacing the macro, and returning early would quietly make it
+            // take no time at all.
+            if (dx == 0 && dy == 0 && instant) return;
         } else {
             move_rel_step(rt, -100000, -100000);
         }
     }
 
-    if (easing == "none" || scaled_time <= 0) {
+    if (instant) {
         move_rel_step(rt, dx, dy);
     } else {
         // Paced against absolute per-step deadlines (start + i*step),
@@ -437,9 +487,15 @@ void move_mouse_fn(Runtime& rt, int x_pixels, int y_pixels, double time_,
     }
 
     if (move_to && had_position) {
+        // Close the loop: pointer acceleration decides how far the deltas
+        // above actually travelled, so read back and nudge. Each read
+        // also re-caches, which is what lets the NEXT absolute move skip
+        // its own query -- and a read that comes back exactly on target
+        // leaves the cache holding a position we've verified.
         for (int i = 0; i < 3; ++i) {
             int cx, cy;
             if (!get_cursor_pos_kde(cx, cy)) break;
+            rt.cursor.store(cx, cy, Clock::now());
             int err_x = x_pixels - cx, err_y = y_pixels - cy;
             if (err_x == 0 && err_y == 0) break;
             move_rel_step(rt, err_x, err_y);

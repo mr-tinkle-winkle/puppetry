@@ -11,14 +11,15 @@
 #include <sys/ioctl.h>
 #include <unistd.h>
 #include <vector>
+#include "uinput_device.hpp" // kVirtual*Name -- one definition of our own devices' names
 
 namespace fs = std::filesystem;
 
 namespace puppetry {
 
 static const std::set<std::string> kOurVirtualDeviceNames = {
-    "macro-daemon-virtual-keyboard",
-    "macro-daemon-virtual-mouse",
+    kVirtualKeyboardName,
+    kVirtualMouseName,
 };
 
 bool is_our_virtual_device_name(const std::string& name) {

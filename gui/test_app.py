@@ -216,6 +216,34 @@ def main() -> int:
           len(new) == 1 and new[0]["id"] and cfg.load_profile("profile_1")["enabled"].get(new[0]["id"]))
     check("macro list rebuilt with the new row", len(w.macro_page.rows) == 3)
 
+    # ------------------------------------------------------------ Macro Editor sidebar entry
+    check("Macro Editor sits in the sidebar directly under Macros",
+          w.nav.button(app.PAGE_MACROS).text() == "Macros"
+          and w.nav.button(app.PAGE_EDITOR).text() == "Macro Editor"
+          and w.nav.button(app.PAGE_EDITOR).y() > w.nav.button(app.PAGE_MACROS).y()
+          and w.nav.button(app.PAGE_EDITOR).y() < w.nav.button(app.PAGE_VISUALIZER).y())
+
+    # With a macro currently loaded in the editor, clicking the sidebar
+    # entry from elsewhere just shows it (same persistence as the Edit button).
+    w.open_editor("m1")
+    pump(200)
+    w._nav_clicked(app.PAGE_SETTINGS)
+    pump(200)
+    w._nav_clicked(app.PAGE_EDITOR)
+    pump(200)
+    check("Macro Editor nav entry re-shows the macro already loaded",
+          w.stack.currentIndex() == app.PAGE_EDITOR and w.nav.button(app.PAGE_EDITOR).isChecked())
+
+    # With nothing selected (a blank editor), it bounces back to Macros
+    # instead of opening an empty page, and shows the toast.
+    ed.macro = editor_page.blank_macro()
+    w._nav_clicked(app.PAGE_EDITOR)
+    pump(200)
+    check("Macro Editor nav entry with nothing selected redirects to Macros",
+          w.stack.currentIndex() == app.PAGE_MACROS and w.nav.button(app.PAGE_MACROS).isChecked())
+    check("...and shows the 'Please select a macro' toast",
+          w.macro_page.toast.text() == "Please select a macro.")
+
     # Aliases
     w.open_editor("m1")
     pump(300)
@@ -253,6 +281,29 @@ def main() -> int:
         pump(300)
     else:
         print("SKIP transcriber process check (native/build not built)")
+
+    # "Ignore Puppetry" focus reporting: Qt already knows when our own
+    # window is focused, so the helper is told over stdin instead of
+    # spawning kdotool twice per poll to ask KWin. No process needed to
+    # check the wiring -- and reporting with nothing running must be a
+    # harmless no-op, since focus changes whenever the user alt-tabs.
+    import transcription
+    tc = transcription.TranscriptionController()
+    tc.report_focus(True)  # no process: must not raise
+    sent = []
+    tc.report_focus = lambda focused: sent.append(focused)
+    tc._watch_focus()
+    check("focus watcher connects and reports the state it starts in",
+          tc._focus_connected and sent == [qapp.focusWindow() is not None])
+    tc._focus_changed(None)
+    tc._focus_changed(w.windowHandle())
+    check("focus changes map to focused/unfocused reports", sent[-2:] == [False, True])
+    tc._unwatch_focus()
+    check("focus watcher disconnects on stop", not tc._focus_connected)
+    before = len(sent)
+    tc._focus_changed(None)  # still routed directly, but the signal is gone
+    qapp.focusWindowChanged.emit(None)
+    check("no reports once disconnected", len(sent) == before + 1)
 
     # Transcribe hotkey: UI round-trips, and the listener starts (and
     # quietly does nothing) even against our fake device paths.
@@ -298,6 +349,14 @@ def main() -> int:
     w.macro_page.rows[0].repeat.setCurrentIndex(2)
     check("autosave: row edits hit disk immediately", cfg.load_macros()["macros"][0]["repeat_mode"] == "toggle" and not model.dirty)
     sp.autosave.setChecked(False)
+
+    # Pointer acceleration: on by default (the daemon writes kcminputrc for
+    # its own virtual mouse), and the opt-out persists.
+    check("flat pointer acceleration defaults to on", sp.flat_accel.isChecked())
+    sp.flat_accel.setChecked(False)
+    check("pointer-acceleration opt-out persists", cfg.load_state().get("disable_pointer_accel") is False)
+    sp.flat_accel.setChecked(True)
+    check("...and back on again", cfg.load_state().get("disable_pointer_accel") is True)
 
     # ------------------------------------------------------------ visualizer
     w.nav.button(app.PAGE_VISUALIZER).click()

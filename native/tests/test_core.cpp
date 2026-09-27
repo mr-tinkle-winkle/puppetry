@@ -11,7 +11,9 @@
 #include <thread>
 #include "dispatch.hpp"
 #include "macro.hpp"
+#include "pointer_accel.hpp"
 #include "primitives.hpp"
+#include "uinput_device.hpp"
 
 using namespace puppetry;
 
@@ -197,7 +199,98 @@ static void test_arguments_extraction() {
     CHECK(threw);
 }
 
+// ---------------------------------------------------------------------
+// Pointer acceleration: the kcminputrc edit that makes KDE treat our own
+// virtual mouse as an unaccelerated 1:1 pointer. Pure text transform, and
+// it's editing a file that also holds the user's REAL mouse settings, so
+// "leaves everything else alone" is the property under test.
+// ---------------------------------------------------------------------
+static void test_kcminputrc_flat_accel() {
+    const std::string group = libinput_config_group(0x1234, 0x5678, "macro-daemon-virtual-mouse");
+    CHECK(group == "[Libinput][4660][22136][macro-daemon-virtual-mouse]");
+
+    // Empty file -> just our group.
+    std::string out = kcminputrc_with_flat_accel("", group);
+    CHECK(out == group + "\nPointerAcceleration=0\nPointerAccelerationProfile=1\n");
+
+    // Idempotent: applying it to its own output changes nothing. This is
+    // what keeps every daemon start from rewriting the file.
+    CHECK(kcminputrc_with_flat_accel(out, group) == out);
+
+    // An unrelated device's group is preserved byte-for-byte, and ours is
+    // appended rather than merged into it.
+    const std::string others =
+        "[Libinput][1133][49271][Logitech USB Receiver Mouse]\n"
+        "PointerAcceleration=0.4\n"
+        "PointerAccelerationProfile=2\n"
+        "NaturalScroll=true\n";
+    out = kcminputrc_with_flat_accel(others, group);
+    CHECK(out.rfind(others, 0) == 0); // still starts with exactly what was there
+    CHECK(out.find("PointerAcceleration=0.4") != std::string::npos);
+    CHECK(out.find(group) != std::string::npos);
+    CHECK(kcminputrc_with_flat_accel(out, group) == out);
+
+    // Our group already present but set to KDE's accelerated defaults:
+    // both keys corrected in place, nothing inserted or duplicated.
+    // "PointerAcceleration" is a PREFIX of "PointerAccelerationProfile",
+    // so a sloppy match here would leave one of them mangled.
+    out = kcminputrc_with_flat_accel(group + "\nPointerAcceleration=0.6\nPointerAccelerationProfile=2\n", group);
+    CHECK(out == group + "\nPointerAcceleration=0\nPointerAccelerationProfile=1\n");
+
+    // Our group present with only ONE of the two keys, plus a key we
+    // don't manage: the missing one is added, the foreign one survives.
+    out = kcminputrc_with_flat_accel(group + "\nNaturalScroll=true\nPointerAccelerationProfile=2\n", group);
+    CHECK(out.find("PointerAcceleration=0\n") != std::string::npos);
+    CHECK(out.find("PointerAccelerationProfile=1\n") != std::string::npos);
+    CHECK(out.find("NaturalScroll=true") != std::string::npos);
+    CHECK(out.find("PointerAccelerationProfile=2") == std::string::npos);
+    CHECK(kcminputrc_with_flat_accel(out, group) == out);
+
+    // A group that FOLLOWS ours must not absorb our keys: the insert goes
+    // under our own header, not at the end of the file.
+    const std::string trailing = group + "\n[Libinput][1][2][Some Other Mouse]\nPointerAcceleration=0.9\n";
+    out = kcminputrc_with_flat_accel(trailing, group);
+    CHECK(out.find("PointerAcceleration=0\n") < out.find("[Libinput][1][2][Some Other Mouse]"));
+    CHECK(out.find("PointerAcceleration=0.9") != std::string::npos); // theirs untouched
+}
+
+// ---------------------------------------------------------------------
+// The cursor-position cache behind move_mouse(move_to=True): every hit
+// saves a kdotool subprocess, and every stale hit would send the cursor
+// somewhere wrong, so the expiry/invalidation rules matter.
+// ---------------------------------------------------------------------
+static void test_cursor_cache() {
+    using Clock = std::chrono::steady_clock;
+    const auto t0 = Clock::now();
+    CursorCache cache;
+    int x = -1, y = -1;
+
+    CHECK(!cache.get(x, y, t0)); // nothing stored yet
+
+    cache.store(640, 480, t0);
+    CHECK(cache.get(x, y, t0) && x == 640 && y == 480);
+    CHECK(cache.get(x, y, t0 + std::chrono::milliseconds(100))); // still fresh
+
+    // Expiry: something else (another app warping the pointer) could have
+    // moved it, and we'd never have heard about it.
+    CHECK(!cache.get(x, y, t0 + CursorCache::kTtl + std::chrono::milliseconds(1)));
+
+    // Explicit invalidation -- what a real mouse movement or any relative
+    // move we emit ourselves does.
+    cache.store(10, 20, t0);
+    CHECK(cache.get(x, y, t0));
+    cache.invalidate();
+    CHECK(!cache.get(x, y, t0));
+
+    // Negative coordinates round-trip (multi-monitor layouts put the
+    // origin wherever they like).
+    cache.store(-1920, -14, t0);
+    CHECK(cache.get(x, y, t0) && x == -1920 && y == -14);
+}
+
 int main() {
+    test_kcminputrc_flat_accel();
+    test_cursor_cache();
     test_superset_suppression();
     test_hold_stops_on_release();
     test_toggle_edge();

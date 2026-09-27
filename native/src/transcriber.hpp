@@ -93,12 +93,23 @@ public:
     std::string wait_line(long long gap_us) const;
 
 private:
+    // Every emission is bracketed by these two: begin_line() clears the
+    // reusable buffer and puts the gap-since-last-line in it, end_line()
+    // terminates it, advances the clock and hands it to the callback. No
+    // per-event allocation anywhere in between (precise mode emits ~2000
+    // lines a second).
+    std::string& begin_line(long long ts_us);
+    void end_line(long long ts_us);
+    void append_wait(std::string& out, long long gap_us) const;
+
     void emit_timed(long long ts_us, const std::string& line);
+    void emit_key(long long ts_us, const char* verb, int code); // "kd(KEY_A)" etc
     void flush_motion(); // emits pending motion at the time it actually happened
 
     TranscribeOptions opts_;
     Emit emit_;
     CursorQuery query_;
+    std::string scratch_; // reused by begin_line()/end_line()
     long long last_us_ = 0;
     long long tick_us_;
     long long next_tick_us_ = 0;
@@ -113,7 +124,11 @@ private:
 
     // Alt+Tab filtering: an Alt press is held back (not yet emitted)
     // until we know whether Tab follows before Alt comes back up.
-    bool alt_pending_ = false, alt_tab_seen_ = false;
+    // tab_held_ additionally survives Alt's own release: people don't
+    // always let go of Alt and Tab in a fixed order, and if Alt comes up
+    // first, Tab's own eventual release must still be suppressed rather
+    // than falling through to normal handling once alt_pending_ is gone.
+    bool alt_pending_ = false, alt_tab_seen_ = false, tab_held_ = false;
     int alt_pending_code_ = 0;
     long long alt_pending_ts_ = 0;
 

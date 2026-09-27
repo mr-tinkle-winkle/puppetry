@@ -14,17 +14,60 @@ TranscriberCore::TranscriberCore(TranscribeOptions opts, Emit emit, CursorQuery 
     tick_us_ = std::max(1LL, (long long)(1e6 / hz));
 }
 
-std::string TranscriberCore::format_seconds(long long us) {
+// Appending into a caller-owned buffer rather than returning strings:
+// every line of a transcript goes through here, and precise mode writes
+// ~2000 of them a second. Same bytes out, no temporaries per event.
+static void append_seconds(std::string& out, long long us) {
     if (us < 0) us = 0;
     char buf[48];
-    std::snprintf(buf, sizeof(buf), "%lld.%06lld", us / 1000000, us % 1000000);
-    return buf;
+    int n = std::snprintf(buf, sizeof(buf), "%lld.%06lld", us / 1000000, us % 1000000);
+    if (n > 0) out.append(buf, (size_t)n);
+}
+
+static void append_int(std::string& out, long long v) {
+    char buf[24];
+    int n = std::snprintf(buf, sizeof(buf), "%lld", v);
+    if (n > 0) out.append(buf, (size_t)n);
+}
+
+std::string TranscriberCore::format_seconds(long long us) {
+    std::string s;
+    append_seconds(s, us);
+    return s;
+}
+
+void TranscriberCore::append_wait(std::string& out, long long gap_us) const {
+    out += "wait(";
+    append_seconds(out, gap_us);
+    if (opts_.precise) out += ", precise=True";
+    out += ')';
 }
 
 std::string TranscriberCore::wait_line(long long gap_us) const {
-    std::string s = "wait(" + format_seconds(gap_us);
-    if (opts_.precise) s += ", precise=True";
-    return s + ")";
+    std::string s;
+    append_wait(s, gap_us);
+    return s;
+}
+
+// A transcript line always starts with the gap since the previous one (if
+// any) and ends with a newline; these two bracket every emission so that
+// rule lives in exactly one place.
+std::string& TranscriberCore::begin_line(long long ts_us) {
+    scratch_.clear();
+    long long gap = ts_us - last_us_;
+    if (gap > 0) {
+        append_wait(scratch_, gap);
+        scratch_ += '\n';
+    }
+    return scratch_;
+}
+
+void TranscriberCore::end_line(long long ts_us) {
+    scratch_ += '\n';
+    // Events from two devices are merged by timestamp before feeding
+    // (see transcribe_main.cpp), but never let the clock run backwards.
+    last_us_ = std::max(last_us_, ts_us);
+    emit_(scratch_);
 }
 
 void TranscriberCore::start(long long now_us) {
@@ -49,28 +92,44 @@ void TranscriberCore::start(long long now_us) {
 }
 
 void TranscriberCore::emit_timed(long long ts_us, const std::string& line) {
-    long long gap = ts_us - last_us_;
-    std::string text;
-    if (gap > 0) text = wait_line(gap) + "\n";
-    text += line + "\n";
-    // Events from two devices are merged by timestamp before feeding
-    // (see transcribe_main.cpp), but never let the clock run backwards.
-    last_us_ = std::max(last_us_, ts_us);
-    emit_(text);
+    begin_line(ts_us) += line;
+    end_line(ts_us);
+}
+
+void TranscriberCore::emit_key(long long ts_us, const char* verb, int code) {
+    std::string& out = begin_line(ts_us);
+    out += verb;
+    out += '(';
+    if (const char* name = key_code_name_or_null(code)) {
+        out += name;
+    } else {
+        out += "code:";
+        append_int(out, code);
+    }
+    out += ')';
+    end_line(ts_us);
 }
 
 void TranscriberCore::flush_motion() {
     if (acc_dx_ == 0 && acc_dy_ == 0) return;
-    std::string line;
+    const long long ts = acc_ts_;
+    std::string& out = begin_line(ts);
+    out += "move_mouse(";
     if (tracking_) {
         pos_x_ += acc_dx_;
         pos_y_ += acc_dy_;
-        line = "move_mouse(" + std::to_string(pos_x_) + ", " + std::to_string(pos_y_) + ", move_to=True, time_=0)";
+        append_int(out, pos_x_);
+        out += ", ";
+        append_int(out, pos_y_);
+        out += ", move_to=True, time_=0)";
     } else {
-        line = "move_mouse(" + std::to_string(acc_dx_) + ", " + std::to_string(acc_dy_) + ", time_=0, easing=\"none\")";
+        append_int(out, acc_dx_);
+        out += ", ";
+        append_int(out, acc_dy_);
+        out += ", time_=0, easing=\"none\")";
     }
     acc_dx_ = acc_dy_ = 0;
-    emit_timed(acc_ts_, line);
+    end_line(ts);
 }
 
 void TranscriberCore::set_puppetry_focused(bool on, long long now_us) {
@@ -139,10 +198,19 @@ void TranscriberCore::feed(Source src, const RawEvent& ev) {
                 return;
             }
             if (ev.value == 0 && alt_pending_ && alt_pending_code_ == ev.code) {
+                if (tab_held_) {
+                    // Tab is still physically down (people don't always
+                    // release Alt and Tab in a fixed order) -- Alt is
+                    // done, but stay in combo mode so Tab's own release,
+                    // whenever it comes, is still caught below rather
+                    // than falling through once alt_pending_ is gone.
+                    alt_pending_ = false;
+                    return;
+                }
                 if (!alt_tab_seen_) {
                     flush_motion();
-                    emit_timed(alt_pending_ts_, std::string("kd(") + key_code_name(alt_pending_code_) + ")");
-                    emit_timed(ev.time_us, std::string("ku(") + key_code_name(ev.code) + ")");
+                    emit_key(alt_pending_ts_, "kd", alt_pending_code_);
+                    emit_key(ev.time_us, "ku", ev.code);
                 }
                 alt_pending_ = false;
                 alt_tab_seen_ = false;
@@ -151,9 +219,14 @@ void TranscriberCore::feed(Source src, const RawEvent& ev) {
             // Autorepeat, or a release with nothing buffered (e.g. the
             // option was turned on mid-hold) -- neither needs handling.
         }
-        if (opts_.ignore_alt_tab && ev.code == KEY_TAB && alt_pending_) {
-            if (ev.value == 1) alt_tab_seen_ = true;
-            return; // every Tab event while an Alt is pending belongs to that combo
+        if (opts_.ignore_alt_tab && ev.code == KEY_TAB && (alt_pending_ || tab_held_)) {
+            // alt_tab_seen_ is sticky once set -- Tab toggling its own
+            // held state (a tap, or several while cycling) must not
+            // forget that this Alt was used for Tab; only Alt's own
+            // resolution (below) clears it.
+            if (ev.value == 1) { alt_tab_seen_ = true; tab_held_ = true; }
+            else if (ev.value == 0) { tab_held_ = false; }
+            return; // every Tab event belonging to this combo, in either release order
         }
         if (ev.code == opts_.ping_code) {
             if (ev.value == 1 && opts_.mouse && !opts_.raw) {
@@ -182,14 +255,18 @@ void TranscriberCore::feed(Source src, const RawEvent& ev) {
         // the old tick-based transcriber could emit a click ahead of the
         // movement that preceded it (clicking at the wrong spot).
         flush_motion();
-        emit_timed(ev.time_us, std::string(verb) + "(" + key_code_name(ev.code) + ")");
+        emit_key(ev.time_us, verb, ev.code);
         return;
     }
 
     if (ev.type == EV_REL && mouse_role && opts_.mouse) {
         if (ev.code == REL_WHEEL) {
             flush_motion();
-            emit_timed(ev.time_us, "wheel(" + std::to_string(ev.value) + ")");
+            std::string& out = begin_line(ev.time_us);
+            out += "wheel(";
+            append_int(out, ev.value);
+            out += ')';
+            end_line(ev.time_us);
         } else if (opts_.raw && (ev.code == REL_X || ev.code == REL_Y)) {
             (ev.code == REL_X ? acc_dx_ : acc_dy_) += ev.value;
             (ev.code == REL_X ? total_dx_ : total_dy_) += ev.value;
