@@ -633,6 +633,98 @@ keyboard/mouse-button only, same universe as the abort key and ping key.
 Worth asking the user before adding a way to disable a saved hotkey
 without setting a different one, if that comes up next.
 
+## Session 6 — clear-before-transcribing, editor persistence fix, New Macro moved, Ignore Puppetry/Alt+Tab
+
+Verified: `native/build` rebuilt clean (`test_transcriber` now 25/25, +9 new
+cases; everything else unaffected), `gui/test_app.py` 63/63 (+7 new
+checks) under `QT_QPA_PLATFORM=offscreen`.
+
+**"Clear macro before transcribing"** -- a checkbox in Transcribe Inputs
+(`gui/editor_page.py`, `tr_clear`). Purely GUI-side: `_transcribe_clicked()`
+wipes `self.code` right before calling `transcriber.start()`, on the
+"start" branch only (stopping is unaffected). Persists via
+`model.set_pref("transcribe_clear_before", ...)`, same as the other
+transcription checkboxes.
+
+**Editor persistence fix (the actual bug behind "keeps the same macro in
+it even when you leave").** The editor page was already never destroyed
+(it's one QStackedWidget page like the others), and leaving it via the
+sidebar already preserved its in-progress fields. The real gap:
+`MainWindow.open_editor()` (`gui/app.py`) unconditionally called
+`load_macro(macro_id)` -- so clicking "Edit" on the SAME macro again,
+after leaving via Settings/Input Visualizer instead of Save/Close, wiped
+whatever hadn't been saved yet. Fixed with one guard: if the editor
+already holds that exact macro id *and* has unsaved changes, just show
+the page as-is; otherwise (different macro, or nothing unsaved) it
+reloads fresh as before -- so an edit made elsewhere while the editor sat
+idle (e.g. renaming the macro from the list) still shows up correctly.
+One knock-on fix: `MacroEditorPage.__init__` now sets `self._snapshot =
+self._fingerprint()` at the end of construction (matching the actual
+empty-widget state) -- without it, `has_unsaved_changes()` was `True`
+from app startup, since `_snapshot` started as `""` and nothing had
+called `load_macro()` yet, which would have made the very first
+`open_editor()` call go through the "already has unsaved changes" path
+for no reason (harmless there since there was nothing to preserve, but
+would have broken the new guard above). No behavior change for
+Save/Save-and-Close/Close/discard flows -- discard still doesn't revert
+the widget fields, same pre-existing quirk as before this session, just
+now more visible (a discarded edit resurfaces if you reopen the same
+macro, until you actually load a different one). Didn't seem asked for;
+worth raising if it's ever confusing in practice.
+
+**"+ New Macro" moved to the bottom-right of the Macros page** (was a
+button above the row list). `widgets.PageBase` now exposes
+`self.outer_layout` (the page's own top-level layout, outside the
+scrolling content) so a subclass can add a fixed bar below the list --
+`gui/macro_list_page.py` uses it for a right-aligned bottom bar, same
+place the editor puts its Save/Save-and-Close/Close buttons.
+
+**"Ignore Puppetry" and "Ignore Alt+Tab"** -- two more Transcribe Inputs
+checkboxes, both implemented in the C++ transcriber (`native/src/
+transcriber.{hpp,cpp}`, `transcribe_main.cpp`) since that's what's
+actually reading events, not the GUI:
+- `TranscribeOptions.ignore_puppetry`: `transcribe_main.cpp` polls the
+  active window every 300ms on a detached thread (kdotool, same
+  subprocess-pipe pattern the set_positions resync helper already uses --
+  never blocks event reading) and calls the new
+  `TranscriberCore::set_puppetry_focused(bool, now_us)`. While focused,
+  `feed()` drops every event outright; once focus moves away, the paused
+  span is added back into `last_us_`/`next_tick_us_`/`next_resync_us_` so
+  the next real gap doesn't count the time spent alt-tabbed into Puppetry
+  itself. The window check itself is a **new** `primitives.{hpp,cpp}`
+  function, `active_window_is_puppetry()` (kdotool `getactivewindow` then
+  `getwindowname`, checks for "puppetry" case-insensitively in the
+  title -- Qt's own window title, set once in `app.py`). Refactored
+  `get_cursor_pos_kde()`'s subprocess-launching code into a shared
+  `run_kdotool()` helper both functions now call, rather than duplicating
+  the fork/pipe/poll dance a third time; same fail-open behavior (kdotool
+  missing/erroring just means "never suppress", not a crash or a hang).
+- `TranscribeOptions.ignore_alt_tab`: an Alt press (`KEY_LEFTALT`/
+  `KEY_RIGHTALT`) is buffered in `feed()` -- NOT transcribed immediately --
+  until Alt comes back up. If any Tab event arrives first, the whole
+  thing was Alt+Tab: neither key is ever transcribed, including further
+  Tab presses if the switcher is held open and cycled. If Alt comes back
+  up with no Tab in between, it was just a normal Alt press, transcribed
+  at that point (at its ORIGINAL timestamp, so the recorded macro still
+  times it correctly) instead of immediately. This means a lone Alt press
+  is now emitted slightly late in the output stream when this option is
+  on -- acceptable for what it's for, but worth knowing if a transcript
+  ever looks reordered around an Alt key.
+- Both are CLI flags on `puppetry-transcribe` (`--ignore-puppetry`,
+  `--ignore-alt-tab`), plumbed through `gui/transcription.py`'s
+  `start()` and set from two more `editor_page.py` checkboxes
+  (`tr_ignore_puppetry`, `tr_ignore_alttab`), persisted the same way as
+  the rest of the section.
+
+**Not verified for real:** `active_window_is_puppetry()`'s kdotool
+command shapes (`getactivewindow`, `getwindowname <id>`) are written by
+analogy with xdotool's well-known interface, which kdotool aims to be
+compatible with -- but this session's sandbox has no KDE session or
+kdotool binary to actually run them against. If focus detection doesn't
+work on a real machine, start by checking those two subcommands (`kdotool
+getactivewindow`, then `kdotool getwindowname <that id>`) directly in a
+terminal.
+
 ## Build/run/environment
 
 **Daemon:** `cd native && mkdir build && cd build && cmake .. && cmake

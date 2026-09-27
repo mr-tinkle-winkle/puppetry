@@ -184,7 +184,20 @@ class MacroEditorPage(QWidget):
             "(instead of merging them to the sample rate below) and writes precise=True waits.\n"
             "Replaying the exact original frames also reproduces pointer acceleration faithfully.\n"
             "Cost: ~2 lines per mouse frame, and playback keeps a CPU core busy.")
-        for cb in (self.tr_kb, self.tr_mouse, self.tr_raw, self.tr_setpos, self.tr_samestart, self.tr_precise):
+        self.tr_clear = CustomCheckBox("Clear macro before transcribing")
+        self.tr_clear.setToolTip("Wipes the code box every time you click Start Transcribing (or press the "
+                                 "transcribe hotkey), so each session starts from a blank macro instead of "
+                                 "appending to whatever was already there.")
+        self.tr_ignore_puppetry = CustomCheckBox("Ignore Puppetry")
+        self.tr_ignore_puppetry.setToolTip("Stops listening entirely while Puppetry's own window is focused -- "
+                                           "so switching over here to check something doesn't get typed/clicked "
+                                           "into the macro. Time spent focused on Puppetry doesn't count towards "
+                                           "the next wait() either.")
+        self.tr_ignore_alttab = CustomCheckBox("Ignore Alt+Tab")
+        self.tr_ignore_alttab.setToolTip("Drops Alt+Tab (both keys) from the transcript entirely -- switching "
+                                        "windows mid-recording won't leave it in the macro.")
+        for cb in (self.tr_kb, self.tr_mouse, self.tr_raw, self.tr_setpos, self.tr_samestart, self.tr_precise,
+                   self.tr_clear, self.tr_ignore_puppetry, self.tr_ignore_alttab):
             col.addWidget(cb)
         col.addWidget(dim_label("Timing always comes from the kernel's own microsecond timestamps. Precise timing "
                                 "also records every mouse frame at your mouse's real polling rate and writes "
@@ -236,13 +249,18 @@ class MacroEditorPage(QWidget):
         self.tr_setpos.setChecked(bool(st.get("transcribe_setpos", False)))
         self.tr_samestart.setChecked(bool(st.get("transcribe_samestart", False)) and not self.tr_setpos.isChecked())
         self.tr_precise.setChecked(bool(st.get("transcribe_precise", False)))
+        self.tr_clear.setChecked(bool(st.get("transcribe_clear_before", False)))
+        self.tr_ignore_puppetry.setChecked(bool(st.get("transcribe_ignore_puppetry", False)))
+        self.tr_ignore_alttab.setChecked(bool(st.get("transcribe_ignore_alttab", False)))
         self.tr_hz.setValue(float(st.get("transcribe_raw_hz", 60)))
         self.ping_label.setText(st.get("transcribe_ping_key") or "KEY_INSERT")
         self.hotkey_label.setText(st.get("transcribe_hotkey") or "(not set)")
         self._sync_transcribe_enabled()
         for cb, key in ((self.tr_kb, "transcribe_keyboard"), (self.tr_mouse, "transcribe_mouse"),
                         (self.tr_raw, "transcribe_raw"), (self.tr_setpos, "transcribe_setpos"),
-                        (self.tr_samestart, "transcribe_samestart"), (self.tr_precise, "transcribe_precise")):
+                        (self.tr_samestart, "transcribe_samestart"), (self.tr_precise, "transcribe_precise"),
+                        (self.tr_clear, "transcribe_clear_before"), (self.tr_ignore_puppetry, "transcribe_ignore_puppetry"),
+                        (self.tr_ignore_alttab, "transcribe_ignore_alttab")):
             cb.toggled.connect(lambda on, key=key: self._transcribe_pref(key, on))
         self.tr_hz.valueChanged.connect(lambda v: model.set_pref("transcribe_raw_hz", v))
         self.tr_setpos.toggled.connect(lambda on: on and self.tr_samestart.setChecked(False))
@@ -325,6 +343,14 @@ class MacroEditorPage(QWidget):
         for b in (self.save_btn, self.save_close_btn, self.close_btn):
             bottom.addWidget(b)
         root.addLayout(bottom)
+
+        # Matches the actual (empty) widget state above, not blank_macro()'s
+        # defaults -- load_macro() hasn't run yet at construction time, and
+        # without this, has_unsaved_changes() would report unsaved changes
+        # before the editor has ever been opened (app.py now checks it on
+        # every open_editor() call, to preserve in-progress edits when
+        # re-opening the macro that's already loaded).
+        self._snapshot = self._fingerprint()
 
     # ------------------------------------------------------------------ load / collect
 
@@ -549,13 +575,17 @@ class MacroEditorPage(QWidget):
         if (kb_on and not kb) or (mouse_on and not mouse):
             self.tr_status.setText("Set a keyboard/mouse device in Settings first.")
             return
+        if self.tr_clear.isChecked():
+            self.code.setPlainText("")
         err = self.transcriber.start(
             keyboard_path=kb, mouse_path=mouse, transcribe_keyboard=kb_on, transcribe_mouse=mouse_on,
             raw=self.tr_raw.isChecked(), set_positions=self.tr_setpos.isChecked(),
             same_start=self.tr_samestart.isChecked(), raw_hz=self.tr_hz.value(),
             precise=self.tr_precise.isChecked(), ping_key=self.ping_label.text(),
             abort_key=self.model.state.get("abort_key") or "KEY_PAUSE",
-            hotkey_key=self.model.state.get("transcribe_hotkey") or None)
+            hotkey_key=self.model.state.get("transcribe_hotkey") or None,
+            ignore_alt_tab=self.tr_ignore_alttab.isChecked(),
+            ignore_puppetry=self.tr_ignore_puppetry.isChecked())
         if err:
             self.tr_status.setText(err)
             return

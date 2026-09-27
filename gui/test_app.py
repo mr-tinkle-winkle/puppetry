@@ -81,6 +81,41 @@ def main() -> int:
     check("row shows combo", r.combo_btn.text() == "KEY_HOME")
     check("row shows repeat mode", r.repeat.currentText() == "Toggle")
     check("enabled switch reflects the profile", r.enabled.isChecked() and not rows[1].enabled.isChecked())
+    check("+ New Macro sits at the bottom-right of the Macros page",
+          w.macro_page.new_btn.geometry().right() > w.macro_page.width() * 0.8
+          and w.macro_page.new_btn.y() > w.macro_page.height() * 0.7)
+
+    # ------------------------------------------------------------ editor persistence
+    # Leaving the editor via the sidebar (not Save/Close/Discard) keeps
+    # in-progress edits; re-opening the very same macro resumes them
+    # instead of reloading from disk and losing them.
+    w.open_editor("m2")
+    pump(200)
+    ed = w.editor_page
+    ed.name_edit.setText("in progress rename")
+    app.ask = lambda *a, **k: 1  # "Discard" here only means "don't save before leaving"
+    w._nav_clicked(app.PAGE_SETTINGS)
+    pump(200)
+    w._nav_clicked(app.PAGE_MACROS)
+    pump(200)
+    w.open_editor("m2")
+    pump(200)
+    check("re-opening the same macro resumes unsaved edits instead of reloading",
+          w.stack.currentIndex() == app.PAGE_EDITOR and ed.name_edit.text() == "in progress rename")
+
+    # But when nothing's actually unsaved, re-opening the same macro still
+    # picks up a change made elsewhere (e.g. renaming it from the list)
+    # instead of trusting the last-shown state forever.
+    ed.load_macro("m2")  # test scaffolding: force a clean reload, bypassing the editor's own Save/Close
+    check("editor is clean right after a reload", not ed.has_unsaved_changes())
+    model.set_field("m2", "name", "renamed from the list")
+    w.open_editor("m2")  # already showing m2, with nothing unsaved
+    pump(200)
+    check("re-opening the same (clean) macro still picks up an external rename",
+          ed.name_edit.text() == "renamed from the list")
+    model.set_field("m2", "name", "second")  # restore, so later checks aren't thrown off
+    w.close_editor()  # back to the Macros page, so later visibility-based checks see it current
+    pump(200)
 
     # Visual regressions found by looking at real renders:
     from PySide6.QtGui import QFontMetrics
@@ -201,6 +236,21 @@ def main() -> int:
         check("transcription options persist", cfg.load_state().get("transcribe_keyboard") is True)
         ed._insert_transcribed("wait(0.000234)\nkd(KEY_A)\n")
         check("transcribed text is inserted at the cursor", "wait(0.000234)\nkd(KEY_A)" in ed.code.toPlainText())
+
+        ed.tr_ignore_puppetry.setChecked(True)
+        ed.tr_ignore_alttab.setChecked(True)
+        check("ignore-puppetry/ignore-alt-tab toggles persist",
+              cfg.load_state().get("transcribe_ignore_puppetry") is True
+              and cfg.load_state().get("transcribe_ignore_alttab") is True)
+
+        ed.tr_clear.setChecked(True)
+        ed.code.setPlainText("leftover content\n")
+        ed._transcribe_clicked()  # start: should clear first, synchronously, before the process even runs
+        check("clear-before-transcribing wipes the code box on start", ed.code.toPlainText() == "")
+        check("clear-before-transcribing persists", cfg.load_state().get("transcribe_clear_before") is True)
+        pump(1500)
+        ed.transcriber.stop()
+        pump(300)
     else:
         print("SKIP transcriber process check (native/build not built)")
 

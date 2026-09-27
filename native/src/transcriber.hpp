@@ -49,6 +49,8 @@ struct TranscribeOptions {
     int ping_code = 110;         // KEY_INSERT
     int abort_code = -1;         // daemon's abort key -- pressing it ends the session (-1 = none)
     int hotkey_code = -1;        // the editor's start/stop transcribe toggle (-1 = none)
+    bool ignore_alt_tab = false; // drop Alt+Tab (both keys) from the transcript entirely
+    bool ignore_puppetry = false; // mute everything while Puppetry itself is the focused window
 };
 
 enum class Source { Keyboard, Mouse, Both };
@@ -78,6 +80,14 @@ public:
     // ends every running macro -- see transcribe_main.cpp).
     bool abort_requested() const { return abort_requested_; }
 
+    // "Ignore Puppetry": the caller polls window focus itself (kdotool is
+    // its own subprocess round-trip, not something to do per-event) and
+    // reports transitions here. While focused on, feed() drops every
+    // event; once it goes off, the paused span is subtracted back out of
+    // the timeline so the next real gap doesn't include however long the
+    // user spent alt-tabbed into Puppetry itself.
+    void set_puppetry_focused(bool on, long long now_us);
+
     // Formatting helpers (exposed for tests).
     static std::string format_seconds(long long us);
     std::string wait_line(long long gap_us) const;
@@ -100,6 +110,16 @@ private:
     long long next_resync_us_ = 0;
     bool dropping_kb_ = false, dropping_mouse_ = false;
     bool abort_requested_ = false;
+
+    // Alt+Tab filtering: an Alt press is held back (not yet emitted)
+    // until we know whether Tab follows before Alt comes back up.
+    bool alt_pending_ = false, alt_tab_seen_ = false;
+    int alt_pending_code_ = 0;
+    long long alt_pending_ts_ = 0;
+
+    // "Ignore Puppetry" focus muting.
+    bool puppetry_focused_ = false;
+    long long focus_paused_started_us_ = 0;
 };
 
 } // namespace puppetry

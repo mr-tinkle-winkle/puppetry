@@ -155,6 +155,48 @@ int main() {
         CHECK_EQ(h.take(), "wait(0.002000)\nkd(KEY_A)\n"); // filtered keys never move last_us_ forward
     }
 
+    // Alt+Tab filtering: Tab while Alt is held drops both keys entirely;
+    // a plain Alt press (no Tab) still transcribes, just emitted once
+    // Alt comes back up instead of immediately.
+    {
+        TranscribeOptions o; o.keyboard = true; o.ignore_alt_tab = true;
+        Harness h(o);
+        h.core.start(T0);
+        h.core.feed(Source::Keyboard, ev(T0 + 1000, EV_KEY, KEY_LEFTALT, 1));
+        CHECK_EQ(h.take(), ""); // buffered, not yet known if this is Alt+Tab
+        h.core.feed(Source::Keyboard, ev(T0 + 1500, EV_KEY, KEY_TAB, 1));
+        h.core.feed(Source::Keyboard, ev(T0 + 1600, EV_KEY, KEY_TAB, 0));
+        h.core.feed(Source::Keyboard, ev(T0 + 2000, EV_KEY, KEY_TAB, 1)); // cycling further
+        h.core.feed(Source::Keyboard, ev(T0 + 2100, EV_KEY, KEY_TAB, 0));
+        CHECK_EQ(h.take(), ""); // the whole Alt+Tab session, dropped
+        h.core.feed(Source::Keyboard, ev(T0 + 2500, EV_KEY, KEY_LEFTALT, 0));
+        CHECK_EQ(h.take(), ""); // Alt release: nothing to flush, it was consumed by Tab
+        // A normal (non-Tab) Alt press still shows up, just delayed to
+        // release time -- and normal keys around it are unaffected.
+        h.core.feed(Source::Keyboard, ev(T0 + 3000, EV_KEY, KEY_LEFTALT, 1));
+        CHECK_EQ(h.take(), "");
+        h.core.feed(Source::Keyboard, ev(T0 + 3500, EV_KEY, KEY_LEFTALT, 0));
+        CHECK_EQ(h.take(), "wait(0.003000)\nkd(KEY_LEFTALT)\nwait(0.000500)\nku(KEY_LEFTALT)\n");
+        h.core.feed(Source::Keyboard, ev(T0 + 4000, EV_KEY, KEY_A, 1));
+        CHECK_EQ(h.take(), "wait(0.000500)\nkd(KEY_A)\n");
+    }
+
+    // Ignore Puppetry: nothing is transcribed while focused, and the
+    // paused span is excluded from the next gap once focus moves away.
+    {
+        TranscribeOptions o; o.keyboard = true;
+        Harness h(o);
+        h.core.start(T0);
+        h.core.feed(Source::Keyboard, ev(T0 + 1000, EV_KEY, KEY_A, 1));
+        CHECK_EQ(h.take(), "wait(0.001000)\nkd(KEY_A)\n");
+        h.core.set_puppetry_focused(true, T0 + 2000);
+        h.core.feed(Source::Keyboard, ev(T0 + 2500, EV_KEY, KEY_B, 1)); // typing in Puppetry itself
+        CHECK_EQ(h.take(), ""); // not listening
+        h.core.set_puppetry_focused(false, T0 + 10000); // 8ms spent focused on Puppetry
+        h.core.feed(Source::Keyboard, ev(T0 + 10500, EV_KEY, KEY_C, 1));
+        CHECK_EQ(h.take(), "wait(0.001500)\nkd(KEY_C)\n"); // the 8ms spent focused on Puppetry never happened
+    }
+
     // same_start emits the one absolute line up front.
     {
         TranscribeOptions o; o.mouse = true; o.raw = true; o.same_start = true;

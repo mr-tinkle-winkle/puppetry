@@ -73,7 +73,27 @@ void TranscriberCore::flush_motion() {
     emit_timed(acc_ts_, line);
 }
 
+void TranscriberCore::set_puppetry_focused(bool on, long long now_us) {
+    if (on == puppetry_focused_) return;
+    if (on) {
+        focus_paused_started_us_ = now_us;
+    } else {
+        long long paused = now_us - focus_paused_started_us_;
+        if (paused > 0) {
+            // Shift every clock this core tracks forward by the paused
+            // span, so the next real gap/tick/resync doesn't count the
+            // time spent focused on Puppetry itself.
+            last_us_ += paused;
+            next_tick_us_ += paused;
+            next_resync_us_ += paused;
+        }
+    }
+    puppetry_focused_ = on;
+}
+
 void TranscriberCore::feed(Source src, const RawEvent& ev) {
+    if (puppetry_focused_) return; // "Ignore Puppetry": not listening right now
+
     const bool kb_role = src == Source::Keyboard || src == Source::Both;
     const bool mouse_role = src == Source::Mouse || src == Source::Both;
     bool& dropping = (src == Source::Mouse) ? dropping_mouse_ : dropping_kb_;
@@ -104,6 +124,36 @@ void TranscriberCore::feed(Source src, const RawEvent& ev) {
         }
         if (opts_.hotkey_code >= 0 && ev.code == opts_.hotkey_code) {
             return;
+        }
+        // Alt+Tab filtering: an Alt press is buffered (never emitted yet)
+        // until Alt comes back up. If Tab arrives first, this was
+        // Alt+Tab -- neither key gets transcribed. If Alt comes back up
+        // with no Tab in between, it was just a normal Alt press, emitted
+        // now (at its original timestamp) instead of immediately.
+        if (opts_.ignore_alt_tab && (ev.code == KEY_LEFTALT || ev.code == KEY_RIGHTALT)) {
+            if (ev.value == 1) {
+                alt_pending_ = true;
+                alt_tab_seen_ = false;
+                alt_pending_code_ = ev.code;
+                alt_pending_ts_ = ev.time_us;
+                return;
+            }
+            if (ev.value == 0 && alt_pending_ && alt_pending_code_ == ev.code) {
+                if (!alt_tab_seen_) {
+                    flush_motion();
+                    emit_timed(alt_pending_ts_, std::string("kd(") + key_code_name(alt_pending_code_) + ")");
+                    emit_timed(ev.time_us, std::string("ku(") + key_code_name(ev.code) + ")");
+                }
+                alt_pending_ = false;
+                alt_tab_seen_ = false;
+                return;
+            }
+            // Autorepeat, or a release with nothing buffered (e.g. the
+            // option was turned on mid-hold) -- neither needs handling.
+        }
+        if (opts_.ignore_alt_tab && ev.code == KEY_TAB && alt_pending_) {
+            if (ev.value == 1) alt_tab_seen_ = true;
+            return; // every Tab event while an Alt is pending belongs to that combo
         }
         if (ev.code == opts_.ping_code) {
             if (ev.value == 1 && opts_.mouse && !opts_.raw) {

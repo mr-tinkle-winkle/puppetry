@@ -312,12 +312,11 @@ static double ease(double t, const std::string& style) {
     return 1 - std::pow(-2 * t + 2, 2) / 2;
 }
 
-// Asks KWin for the cursor position via kdotool, same approach as the
-// Python version's _get_cursor_pos_kde(). Returns false (leaving x/y
-// untouched) if kdotool isn't installed, times out, or its output can't
-// be parsed -- callers fall back to the corner-anchored move, same as
-// the original.
-bool get_cursor_pos_kde(int& x, int& y, double timeout_s) {
+// Runs `kdotool <args...>`, collecting stdout (stderr discarded) with a
+// deadline. False on any failure (not installed, timed out, nonzero
+// exit) -- shared by every kdotool-backed query below, all of which fail
+// open (treat "couldn't ask" the same as "no" rather than blocking).
+static bool run_kdotool(const std::vector<std::string>& args, std::string& output, double timeout_s) {
     int out_pipe[2];
     if (pipe(out_pipe) != 0) return false;
     pid_t pid = fork();
@@ -332,13 +331,17 @@ bool get_cursor_pos_kde(int& x, int& y, double timeout_s) {
         close(out_pipe[1]);
         int devnull = open("/dev/null", O_WRONLY);
         if (devnull >= 0) { dup2(devnull, STDERR_FILENO); close(devnull); }
-        execlp("kdotool", "kdotool", "getmouselocation", "--shell", (char*)nullptr);
+        std::vector<char*> argv;
+        argv.push_back(const_cast<char*>("kdotool"));
+        for (const auto& a : args) argv.push_back(const_cast<char*>(a.c_str()));
+        argv.push_back(nullptr);
+        execvp("kdotool", argv.data());
         _exit(127);
     }
     close(out_pipe[1]);
 
     struct pollfd pfd{out_pipe[0], POLLIN, 0};
-    std::string output;
+    output.clear();
     auto deadline = std::chrono::steady_clock::now() + std::chrono::duration<double>(timeout_s);
     bool timed_out = false;
     while (true) {
@@ -355,7 +358,17 @@ bool get_cursor_pos_kde(int& x, int& y, double timeout_s) {
     if (timed_out) kill(pid, SIGKILL);
     int status = 0;
     waitpid(pid, &status, 0);
-    if (timed_out || !WIFEXITED(status) || WEXITSTATUS(status) != 0) return false;
+    return !timed_out && WIFEXITED(status) && WEXITSTATUS(status) == 0;
+}
+
+// Asks KWin for the cursor position via kdotool, same approach as the
+// Python version's _get_cursor_pos_kde(). Returns false (leaving x/y
+// untouched) if kdotool isn't installed, times out, or its output can't
+// be parsed -- callers fall back to the corner-anchored move, same as
+// the original.
+bool get_cursor_pos_kde(int& x, int& y, double timeout_s) {
+    std::string output;
+    if (!run_kdotool({"getmouselocation", "--shell"}, output, timeout_s)) return false;
 
     std::istringstream iss(output);
     std::string line;
@@ -365,6 +378,21 @@ bool get_cursor_pos_kde(int& x, int& y, double timeout_s) {
         else if (line.rfind("Y=", 0) == 0) { y = std::atoi(line.c_str() + 2); have_y = true; }
     }
     return have_x && have_y;
+}
+
+bool active_window_is_puppetry(double timeout_s) {
+    std::string id_out;
+    if (!run_kdotool({"getactivewindow"}, id_out, timeout_s)) return false;
+    std::string id;
+    for (char c : id_out) if (!std::isspace((unsigned char)c)) id += c;
+    if (id.empty()) return false;
+
+    std::string name_out;
+    if (!run_kdotool({"getwindowname", id}, name_out, timeout_s)) return false;
+    std::string lower;
+    lower.reserve(name_out.size());
+    for (char c : name_out) lower += (char)std::tolower((unsigned char)c);
+    return lower.find("puppetry") != std::string::npos;
 }
 
 void move_mouse_fn(Runtime& rt, int x_pixels, int y_pixels, double time_,

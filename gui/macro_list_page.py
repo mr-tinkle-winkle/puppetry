@@ -173,18 +173,22 @@ class MacroListPage(PageBase):
         top.addWidget(self.save_btn)
         self.content_layout.addLayout(top)
 
-        new_btn = CustomButton("+ New Macro")
-        new_btn.clicked.connect(lambda: open_editor(None))
-        new_row = QHBoxLayout()
-        new_row.addWidget(new_btn)
-        new_row.addStretch(1)
-        self.content_layout.addLayout(new_row)
-
         self.rows_box = QVBoxLayout()
         self.rows_box.setSpacing(theme.padding // 2 + 4)
         self.content_layout.addLayout(self.rows_box)
         self.content_layout.addStretch(1)
         self.rows: list[MacroRow] = []
+
+        # Fixed bar below the scrolling list, bottom-right, like the
+        # editor's own bottom bar -- stays in place instead of scrolling
+        # away with the row list.
+        bottom = QHBoxLayout()
+        bottom.setContentsMargins(theme.padding, 0, theme.padding, theme.padding)
+        bottom.addStretch(1)
+        self.new_btn = CustomButton("+ New Macro")
+        self.new_btn.clicked.connect(lambda: open_editor(None))
+        bottom.addWidget(self.new_btn)
+        self.outer_layout.addLayout(bottom)
 
         model.macros_changed.connect(self.refresh)
         model.profiles_changed.connect(self._update_profile_label)

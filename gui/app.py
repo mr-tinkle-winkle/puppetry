@@ -113,6 +113,22 @@ class MainWindow(QMainWindow):
         macro = self.model.find(macro_id)
         if macro is not None and macro.get("locked"):
             return  # belt-and-braces; the row's Edit is already disabled
+        same_macro_open = macro_id is not None and self.editor_page.macro.get("id") == macro_id
+        if same_macro_open and self.editor_page.has_unsaved_changes():
+            # Already holding this exact macro with edits in progress --
+            # e.g. it was left open via the sidebar (Settings/Input
+            # Visualizer) rather than Save/Close. Show it as-is instead of
+            # reloading from the model and losing them. (If it's the same
+            # macro but nothing's unsaved, falling through to a fresh
+            # load below is harmless and catches edits made elsewhere,
+            # like renaming it from the macro list.)
+            crossfade_to_index(self.stack, PAGE_EDITOR)
+            return
+        if not same_macro_open and self.editor_page.has_unsaved_changes():
+            choice = ask(self, "Unsaved changes", "Save the macro you were editing before opening this one?",
+                         ["Cancel", "Discard", "Save"], default=2)
+            if choice == 0 or choice == -1 or (choice == 2 and not self.editor_page.save()):
+                return
         self.editor_page.load_macro(macro_id)
         crossfade_to_index(self.stack, PAGE_EDITOR)
 

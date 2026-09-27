@@ -38,6 +38,12 @@ bool wait_is_short(double time_);
 // Asks KWin for the cursor position via kdotool. false if unavailable.
 bool get_cursor_pos_kde(int& x, int& y, double timeout_s = 1.0);
 
+// Asks KWin (via kdotool) whether the active window's title contains
+// "puppetry" -- used by the transcriber's "Ignore Puppetry" option. False
+// (never suppress) if kdotool isn't installed or the query fails, same
+// fail-open philosophy as get_cursor_pos_kde.
+bool active_window_is_puppetry(double timeout_s = 1.0);
+
 // what: "keyboard" | "mouse" | "mouse_buttons" | "mouse_movement".
 // Throws std::invalid_argument for anything else, same as the Python
 // version's ValueError.

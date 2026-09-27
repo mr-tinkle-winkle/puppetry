@@ -33,7 +33,8 @@ class TranscriptionController(QObject):
         return self._proc is not None
 
     def start(self, *, keyboard_path, mouse_path, transcribe_keyboard, transcribe_mouse, raw,
-              set_positions, same_start, raw_hz, precise, ping_key, abort_key=None, hotkey_key=None) -> str | None:
+              set_positions, same_start, raw_hz, precise, ping_key, abort_key=None, hotkey_key=None,
+              ignore_alt_tab=False, ignore_puppetry=False) -> str | None:
         """Returns an error message, or None if started.
 
         `abort_key`, if given, makes the abort key end this session on its
@@ -41,7 +42,9 @@ class TranscriptionController(QObject):
         code 3 check in _finished. `hotkey_key`, if given, is filtered out
         of the transcript like the ping key: the GUI's own toggle hotkey
         starts/stops this process, so its keypress should never itself be
-        recorded, including the press that stops us."""
+        recorded, including the press that stops us. `ignore_alt_tab` drops
+        Alt+Tab from the transcript; `ignore_puppetry` mutes everything
+        while Puppetry's own window has focus."""
         if self._proc is not None:
             return None
         exe = cfg.find_binary("puppetry-transcribe")
@@ -55,7 +58,8 @@ class TranscriptionController(QObject):
             args += ["--hotkey-key", hotkey_key]
         for flag, on in (("--transcribe-keyboard", transcribe_keyboard), ("--transcribe-mouse", transcribe_mouse),
                          ("--raw", raw), ("--set-positions", set_positions), ("--same-start", same_start),
-                         ("--precise", precise)):
+                         ("--precise", precise), ("--ignore-alt-tab", ignore_alt_tab),
+                         ("--ignore-puppetry", ignore_puppetry)):
             if on:
                 args.append(flag)
         proc = QProcess(self)

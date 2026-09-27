@@ -301,6 +301,7 @@ class PageBase(QWidget):
         self._bg = theme.page_background()
         outer = QVBoxLayout(self)
         outer.setContentsMargins(3, 3, 3, 3)
+        self.outer_layout = outer  # exposed so a subclass can add a fixed (non-scrolling) bar below the content, e.g. a bottom-right action button
         self.content = QWidget()
         self.content.setAutoFillBackground(False)
         self.content_layout = QVBoxLayout(self.content)

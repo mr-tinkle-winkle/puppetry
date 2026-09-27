@@ -9,6 +9,7 @@
 //       [--transcribe-keyboard] [--transcribe-mouse] [--raw]
 //       [--set-positions] [--same-start] [--raw-hz N] [--precise]
 //       [--ping-key KEY_NAME] [--abort-key KEY_NAME] [--hotkey-key KEY_NAME]
+//       [--ignore-alt-tab] [--ignore-puppetry]
 //
 // Device I/O only; all transcription logic is TranscriberCore
 // (transcriber.cpp), which is unit-tested with synthetic events.
@@ -38,9 +39,12 @@
 using namespace puppetry;
 
 static volatile sig_atomic_t g_stop = 0;
-// static: the detached resync helper may still be finishing when main() returns.
+// static: the detached resync/focus helpers may still be finishing when main() returns.
 static std::atomic<bool> resync_busy{false};
+static std::atomic<bool> focus_busy{false};
 static void on_signal(int) { g_stop = 1; }
+
+static constexpr long long kFocusCheckIntervalUs = 300000; // 300ms -- a kdotool round-trip, not per-event
 
 static long long now_monotonic_us() {
     struct timespec ts;
@@ -81,7 +85,9 @@ int main(int argc, char** argv) {
             int code;
             if (!resolve_key_name(name, code)) { std::fprintf(stderr, "unknown hotkey %s\n", name.c_str()); return 64; }
             opts.hotkey_code = code;
-        } else {
+        } else if (a == "--ignore-alt-tab") opts.ignore_alt_tab = true;
+        else if (a == "--ignore-puppetry") opts.ignore_puppetry = true;
+        else {
             std::fprintf(stderr, "unknown argument %s\n", a.c_str());
             return 64;
         }
@@ -129,9 +135,18 @@ int main(int argc, char** argv) {
     if (pipe(resync_pipe) != 0) return 1;
     struct ResyncResult { int ok, x, y; long long sx, sy; };
 
+    // "Ignore Puppetry" focus polling -- same detached-thread-plus-pipe
+    // shape as the resync helper above, and for the same reason: a
+    // kdotool round-trip must never stall reading the real devices.
+    int focus_pipe[2];
+    if (opts.ignore_puppetry && pipe(focus_pipe) != 0) return 1;
+    struct FocusResult { int focused; long long checked_at_us; };
+    long long next_focus_check_us = 0;
+
     std::vector<struct pollfd> pfds;
     pfds.push_back({STDIN_FILENO, POLLIN, 0});
     pfds.push_back({resync_pipe[0], POLLIN, 0});
+    pfds.push_back({opts.ignore_puppetry ? focus_pipe[0] : -1, POLLIN, 0}); // fd -1: poll() ignores it
     for (auto& d : devs) pfds.push_back({d.dev->fd(), POLLIN, 0});
 
     struct Tagged { RawEvent ev; Source role; };
@@ -153,6 +168,16 @@ int main(int argc, char** argv) {
                 resync_busy = false;
             }).detach();
         }
+        if (opts.ignore_puppetry && now >= next_focus_check_us && !focus_busy.exchange(true)) {
+            next_focus_check_us = now + kFocusCheckIntervalUs;
+            int wfd = focus_pipe[1];
+            std::thread([wfd] {
+                FocusResult r{active_window_is_puppetry(0.5) ? 1 : 0, now_monotonic_us()};
+                ssize_t w = write(wfd, &r, sizeof(r));
+                (void)w;
+                focus_busy = false;
+            }).detach();
+        }
 
         int rc = poll(pfds.data(), pfds.size(), 250);
         if (rc < 0) { if (errno == EINTR) continue; break; }
@@ -166,17 +191,21 @@ int main(int argc, char** argv) {
             ResyncResult r;
             if (read(resync_pipe[0], &r, sizeof(r)) == (ssize_t)sizeof(r) && r.ok) core.apply_resync(r.x, r.y, r.sx, r.sy);
         }
+        if (opts.ignore_puppetry && (pfds[2].revents & POLLIN)) {
+            FocusResult r;
+            if (read(focus_pipe[0], &r, sizeof(r)) == (ssize_t)sizeof(r)) core.set_puppetry_focused(r.focused != 0, r.checked_at_us);
+        }
 
         // Gather everything ready on every device, then merge by kernel
         // timestamp so keyboard and mouse events interleave in true order
         // (a stable sort keeps each device's frames contiguous).
         batch.clear();
         bool device_gone = false;
-        for (size_t i = 2; i < pfds.size(); ++i) {
+        for (size_t i = 3; i < pfds.size(); ++i) {
             if (!(pfds[i].revents & (POLLIN | POLLERR | POLLHUP))) continue;
-            int n = devs[i - 2].dev->read_events(buf, 64);
+            int n = devs[i - 3].dev->read_events(buf, 64);
             if (n < 0) { device_gone = true; continue; }
-            for (int k = 0; k < n; ++k) batch.push_back({buf[k], devs[i - 2].role});
+            for (int k = 0; k < n; ++k) batch.push_back({buf[k], devs[i - 3].role});
         }
         std::stable_sort(batch.begin(), batch.end(),
                          [](const Tagged& a, const Tagged& b) { return a.ev.time_us < b.ev.time_us; });
