@@ -1074,7 +1074,7 @@ crying wolf. 8 consecutive runs clean, drift median pinned at 0.2001s.
 Verified: full native suite green (`test_core` 55, `test_transcriber` 36 ->
 **41** (+5), `test_python_embed` 8 -> **9** (+1), `test_native_vm` 5 ->
 **7** (+2), `test_timing` 47, `test_control_socket` 7, `test_mixed_calls`
-2), `gui/test_app.py` 85 -> **101** (+16).
+2), `gui/test_app.py` 85 -> **102** (+17).
 
 ### `checkpoint()` (new primitive) + checkpoint key
 
@@ -1119,12 +1119,16 @@ its own `DetectKey` picker, its own persisted pref
 (`_rearm_restart_key_listener()`/`_restart_key_pressed()`, armed on
 `showEvent()` and torn down in `stop_threads()` exactly like the existing
 toggle hotkey's listener, but as a distinct object — `_restart_key_listener`,
-never `_hotkey_listener`). Pressing it always stops whatever's currently
-being recorded (a harmless no-op if nothing is) and immediately starts a
-fresh session — same clear-before-transcribing/checkpoint handling, same
-sounds — as opposed to the toggle hotkey, which alternates start/stop.
-`_restart_transcription()` in `editor_page.py` is just `stop()` then
-`_start_transcription()`. On the native side it's filtered exactly like the
+never `_hotkey_listener`). Pressing it only does anything while a
+transcription is already running — a no-op from a standing stop, since
+this hotkey never itself starts one — and while running it stops it and
+immediately starts a fresh session in its place, same
+clear-before-transcribing/checkpoint handling, same sounds, as opposed to
+the toggle hotkey, which alternates start/stop from either state.
+`_restart_transcription()` in `editor_page.py` checks
+`self.transcriber.running()` first and returns early if it's not, otherwise
+it's `stop()` then `_start_transcription()`. On the native side it's
+filtered exactly like the
 toggle hotkey (`transcriber.cpp`, `TranscribeOptions::restart_code`, CLI
 flag `--restart-key`) — consumed, never transcribed, deliberately a
 separate option field from `hotkey_code` per the requirement that the two

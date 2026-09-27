@@ -402,17 +402,20 @@ def main() -> int:
     check("clear-before-transcribing off: code left untouched",
           ed.code.toPlainText() == "tap(KEY_A)\ncheckpoint()\ntap(KEY_B)\n")
 
-    # Restart transcription: always stops whatever's running (harmless
-    # no-op if nothing was) and starts fresh -- distinct from the toggle,
-    # which alternates. No real devices here, so start() itself will
-    # fail past the device check; the point is stop() is called first.
+    # Restart transcription: only does anything while one's already
+    # running -- a no-op from a standing stop, unlike the toggle hotkey
+    # which would start one. While running, it stops then starts fresh.
     ed.tr_clear.setChecked(False)
-    stopped_calls = []
+    stopped_calls, started_calls = [], []
     ed.transcriber.stop = lambda: stopped_calls.append(True)
-    started_calls = []
+    ed.transcriber.running = lambda: False
     ed._start_transcription = lambda: started_calls.append(True)
     ed._restart_transcription()
-    check("restart calls stop() then starts fresh, in that order",
+    check("restart is a no-op when nothing is transcribing",
+          stopped_calls == [] and started_calls == [])
+    ed.transcriber.running = lambda: True
+    ed._restart_transcription()
+    check("restart stops then starts fresh when one is already running",
           stopped_calls == [True] and started_calls == [True])
 
     editor_page.ask = lambda *a, **k: 1

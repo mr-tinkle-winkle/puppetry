@@ -247,10 +247,11 @@ class MacroEditorPage(QWidget):
         self.restart_btn.clicked.connect(self._change_restart_key)
         restart_row.addWidget(self.restart_btn)
         col.addLayout(restart_row)
-        col.addWidget(dim_label("Separate from the toggle hotkey above: this one always stops whatever's "
-                                "currently being recorded (if anything) and starts a fresh one right away, "
-                                "rather than alternating start/stop -- handy for redoing a take without "
-                                "reaching for the mouse. Never itself recorded."))
+        col.addWidget(dim_label("Separate from the toggle hotkey above: only does anything while a "
+                                "transcription is already running, and then it stops it and starts a fresh "
+                                "one right away, rather than alternating start/stop -- handy for redoing a "
+                                "take without reaching for the mouse. Does nothing if nothing's recording. "
+                                "Never itself recorded."))
         checkpoint_row = QHBoxLayout()
         checkpoint_row.addWidget(QLabel("Checkpoint key"))
         self.checkpoint_label = QLabel()
@@ -660,11 +661,15 @@ class MacroEditorPage(QWidget):
         self._start_transcription()
 
     def _restart_transcription(self) -> None:
-        """The restart hotkey: stop whatever's currently being recorded (a
-        no-op if nothing is) and start a fresh session right away -- same
-        clear-before-transcribing/checkpoint handling, sounds and all, as
-        a normal Start. Separate from the toggle hotkey on purpose: that
-        one alternates start/stop, this one is always "begin again now"."""
+        """The restart hotkey: only does anything while a transcription is
+        already running -- a no-op otherwise, it never itself starts one
+        from a standing stop. While one's active, it stops it and starts a
+        fresh session right away -- same clear-before-transcribing/checkpoint
+        handling, sounds and all, as a normal Start. Separate from the
+        toggle hotkey on purpose: that one alternates start/stop from either
+        state, this one only ever restarts an in-progress recording."""
+        if not self.transcriber.running():
+            return
         self.transcriber.stop()
         self._start_transcription()
 
