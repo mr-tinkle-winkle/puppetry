@@ -260,6 +260,14 @@ FASTCALL_SIG(py_speed) {
     Py_RETURN_NONE;
 }
 
+FASTCALL_SIG(py_checkpoint) {
+    ARGS;
+    if (!a.check_kwargs("checkpoint", {})) return nullptr;
+    if (nargs != 0) { PyErr_SetString(PyExc_TypeError, "checkpoint() takes no arguments"); return nullptr; }
+    checkpoint_fn(); // no-op -- see its comment in primitives.hpp
+    Py_RETURN_NONE;
+}
+
 FASTCALL_SIG(py_ignore) {
     ARGS;
     PyObject* o = a.get(0, "what");
@@ -316,7 +324,7 @@ FASTCALL_SIG(py_command) {
 static PyMethodDef kMethods[] = {
     FC("kd", py_kd), FC("ku", py_ku), FC("tap", py_tap), FC("combo", py_combo),
     FC("type", py_type), FC("move_mouse", py_move_mouse), FC("wheel", py_wheel),
-    FC("wait", py_wait), FC("speed", py_speed), FC("ignore", py_ignore),
+    FC("wait", py_wait), FC("speed", py_speed), FC("checkpoint", py_checkpoint), FC("ignore", py_ignore),
     FC("ignore_keys", py_ignore_keys), FC("actAs", py_act_as), FC("command", py_command),
     {nullptr, nullptr, 0, nullptr},
 };

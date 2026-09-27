@@ -142,6 +142,14 @@ in
         # Kernel timer slack 1ns for the daemon (main() also sets this
         # itself; belt and braces so it holds from the first instruction).
         TimerSlackNSec = 1;
+        # Permission to raise itself to a real-time scheduling policy, which
+        # it only does if "realtime_priority" is turned on in state.json
+        # (Settings -> Behavior). Granting the limit costs nothing on its
+        # own -- without the setting the daemon never asks. This is what
+        # stops another process stealing a timeslice mid-macro and
+        # stretching a wait by milliseconds; see Session 9 in the handoff
+        # for why the alternative (spinning earlier) measurably didn't work.
+        LimitRTPRIO = 10;
         RestartSec = 2;
       };
     };

@@ -134,6 +134,20 @@ class SettingsPage(PageBase):
         bl.addWidget(self.flat_accel)
         bl.addWidget(dim_label("Applies on the next daemon start (any Save restarts it). Turning it back "
                                "off leaves the setting in place -- change it in System Settings -> Mouse."))
+
+        self.realtime = CustomCheckBox("Real-time priority (steadier playback timing)")
+        self.realtime.setChecked(bool(model.state.get("realtime_priority", False)))
+        self.realtime.setToolTip("Asks the kernel to schedule the daemon as a real-time task, so another\n"
+                                 "process can't steal a timeslice mid-macro and stretch a wait by\n"
+                                 "milliseconds. Waits are already accurate to about a microsecond\n"
+                                 "typically -- this is about the occasional outlier.\n\n"
+                                 "Uses the gentlest real-time setting (SCHED_RR priority 1), and the\n"
+                                 "kernel still guarantees normal processes a share of the CPU, so a\n"
+                                 "runaway macro can't lock up the machine. Needs LimitRTPRIO in the\n"
+                                 "service unit (the NixOS module grants it); without permission the\n"
+                                 "daemon just logs that it couldn't and carries on as normal.")
+        self.realtime.toggled.connect(lambda on: model.set_pref("realtime_priority", on))
+        bl.addWidget(self.realtime)
         self.content_layout.addWidget(beh)
 
         # ------------------------------------------------------------ appearance

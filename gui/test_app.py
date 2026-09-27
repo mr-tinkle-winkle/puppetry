@@ -282,6 +282,44 @@ def main() -> int:
     else:
         print("SKIP transcriber process check (native/build not built)")
 
+    # Transcription start/finish sounds. Nothing is actually played here
+    # (no audio in the sandbox) -- what's checked is the wiring: the paths
+    # persist, the labels follow them, and a start/stop routes to the right
+    # cue. sound.play is stubbed so the checks don't depend on a player
+    # being installed.
+    import sound
+    real_play = sound.play
+    played = []
+    sound.play = lambda path: (played.append(path), None)[1]
+    check("sounds start out unset",
+          ed.sound_labels["start"].text() == "(none)" and ed.sound_labels["finish"].text() == "(none)")
+    ed._set_sound("start", "/tmp/ding.wav")
+    ed._set_sound("finish", "/tmp/done.mp3")
+    check("sound paths persist", cfg.load_state().get("transcribe_start_sound") == "/tmp/ding.wav"
+          and cfg.load_state().get("transcribe_finish_sound") == "/tmp/done.mp3")
+    check("label shows the file name, tooltip the full path",
+          ed.sound_labels["start"].text() == "ding.wav"
+          and ed.sound_labels["start"].toolTip() == "/tmp/ding.wav")
+    played.clear()
+    ed._transcribe_stopped("Stopped.")  # whatever the reason, the finish cue plays
+    check("finish sound plays when transcription stops", played == ["/tmp/done.mp3"])
+    played.clear()
+    ed._test_sound("start")
+    check("the test button plays the start sound", played == ["/tmp/ding.wav"])
+    # A cue that can't play is reported, never raised -- it must not get in
+    # the way of the thing it was announcing.
+    sound.play = lambda path: "No audio player found on PATH."
+    ed._transcribe_stopped("Stopped.")
+    check("an unplayable sound reports instead of raising",
+          "No audio player found" in ed.tr_status.text())
+    sound.play = real_play
+    check("a missing sound file is reported, not played", "not found" in (sound.play("/tmp/nope-does-not-exist.wav") or ""))
+    check("an empty path is a silent no-op", sound.play("") is None)
+    ed._set_sound("start", "")
+    ed._set_sound("finish", "")
+    check("clearing a sound empties it", ed.sound_labels["start"].text() == "(none)"
+          and cfg.load_state().get("transcribe_start_sound") == "")
+
     # "Ignore Puppetry" focus reporting: Qt already knows when our own
     # window is focused, so the helper is told over stdin instead of
     # spawning kdotool twice per poll to ask KWin. No process needed to
@@ -316,6 +354,67 @@ def main() -> int:
     ed.stop_threads()
     pump(300)
     check("hotkey listener stopped with the rest of the page's threads", ed._hotkey_listener is None)
+
+    # Restart-transcription hotkey: its own picker, own pref key, own
+    # listener -- deliberately independent of the toggle hotkey above.
+    check("restart key starts unset", ed.restart_label.text() == "(not set)")
+    ed._restart_key_found(34, "KEY_F10")
+    check("restart key label updates", ed.restart_label.text() == "KEY_F10")
+    check("restart key persists under its own pref, not transcribe_hotkey",
+          cfg.load_state().get("transcribe_restart_key") == "KEY_F10"
+          and cfg.load_state().get("transcribe_hotkey") == "KEY_F9")
+    ed._rearm_restart_key_listener()
+    check("restart key listener object created once a restart key + device paths exist",
+          ed._restart_key_listener is not None)
+    check("restart key listener is a separate object from the toggle hotkey's",
+          ed._restart_key_listener is not ed._hotkey_listener)
+    ed.stop_threads()
+    pump(300)
+    check("restart key listener also stopped by stop_threads", ed._restart_key_listener is None)
+    ed._restart_key_found(None, "")  # simulate "no key detected" (Esc during picking)
+    check("declining the restart key picker keeps the previous value", ed.restart_label.text() == "KEY_F10")
+
+    # Checkpoint key: its own picker/pref too, but no listener of its own --
+    # the transcriber process itself watches for it while recording.
+    check("checkpoint key starts unset", ed.checkpoint_label.text() == "(not set)")
+    ed._checkpoint_key_found(35, "KEY_F11")
+    check("checkpoint key label updates", ed.checkpoint_label.text() == "KEY_F11")
+    check("checkpoint key persists", cfg.load_state().get("transcribe_checkpoint_key") == "KEY_F11")
+    ed._checkpoint_key_found(None, "")
+    check("declining the checkpoint key picker keeps the previous value", ed.checkpoint_label.text() == "KEY_F11")
+
+    # "Clear macro before transcribing", checkpoint-aware: with no
+    # checkpoint() line, wipes everything (old behavior); with one, only
+    # what comes after the LAST checkpoint() is cleared, and the cursor
+    # lands right after it.
+    ed.tr_clear.setChecked(True)
+    ed.code.setPlainText("tap(KEY_A)\ntap(KEY_B)\n")
+    ed._apply_clear_before_transcribing()
+    check("no checkpoint(): clears the whole macro", ed.code.toPlainText() == "")
+    ed.code.setPlainText("tap(KEY_A)\ncheckpoint()\ntap(KEY_B)\ncheckpoint()\ntap(KEY_C)\n")
+    ed._apply_clear_before_transcribing()
+    check("with checkpoint(): keeps up to and including the LAST one",
+          ed.code.toPlainText() == "tap(KEY_A)\ncheckpoint()\ntap(KEY_B)\ncheckpoint()\n")
+    check("cursor moves to the end of the kept text", ed.code.textCursor().position() == len(ed.code.toPlainText()))
+    ed.tr_clear.setChecked(False)
+    ed.code.setPlainText("tap(KEY_A)\ncheckpoint()\ntap(KEY_B)\n")
+    ed._apply_clear_before_transcribing()
+    check("clear-before-transcribing off: code left untouched",
+          ed.code.toPlainText() == "tap(KEY_A)\ncheckpoint()\ntap(KEY_B)\n")
+
+    # Restart transcription: always stops whatever's running (harmless
+    # no-op if nothing was) and starts fresh -- distinct from the toggle,
+    # which alternates. No real devices here, so start() itself will
+    # fail past the device check; the point is stop() is called first.
+    ed.tr_clear.setChecked(False)
+    stopped_calls = []
+    ed.transcriber.stop = lambda: stopped_calls.append(True)
+    started_calls = []
+    ed._start_transcription = lambda: started_calls.append(True)
+    ed._restart_transcription()
+    check("restart calls stop() then starts fresh, in that order",
+          stopped_calls == [True] and started_calls == [True])
+
     editor_page.ask = lambda *a, **k: 1
     ed.request_close()
     pump(300)
@@ -357,6 +456,13 @@ def main() -> int:
     check("pointer-acceleration opt-out persists", cfg.load_state().get("disable_pointer_accel") is False)
     sp.flat_accel.setChecked(True)
     check("...and back on again", cfg.load_state().get("disable_pointer_accel") is True)
+
+    # Real-time priority: off by default (it needs a privilege the service
+    # unit has to grant), and opting in persists.
+    check("real-time priority defaults to off", not sp.realtime.isChecked())
+    sp.realtime.setChecked(True)
+    check("real-time priority opt-in persists", cfg.load_state().get("realtime_priority") is True)
+    sp.realtime.setChecked(False)
 
     # ------------------------------------------------------------ visualizer
     w.nav.button(app.PAGE_VISUALIZER).click()

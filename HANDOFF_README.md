@@ -545,13 +545,16 @@ order, now targeting the C++ daemon (`native/`) and the Qt GUI
   - `gui/input_tools.py` — combo recorder, device/key detection, mouse
     position readout (ports of the old GTK helpers; the Session 3
     `combo_recorder.py` reconstruction is gone).
-  - `gui/transcription.py` — runs `puppetry-transcribe`.
+  - `gui/transcription.py` — runs `puppetry-transcribe`, and reports
+    Puppetry's own window focus to it (Session 8).
   - `gui/reference.py` — function/simplified-name reference text.
   - `gui/puppetry_config.py` — on-disk config, control-socket client,
     helper-binary discovery ($PUPPETRY_BIN_DIR, then native/build, then
     $PATH), macro validation via `puppetry-daemon --check`.
-  - `gui/test_app.py` — 74 offscreen checks (`QT_QPA_PLATFORM=offscreen
+  - `gui/test_app.py` — 85 offscreen checks (`QT_QPA_PLATFORM=offscreen
     python3 gui/test_app.py`); uses the native binaries when built.
+  - `gui/sound.py` — plays the transcription start/finish cues via an
+    external player (Session 9).
   - `gui/ui_kit/` — the shared PySide6 theming kit (copy, not a shared
     package — see the guide for why). `gui/UI_THEMING_GUIDE.md` is its
     full spec; `gui/ui_kit_test_kit.py` is its own 26-check offscreen
@@ -858,6 +861,11 @@ Measured with `bench_cps` (now also benchmarks transcription):
 | transcribe, 60Hz mode | (never measured) | 27.8M frames/s |
 | transcribe, precise mode | (never measured) | 4.3M frames/s |
 
+Both columns were measured back-to-back in one sitting, which is the only
+way these numbers mean anything: the same unmodified binary re-run hours
+later reported 1.44M where it had reported 2.47M, purely from host load.
+Compare within a sitting, never across sessions.
+
 The tap path was already down to 0.40us/cycle after Session 4, so the few
 percent there is all that was left in it; **the real wins in this pass are
 the subprocess spawns that no longer happen**, which no benchmark here can
@@ -943,6 +951,195 @@ tens of milliseconds of fork/exec plus a KWin round-trip, each.
   (the `ignore_mutex` read per motion event, the thread-safe-static guard
   in `is_key_code()`), which isn't worth the regression risk against a
   working system.
+
+## Session 9 — transcription start/finish sounds, the real transcription inaccuracy, playback timing
+
+Verified: full native suite green (`test_core` 55, `test_transcriber` 28 ->
+**36** (+8), `test_timing` **47** (+1), `test_control_socket` 7,
+`test_python_embed` 8, `test_native_vm` 5, `test_mixed_calls` 2),
+`gui/test_app.py` **85/85** (+11).
+
+### Transcription start/finish sounds (new)
+
+Two optional sound files under Transcribe Inputs, played when
+transcription starts and when it stops — however it stops (the button, the
+hotkey, the abort key, a disconnected device), since the point is knowing
+what happened when the hotkey was pressed from another window with the
+status text out of sight. Each row has Choose… / ▶ (test) / ✕ (clear), and
+paths persist as `transcribe_start_sound` / `transcribe_finish_sound`.
+
+`gui/sound.py` plays them by spawning a player detached, **not** via
+QtMultimedia: QSoundEffect is wav-only and QMediaPlayer needs the FFmpeg
+backend plugins, which on NixOS are a separate output that may not be in
+the wrapped environment — a missing one fails at runtime with nothing
+useful to say. A binary on PATH can be checked for up front and reported
+honestly (the section's help text names the player it found, or what to
+install). Tries mpv, ffplay, mpg123 first (these handle mp3), then paplay
+and aplay for wav/ogg/flac. A cue that can't play sets the status line and
+is otherwise ignored — it must never get in the way of the thing it was
+announcing.
+
+### The occasional transcription inaccuracy: found, and it was real
+
+**The keyboard and the mouse are separate file descriptors, and `poll()`
+returns as soon as either is readable — but events were only sorted by
+timestamp within a single wakeup.** So when the mouse's fd became readable
+a fraction of a millisecond after the keyboard's, its events could carry an
+*earlier* kernel timestamp and still be fed second. `TranscriberCore`
+refuses to let its clock run backwards, so instead of a negative gap the
+gap was silently clamped to zero: a click and a keypress half a
+millisecond apart came out **in the wrong order, back-to-back**. Rare,
+input-timing dependent, and exactly as subtle as "slightly inaccurate on
+occasion". Reading at most 64 events per device per wakeup made it worse by
+splitting bursts across wakeups.
+
+Fixed with `EventReorderQueue` (`transcriber.hpp`): events are held for a
+3ms window before being fed, so anything that was going to arrive out of
+order has arrived, and then released in true timestamp order. Points worth
+keeping in mind:
+
+- **Recorded timing is completely unaffected.** Every gap still comes from
+  the kernel timestamp the event was already carrying; the window only
+  delays when a line is *written*, and the GUI already batches text into
+  the editor every 50ms.
+- The sort is **stable**, because one hardware frame emits several events
+  sharing a timestamp and their order has to survive.
+- `poll()`'s timeout is now shortened to the moment the oldest held event
+  comes due, or a keystroke would sit in the queue for the full 250ms.
+- Each ready device is now drained completely (the fds are non-blocking)
+  rather than 64 events at a time.
+- Everything still queued is flushed on exit — the last keystroke of a
+  session is usually the one that ended it.
+- 8 new `test_transcriber` checks, including the exact inversion above
+  proven end-to-end: the click lands first with its real 500us gap intact.
+
+### Playback consistency: what the measurement actually said
+
+`test_timing` now reports the **distribution**, not just the median, which
+is what "slightly inconsistent" is about. Current numbers on this sandbox:
+
+```
+wait(1ms) lateness over 2000 waits: p50 +0.1us, p99 ~80-330us, worst ~2-14ms
+```
+
+The median has been fine since Session 4. The tail is the problem.
+
+**An adaptive spin margin was implemented, measured, and reverted.** The
+theory was sound: the margin decides how early we stop sleeping and start
+spinning, a fixed 100us is too small on a machine whose CPU takes a few
+hundred microseconds to leave a deep idle state, and the p99 sitting right
+around 100-170us looks exactly like that. Measuring the real overshoot and
+growing the margin to match *should* have cut the tail. It did the
+opposite — p99 went from ~120us to ~270us and the no-drift check started
+failing — because most of the tail isn't wakeup latency at all, it's the
+scheduler taking the CPU away. Spinning earlier can't prevent that, and the
+extra spinning causes more preemption, lengthening the very tail it was
+meant to cut. Filtering outliers out of the estimate didn't rescue it
+either. The reasoning and the numbers are recorded in a comment above the
+margin constants in `primitives.cpp` — **don't re-litigate it without a
+before/after tail measurement**, which `test_timing` now prints.
+
+What does address multi-millisecond preemption is scheduling priority, so
+that's what shipped, **opt-in**: `"realtime_priority": true` in state.json
+or Settings → Behavior → "Real-time priority (steadier playback timing)".
+`main.cpp` takes SCHED_RR priority 1 — the gentlest real-time setting
+there is: it round-robins with other RT tasks rather than monopolizing, and
+the kernel's own RT throttling still guarantees normal processes CPU time,
+so **a runaway macro can't lock the machine up**. Threads inherit their
+creator's policy, so doing it once at startup covers macro threads, device
+watchers and the control socket (which makes the abort hotkey *more*
+responsive too). It needs `LimitRTPRIO`, which `module.nix` now grants —
+granting the limit costs nothing on its own, since without the setting the
+daemon never asks. Without permission it logs why and carries on. **Not
+measurable in this sandbox** (no privileges), so its effect on a real
+desktop is reasoned, not observed.
+
+Also fixed while in there: the no-drift check was a single timed run with a
+2.5% bound, which flaked whenever the host stole a timeslice — it now takes
+the **median of 5 runs** like the neighbouring checks already did, keeping
+the bound tight enough to still catch anchoring breaking without the suite
+crying wolf. 8 consecutive runs clean, drift median pinned at 0.2001s.
+
+### Still worth knowing
+
+- If a recording was made with **set positions** on, playback timing is
+  dominated by kdotool, not by any of the above: every motion line is an
+  absolute move, and each one costs a subprocess round-trip. Session 8's
+  cursor cache halved that and Session 8's "deliberately NOT done" section
+  describes the adaptive dead reckoning that would mostly eliminate it.
+  That remains the highest-value playback work left.
+
+## Session 10 — transcription checkpoints, restart-transcription hotkey
+
+Verified: full native suite green (`test_core` 55, `test_transcriber` 36 ->
+**41** (+5), `test_python_embed` 8 -> **9** (+1), `test_native_vm` 5 ->
+**7** (+2), `test_timing` 47, `test_control_socket` 7, `test_mixed_calls`
+2), `gui/test_app.py` 85 -> **101** (+16).
+
+### `checkpoint()` (new primitive) + checkpoint key
+
+A genuine no-op: `checkpoint_fn()` in `primitives.hpp` does nothing at all,
+registered identically in both execution paths (`native_vm.cpp`'s
+`compile_op()`, `python_embed.cpp`'s `py_checkpoint`/`FC("checkpoint", ...)`)
+so it behaves the same whether the macro's "Run as embedded Python" is on
+or off. It exists purely as a text marker for the editor (below).
+
+A new "Checkpoint key" under Transcribe Inputs, picked the same way as the
+ping key (its own `DetectKey`, no listener needed — only the transcriber
+process watches for it while actually recording). Pressing it while
+transcribing inserts a literal `checkpoint()` line at that moment
+(`transcriber.cpp`'s `feed()`, alongside the existing ping/hotkey/restart
+filtering; `flush_motion()` runs first so pending mouse motion still lands
+in front of it, same as any other keypress) — but, like the hotkey, the
+keypress that triggers it never itself shows up in the transcript. Persists
+as `transcribe_checkpoint_key`; passed to `puppetry-transcribe` via the new
+`--checkpoint-key` flag; `TranscribeOptions::checkpoint_code` (-1 = none).
+
+### "Clear macro before transcribing" is now checkpoint-aware
+
+Previously this option always wiped the whole code box at the start of
+every transcription session. Now (`editor_page.py`'s
+`_apply_clear_before_transcribing()`, called from `_start_transcription()`
+right before spawning the transcriber): it searches for the **last**
+`checkpoint()` line in the current code. If none exists, behavior is
+unchanged — the box is cleared entirely. If one exists, everything up to
+and including that line is **kept**, only what comes after it is cleared,
+and the cursor is moved to the end of the kept text so the new recording's
+output lands right after the checkpoint instead of wherever the cursor
+happened to be. `checkpoint()` does nothing at runtime either way — this
+editor behavior is its only purpose. Drop one in by hand, or use the
+checkpoint key while transcribing, to mark "keep everything before this
+point, re-record everything after it."
+
+### Restart-transcription hotkey (new, separate from the toggle hotkey)
+
+A second, independent hotkey under Transcribe Inputs ("Restart hotkey"),
+its own `DetectKey` picker, its own persisted pref
+(`transcribe_restart_key`), its own `HotkeyListener`
+(`_rearm_restart_key_listener()`/`_restart_key_pressed()`, armed on
+`showEvent()` and torn down in `stop_threads()` exactly like the existing
+toggle hotkey's listener, but as a distinct object — `_restart_key_listener`,
+never `_hotkey_listener`). Pressing it always stops whatever's currently
+being recorded (a harmless no-op if nothing is) and immediately starts a
+fresh session — same clear-before-transcribing/checkpoint handling, same
+sounds — as opposed to the toggle hotkey, which alternates start/stop.
+`_restart_transcription()` in `editor_page.py` is just `stop()` then
+`_start_transcription()`. On the native side it's filtered exactly like the
+toggle hotkey (`transcriber.cpp`, `TranscribeOptions::restart_code`, CLI
+flag `--restart-key`) — consumed, never transcribed, deliberately a
+separate option field from `hotkey_code` per the requirement that the two
+hotkeys be independently bindable.
+
+### Verified vs. not verified
+
+Everything above is covered by the native (`test_native_vm.cpp`,
+`test_python_embed.cpp`, `test_transcriber.cpp`) and GUI
+(`gui/test_app.py`) suites listed at the top of this section, run clean.
+Not independently verified on real hardware in this sandbox: the actual
+feel of pressing a real checkpoint/restart key mid-recording (no input
+devices available here) — the logic paths are exercised directly instead
+(feeding synthetic `RawEvent`s to `TranscriberCore`/`Transcriber` for the
+native side, calling the handler methods directly for the GUI side).
 
 ## Build/run/environment
 

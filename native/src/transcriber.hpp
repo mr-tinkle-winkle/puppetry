@@ -32,11 +32,91 @@
 //     the original cursor path, while resampled (merged) frames get
 //     accelerated differently. Costs CPU on playback (spin-waits) and
 //     produces ~2 lines per mouse frame.
+#include <algorithm>
 #include <functional>
 #include <string>
+#include <vector>
 #include "evdev_device.hpp"
 
 namespace puppetry {
+
+enum class Source { Keyboard, Mouse, Both };
+
+// Merges the keyboard's and the mouse's event streams into ONE correctly
+// ordered stream before either reaches TranscriberCore.
+//
+// The two devices are separate file descriptors, and poll() returns as
+// soon as EITHER is readable -- so sorting each wakeup's harvest by
+// timestamp (which is what this used to do) only orders events that
+// happened to arrive together. When the mouse's fd became readable a
+// fraction of a millisecond after the keyboard's, its events could carry
+// an EARLIER kernel timestamp and still be fed second. TranscriberCore
+// refuses to let its clock run backwards, so the gap between them got
+// clamped to zero: a click and a keypress half a millisecond apart came
+// out in the wrong order, back-to-back. Occasional, and exactly as subtle
+// as "transcription is slightly inaccurate sometimes".
+//
+// The fix is to hold events briefly before feeding them, so anything that
+// was going to arrive out of order has arrived. This delays when a line is
+// WRITTEN by the window, and changes recorded timing not at all -- every
+// gap comes from the kernel timestamp the event was already carrying.
+class EventReorderQueue {
+public:
+    // How long to hold events. Needs to exceed the skew between the two
+    // fds becoming readable (poll wakeup jitter -- well under a
+    // millisecond in practice, a couple of milliseconds on a loaded
+    // machine). Imperceptible either way: the GUI only inserts text into
+    // the editor every 50ms anyway.
+    static constexpr long long kWindowUs = 3000;
+
+    struct Item {
+        RawEvent ev;
+        Source role;
+    };
+
+    void push(Source role, const RawEvent& ev) { items_.push_back({ev, role}); }
+    bool empty() const { return items_.empty(); }
+    size_t size() const { return items_.size(); }
+
+    // Oldest queued timestamp. Only meaningful when !empty(); the caller
+    // uses it to work out how long it can afford to sleep.
+    long long oldest_us() const {
+        long long oldest = items_.front().ev.time_us;
+        for (const auto& it : items_) oldest = std::min(oldest, it.ev.time_us);
+        return oldest;
+    }
+
+    // Hands every event stamped at or before cutoff_us to fn(role, ev),
+    // oldest first, and forgets them.
+    template <class F>
+    void drain_until(long long cutoff_us, F&& fn) {
+        sort_pending();
+        size_t n = 0;
+        while (n < items_.size() && items_[n].ev.time_us <= cutoff_us) {
+            fn(items_[n].role, items_[n].ev);
+            ++n;
+        }
+        items_.erase(items_.begin(), items_.begin() + (long)n);
+    }
+
+    // Everything still queued, whatever its age -- for shutdown, so the
+    // last few events of a session aren't dropped.
+    template <class F>
+    void drain_all(F&& fn) {
+        sort_pending();
+        for (const auto& it : items_) fn(it.role, it.ev);
+        items_.clear();
+    }
+
+private:
+    void sort_pending() {
+        // STABLE: events sharing a timestamp (one hardware frame emits
+        // several) must keep the order the device reported them in.
+        std::stable_sort(items_.begin(), items_.end(),
+                         [](const Item& a, const Item& b) { return a.ev.time_us < b.ev.time_us; });
+    }
+    std::vector<Item> items_;
+};
 
 struct TranscribeOptions {
     bool keyboard = false;       // transcribe KEY_* presses
@@ -49,11 +129,11 @@ struct TranscribeOptions {
     int ping_code = 110;         // KEY_INSERT
     int abort_code = -1;         // daemon's abort key -- pressing it ends the session (-1 = none)
     int hotkey_code = -1;        // the editor's start/stop transcribe toggle (-1 = none)
+    int restart_code = -1;       // the editor's stop-then-start-fresh toggle (-1 = none)
+    int checkpoint_code = -1;    // inserts a literal checkpoint() line (-1 = none)
     bool ignore_alt_tab = false; // drop Alt+Tab (both keys) from the transcript entirely
     bool ignore_puppetry = false; // mute everything while Puppetry itself is the focused window
 };
-
-enum class Source { Keyboard, Mouse, Both };
 
 class TranscriberCore {
 public:

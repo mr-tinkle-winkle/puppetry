@@ -19,6 +19,7 @@
 //       [--transcribe-keyboard] [--transcribe-mouse] [--raw]
 //       [--set-positions] [--same-start] [--raw-hz N] [--precise]
 //       [--ping-key KEY_NAME] [--abort-key KEY_NAME] [--hotkey-key KEY_NAME]
+//       [--restart-key KEY_NAME] [--checkpoint-key KEY_NAME]
 //       [--ignore-alt-tab] [--ignore-puppetry]
 //
 // Device I/O only; all transcription logic is TranscriberCore
@@ -98,6 +99,16 @@ int main(int argc, char** argv) {
             int code;
             if (!resolve_key_name(name, code)) { std::fprintf(stderr, "unknown hotkey %s\n", name.c_str()); return 64; }
             opts.hotkey_code = code;
+        } else if (a == "--restart-key") {
+            std::string name = next();
+            int code;
+            if (!resolve_key_name(name, code)) { std::fprintf(stderr, "unknown restart key %s\n", name.c_str()); return 64; }
+            opts.restart_code = code;
+        } else if (a == "--checkpoint-key") {
+            std::string name = next();
+            int code;
+            if (!resolve_key_name(name, code)) { std::fprintf(stderr, "unknown checkpoint key %s\n", name.c_str()); return 64; }
+            opts.checkpoint_code = code;
         } else if (a == "--ignore-alt-tab") opts.ignore_alt_tab = true;
         else if (a == "--ignore-puppetry") opts.ignore_puppetry = true;
         else {
@@ -162,8 +173,8 @@ int main(int argc, char** argv) {
     pfds.push_back({opts.ignore_puppetry ? focus_pipe[0] : -1, POLLIN, 0}); // fd -1: poll() ignores it
     for (auto& d : devs) pfds.push_back({d.dev->fd(), POLLIN, 0});
 
-    struct Tagged { RawEvent ev; Source role; };
-    std::vector<Tagged> batch;
+    EventReorderQueue queue; // merges the two devices into one ordered stream
+    auto feed = [&](Source role, const RawEvent& ev) { core.feed(role, ev); };
     RawEvent buf[64];
     bool abort_hit = false;
 
@@ -198,7 +209,16 @@ int main(int argc, char** argv) {
             }).detach();
         }
 
-        int rc = poll(pfds.data(), pfds.size(), 250);
+        // Don't sleep past the moment the oldest held-back event is due to
+        // be released (see EventReorderQueue) -- otherwise a keystroke
+        // could sit in the queue for the full poll timeout before being
+        // written out.
+        int timeout_ms = 250;
+        if (!queue.empty()) {
+            long long due_us = queue.oldest_us() + EventReorderQueue::kWindowUs - now;
+            timeout_ms = due_us <= 0 ? 0 : (int)std::min<long long>(250, (due_us + 999) / 1000);
+        }
+        int rc = poll(pfds.data(), pfds.size(), timeout_ms);
         if (rc < 0) { if (errno == EINTR) continue; break; }
 
         if (pfds[0].revents & (POLLIN | POLLHUP)) {
@@ -236,20 +256,22 @@ int main(int argc, char** argv) {
             if (read(focus_pipe[0], &r, sizeof(r)) == (ssize_t)sizeof(r)) core.set_puppetry_focused(r.focused != 0, r.checked_at_us);
         }
 
-        // Gather everything ready on every device, then merge by kernel
-        // timestamp so keyboard and mouse events interleave in true order
-        // (a stable sort keeps each device's frames contiguous).
-        batch.clear();
+        // Drain every ready device completely (the fds are non-blocking, so
+        // a short read just means empty), queue it all, then release
+        // whatever has aged past the reorder window in true timestamp
+        // order. Draining fully also keeps a burst from being split across
+        // wakeups, which is half of what made the streams interleave badly.
         bool device_gone = false;
         for (size_t i = 3; i < pfds.size(); ++i) {
             if (!(pfds[i].revents & (POLLIN | POLLERR | POLLHUP))) continue;
-            int n = devs[i - 3].dev->read_events(buf, 64);
-            if (n < 0) { device_gone = true; continue; }
-            for (int k = 0; k < n; ++k) batch.push_back({buf[k], devs[i - 3].role});
+            for (int round = 0; round < 32; ++round) { // cap: don't starve the rest of the loop
+                int n = devs[i - 3].dev->read_events(buf, 64);
+                if (n < 0) { device_gone = true; break; }
+                for (int k = 0; k < n; ++k) queue.push(devs[i - 3].role, buf[k]);
+                if (n < 64) break; // that was everything
+            }
         }
-        std::stable_sort(batch.begin(), batch.end(),
-                         [](const Tagged& a, const Tagged& b) { return a.ev.time_us < b.ev.time_us; });
-        for (const auto& t : batch) core.feed(t.role, t.ev);
+        queue.drain_until(now_monotonic_us() - EventReorderQueue::kWindowUs, feed);
 
         if (!out_buf.empty()) {
             fwrite(out_buf.data(), 1, out_buf.size(), stdout);
@@ -262,6 +284,16 @@ int main(int argc, char** argv) {
         // written out, so a "stop" can't drop input that was already
         // sitting in the device buffer alongside it.
         if (stdin_closed) break;
+    }
+
+    // Whatever is still inside the reorder window belongs in the
+    // transcript too -- the last keystroke of a session is usually the one
+    // that ended it.
+    queue.drain_all(feed);
+    if (!out_buf.empty()) {
+        fwrite(out_buf.data(), 1, out_buf.size(), stdout);
+        fflush(stdout);
+        out_buf.clear();
     }
     return abort_hit ? 3 : 0;
 }

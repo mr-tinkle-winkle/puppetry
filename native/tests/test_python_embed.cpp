@@ -67,6 +67,17 @@ int main() {
     // since this is a real sleep, not a mocked clock.
     CHECK(elapsed > 0.03 && elapsed < 0.3);
 
+    // checkpoint() -- same no-op contract as the native path, exercised
+    // through the embedded interpreter this time (it's a real Python
+    // callable, not compiled-out).
+    {
+        json checkpoint_macro = {{"id", "m9"}, {"name", "Checkpoint Py"},
+                                  {"code", "kd(KEY_A)\ncheckpoint()\nku(KEY_A)\n"}};
+        auto m = compile_python_macro(checkpoint_macro, registry, {});
+        m->run(rt, registry, {});
+        CHECK(rt.synth_held.empty());
+    }
+
     // A macro with a compile-time error (bad arguments() usage) surfaces
     // as MacroCompileError, same as the native path.
     bool threw = false;

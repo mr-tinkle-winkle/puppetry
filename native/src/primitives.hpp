@@ -18,6 +18,15 @@ void ku(Runtime& rt, int code);
 void tap(Runtime& rt, int code, double time_ = 0.1);
 void combo_fn(Runtime& rt, const std::vector<int>& keys, double time_ = 0.1);
 
+// Does nothing at all when a macro runs it -- no argument, no runtime
+// effect, not even a check_abort(). It exists purely as a text marker: the
+// editor's "Clear macro before transcribing" option looks for the last
+// checkpoint() line in the code and, when one's there, clears only what
+// comes after it instead of the whole macro (see gui/editor_page.py and
+// the "Checkpoint key" transcription option that inserts one). Taking a
+// checkpoint() line out of a macro changes nothing about what it does.
+inline void checkpoint_fn() {}
+
 void wheel(Runtime& rt, int amount);
 
 // precise=false: chunked time.sleep()-equivalent, checked for abort

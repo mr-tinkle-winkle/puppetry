@@ -2,9 +2,12 @@
 // "__main__"` block and main(). Runs as the systemd --user service;
 // the `puppetry` CLI/GUI (PySide6, see gui/) talks to it purely over
 // the control socket and never links against this binary.
+#include <cerrno>
 #include <cstdio>
+#include <cstring>
 #include <iostream>
 #include <iterator>
+#include <sched.h>
 #include <sys/prctl.h>
 #include <thread>
 #include <vector>
@@ -126,6 +129,38 @@ int main(int argc, char** argv) {
 
     ensure_config_exists();
     json state = load_state();
+
+    // Optional real-time scheduling. Threads inherit their creator's policy,
+    // so doing this here covers every macro thread, the device watchers and
+    // the control socket.
+    //
+    // What it's for: wait() already lands within a microsecond of its
+    // deadline at the median, but the TAIL is what gets noticed as playback
+    // being slightly inconsistent -- and those outliers are whole
+    // timeslices lost to other processes, which no amount of clever
+    // sleeping can recover. Real-time priority is the only thing that
+    // actually addresses them (Session 9 in the handoff records the
+    // measurement that ruled out the alternative).
+    //
+    // SCHED_RR at priority 1 deliberately: the gentlest real-time setting
+    // there is. It round-robins with any other RT task rather than
+    // monopolizing, and the kernel's RT throttling (sched_rt_runtime_us,
+    // 95% by default) guarantees normal processes still get time even if a
+    // macro spins forever -- so a runaway macro can't lock the machine up.
+    // Off by default, and silently skipped when the process isn't allowed
+    // to ask (needs LimitRTPRIO from the service unit, which module.nix
+    // grants).
+    if (json_bool(state, "realtime_priority", false)) {
+        struct sched_param sp {};
+        sp.sched_priority = 1;
+        if (sched_setscheduler(0, SCHED_RR, &sp) == 0) {
+            std::printf("Scheduling: SCHED_RR priority 1 (real-time playback timing)\n");
+        } else {
+            std::fprintf(stderr, "Couldn't take real-time priority (%s) -- timing will be "
+                                  "slightly less consistent under load. Needs LimitRTPRIO in the "
+                                  "service unit.\n", strerror(errno));
+        }
+    }
 
     int abort_code;
     {

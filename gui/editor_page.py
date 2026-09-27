@@ -13,14 +13,16 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont, QKeyEvent, QPalette, QWheelEvent
 from PySide6.QtWidgets import (
-    QComboBox, QHBoxLayout, QLabel, QPlainTextEdit, QSplitter, QVBoxLayout, QWidget,
+    QComboBox, QFileDialog, QHBoxLayout, QLabel, QPlainTextEdit, QSplitter, QVBoxLayout, QWidget,
 )
 
 import puppetry_config as cfg
+import sound
 from input_tools import ComboRecorder, DetectKey, HotkeyListener, MousePositionPoller, resolve_key_code
 from model import AppModel
 from reference import DICTIONARY_TEXT, alias_targets, simplified_names_reference_text
@@ -92,8 +94,11 @@ class MacroEditorPage(QWidget):
         self._recorder: ComboRecorder | None = None
         self._ping_detect: DetectKey | None = None
         self._hotkey_detect: DetectKey | None = None
+        self._restart_key_detect: DetectKey | None = None
+        self._checkpoint_key_detect: DetectKey | None = None
         self._poller: MousePositionPoller | None = None
         self._hotkey_listener: HotkeyListener | None = None
+        self._restart_key_listener: HotkeyListener | None = None
         self.transcriber = TranscriptionController(self)
         theme = Theme()
         self._theme = theme
@@ -233,6 +238,61 @@ class MacroEditorPage(QWidget):
         col.addWidget(dim_label("While this page is open, pressing this key starts/stops transcribing (with "
                                 "whatever's checked above) -- never itself recorded. The abort key always stops "
                                 "transcribing too, from anywhere."))
+        restart_row = QHBoxLayout()
+        restart_row.addWidget(QLabel("Restart hotkey"))
+        self.restart_label = QLabel()
+        self.restart_label.setFont(QFont("monospace"))
+        restart_row.addWidget(self.restart_label, stretch=1)
+        self.restart_btn = CustomButton("Change")
+        self.restart_btn.clicked.connect(self._change_restart_key)
+        restart_row.addWidget(self.restart_btn)
+        col.addLayout(restart_row)
+        col.addWidget(dim_label("Separate from the toggle hotkey above: this one always stops whatever's "
+                                "currently being recorded (if anything) and starts a fresh one right away, "
+                                "rather than alternating start/stop -- handy for redoing a take without "
+                                "reaching for the mouse. Never itself recorded."))
+        checkpoint_row = QHBoxLayout()
+        checkpoint_row.addWidget(QLabel("Checkpoint key"))
+        self.checkpoint_label = QLabel()
+        self.checkpoint_label.setFont(QFont("monospace"))
+        checkpoint_row.addWidget(self.checkpoint_label, stretch=1)
+        self.checkpoint_btn = CustomButton("Change")
+        self.checkpoint_btn.clicked.connect(self._change_checkpoint_key)
+        checkpoint_row.addWidget(self.checkpoint_btn)
+        col.addLayout(checkpoint_row)
+        col.addWidget(dim_label("Inserts a checkpoint() line -- it does nothing when the macro runs, but "
+                                "\"Clear macro before transcribing\" above will only clear what comes AFTER "
+                                "the last checkpoint() instead of the whole macro, and the next recording "
+                                "starts right after it. Drop one in by hand, or press this key while "
+                                "transcribing."))
+
+        # Audible cues: handy when transcription is started/stopped by the
+        # hotkey from another window, where there's no status text to see.
+        self.sound_labels: dict[str, QLabel] = {}
+        for key, caption in (("start", "Start sound"), ("finish", "Finish sound")):
+            row = QHBoxLayout()
+            row.addWidget(QLabel(caption))
+            lbl = QLabel()
+            lbl.setFont(QFont("monospace"))
+            lbl.setMinimumWidth(10)
+            row.addWidget(lbl, stretch=1)
+            self.sound_labels[key] = lbl
+            pick = CustomButton("Choose…")
+            pick.clicked.connect(lambda _=False, k=key: self._choose_sound(k))
+            row.addWidget(pick)
+            test = CustomButton("▶")
+            test.setToolTip("Play it now")
+            test.clicked.connect(lambda _=False, k=key: self._test_sound(k))
+            row.addWidget(test)
+            clear = CustomButton("✕")
+            clear.setToolTip("No sound")
+            clear.clicked.connect(lambda _=False, k=key: self._set_sound(k, ""))
+            row.addWidget(clear)
+            col.addLayout(row)
+        col.addWidget(dim_label("Optional. Played when transcription starts and when it stops -- however it "
+                                "stops (the button, the hotkey, the abort key, a disconnected device). "
+                                + sound.describe_players()))
+
         tr_row = QHBoxLayout()
         self.tr_btn = CustomButton("Start Transcribing")
         self.tr_btn.clicked.connect(self._transcribe_clicked)
@@ -255,6 +315,10 @@ class MacroEditorPage(QWidget):
         self.tr_hz.setValue(float(st.get("transcribe_raw_hz", 60)))
         self.ping_label.setText(st.get("transcribe_ping_key") or "KEY_INSERT")
         self.hotkey_label.setText(st.get("transcribe_hotkey") or "(not set)")
+        self.restart_label.setText(st.get("transcribe_restart_key") or "(not set)")
+        self.checkpoint_label.setText(st.get("transcribe_checkpoint_key") or "(not set)")
+        for key in ("start", "finish"):
+            self._show_sound(key)
         self._sync_transcribe_enabled()
         for cb, key in ((self.tr_kb, "transcribe_keyboard"), (self.tr_mouse, "transcribe_mouse"),
                         (self.tr_raw, "transcribe_raw"), (self.tr_setpos, "transcribe_setpos"),
@@ -457,6 +521,7 @@ class MacroEditorPage(QWidget):
             self._poller.position.connect(self.mouse_pos.setText)
             self._poller.start()
         self._restart_hotkey_listener()
+        self._rearm_restart_key_listener()
 
     def hideEvent(self, event) -> None:
         super().hideEvent(event)
@@ -471,6 +536,10 @@ class MacroEditorPage(QWidget):
             self._hotkey_listener.stop()
             self._hotkey_listener.wait(500)
             self._hotkey_listener = None
+        if self._restart_key_listener is not None:
+            self._restart_key_listener.stop()
+            self._restart_key_listener.wait(500)
+            self._restart_key_listener = None
         self.transcriber.stop()
 
     def _restart_hotkey_listener(self) -> None:
@@ -495,6 +564,28 @@ class MacroEditorPage(QWidget):
 
     def _hotkey_pressed(self) -> None:
         self._transcribe_clicked()
+
+    def _rearm_restart_key_listener(self) -> None:
+        """Same lifecycle as _restart_hotkey_listener() above, but for the
+        SEPARATE restart-transcription key -- its own listener, watching
+        its own code, independent of the toggle hotkey's listener."""
+        if self._restart_key_listener is not None:
+            self._restart_key_listener.stop()
+            self._restart_key_listener.wait(500)
+            self._restart_key_listener = None
+        code = resolve_key_code(self.model.state.get("transcribe_restart_key"))
+        if code is None:
+            return
+        kb, _ = self.model.device("keyboard")
+        mouse, _ = self.model.device("mouse")
+        if not kb and not mouse:
+            return
+        self._restart_key_listener = HotkeyListener(kb, mouse, code, self)
+        self._restart_key_listener.pressed.connect(self._restart_key_pressed)
+        self._restart_key_listener.start()
+
+    def _restart_key_pressed(self) -> None:
+        self._restart_transcription()
 
     # ------------------------------------------------------------------ combo
 
@@ -566,6 +657,40 @@ class MacroEditorPage(QWidget):
         if self.transcriber.running():
             self.transcriber.stop()
             return
+        self._start_transcription()
+
+    def _restart_transcription(self) -> None:
+        """The restart hotkey: stop whatever's currently being recorded (a
+        no-op if nothing is) and start a fresh session right away -- same
+        clear-before-transcribing/checkpoint handling, sounds and all, as
+        a normal Start. Separate from the toggle hotkey on purpose: that
+        one alternates start/stop, this one is always "begin again now"."""
+        self.transcriber.stop()
+        self._start_transcription()
+
+    def _apply_clear_before_transcribing(self) -> None:
+        """"Clear macro before transcribing": normally wipes the whole
+        code box. But if a checkpoint() line is anywhere in the code, that
+        line and everything before it survive -- only what comes AFTER the
+        LAST checkpoint() is cleared -- and the cursor moves to right after
+        it, so the new recording starts there instead of wherever the
+        cursor happened to be. checkpoint() itself does nothing when the
+        macro runs (see its docstring); this is its only purpose."""
+        if not self.tr_clear.isChecked():
+            return
+        text = self.code.toPlainText()
+        idx = text.rfind("checkpoint()")
+        if idx == -1:
+            self.code.setPlainText("")
+            return
+        end = text.find("\n", idx)
+        keep = text[:end + 1] if end != -1 else text
+        self.code.setPlainText(keep)
+        cursor = self.code.textCursor()
+        cursor.movePosition(cursor.MoveOperation.End)
+        self.code.setTextCursor(cursor)
+
+    def _start_transcription(self) -> None:
         kb_on, mouse_on = self.tr_kb.isChecked(), self.tr_mouse.isChecked()
         if not kb_on and not mouse_on:
             self.tr_status.setText("Check Transcribe Keyboard and/or Transcribe Mouse first.")
@@ -575,8 +700,7 @@ class MacroEditorPage(QWidget):
         if (kb_on and not kb) or (mouse_on and not mouse):
             self.tr_status.setText("Set a keyboard/mouse device in Settings first.")
             return
-        if self.tr_clear.isChecked():
-            self.code.setPlainText("")
+        self._apply_clear_before_transcribing()
         err = self.transcriber.start(
             keyboard_path=kb, mouse_path=mouse, transcribe_keyboard=kb_on, transcribe_mouse=mouse_on,
             raw=self.tr_raw.isChecked(), set_positions=self.tr_setpos.isChecked(),
@@ -584,6 +708,8 @@ class MacroEditorPage(QWidget):
             precise=self.tr_precise.isChecked(), ping_key=self.ping_label.text(),
             abort_key=self.model.state.get("abort_key") or "KEY_PAUSE",
             hotkey_key=self.model.state.get("transcribe_hotkey") or None,
+            restart_key=self.model.state.get("transcribe_restart_key") or None,
+            checkpoint_key=self.model.state.get("transcribe_checkpoint_key") or None,
             ignore_alt_tab=self.tr_ignore_alttab.isChecked(),
             ignore_puppetry=self.tr_ignore_puppetry.isChecked())
         if err:
@@ -591,6 +717,7 @@ class MacroEditorPage(QWidget):
             return
         self.tr_btn.setText("Stop Transcribing")
         self.tr_status.setText("Transcribing… inserting code at your cursor position.")
+        self._play_sound("start")
 
     def _insert_transcribed(self, text: str) -> None:
         self.code.textCursor().insertText(text)
@@ -599,6 +726,44 @@ class MacroEditorPage(QWidget):
     def _transcribe_stopped(self, msg: str) -> None:
         self.tr_btn.setText("Start Transcribing")
         self.tr_status.setText(msg)
+        self._play_sound("finish")
+
+    # -- transcription start/finish sounds
+    def _sound_key(self, which: str) -> str:
+        return f"transcribe_{which}_sound"
+
+    def _show_sound(self, which: str) -> None:
+        path = self.model.state.get(self._sound_key(which)) or ""
+        label = self.sound_labels[which]
+        label.setText(os.path.basename(path) if path else "(none)")
+        label.setToolTip(path)
+
+    def _set_sound(self, which: str, path: str) -> None:
+        self.model.set_pref(self._sound_key(which), path)
+        self._show_sound(which)
+
+    def _choose_sound(self, which: str) -> None:
+        start_dir = os.path.dirname(self.model.state.get(self._sound_key(which)) or "") or os.path.expanduser("~")
+        path, _ = QFileDialog.getOpenFileName(self, f"Sound to play when transcription {'starts' if which == 'start' else 'stops'}",
+                                              start_dir, sound.AUDIO_FILTER)
+        if path:
+            self._set_sound(which, path)
+
+    def _test_sound(self, which: str) -> None:
+        path = self.model.state.get(self._sound_key(which)) or ""
+        if not path:
+            self.tr_status.setText(f"No {which} sound chosen yet.")
+            return
+        err = sound.play(path)
+        if err:
+            self.tr_status.setText(err)
+
+    def _play_sound(self, which: str) -> None:
+        # A cue that can't play is worth saying once, but never worth
+        # interrupting transcription over.
+        err = sound.play(self.model.state.get(self._sound_key(which)) or "")
+        if err:
+            self.tr_status.setText(err)
 
     def _change_ping(self) -> None:
         kb, _ = self.model.device("keyboard")
@@ -636,6 +801,43 @@ class MacroEditorPage(QWidget):
         self.hotkey_label.setText(name)
         self.model.set_pref("transcribe_hotkey", name)
         self._restart_hotkey_listener()
+
+    def _change_restart_key(self) -> None:
+        kb, _ = self.model.device("keyboard")
+        mouse, _ = self.model.device("mouse")
+        self.restart_btn.setEnabled(False)
+        self.restart_label.setText("press a key…")
+        self._restart_key_detect = DetectKey(kb, mouse, parent=self)
+        self._restart_key_detect.found.connect(self._restart_key_found)
+        self._restart_key_detect.start()
+
+    def _restart_key_found(self, code, name) -> None:
+        self.restart_btn.setEnabled(True)
+        if code is None:
+            self.restart_label.setText(self.model.state.get("transcribe_restart_key") or "(not set)")
+            self.tr_status.setText("No key detected -- kept the previous restart key.")
+            return
+        self.restart_label.setText(name)
+        self.model.set_pref("transcribe_restart_key", name)
+        self._rearm_restart_key_listener()
+
+    def _change_checkpoint_key(self) -> None:
+        kb, _ = self.model.device("keyboard")
+        mouse, _ = self.model.device("mouse")
+        self.checkpoint_btn.setEnabled(False)
+        self.checkpoint_label.setText("press a key…")
+        self._checkpoint_key_detect = DetectKey(kb, mouse, parent=self)
+        self._checkpoint_key_detect.found.connect(self._checkpoint_key_found)
+        self._checkpoint_key_detect.start()
+
+    def _checkpoint_key_found(self, code, name) -> None:
+        self.checkpoint_btn.setEnabled(True)
+        if code is None:
+            self.checkpoint_label.setText(self.model.state.get("transcribe_checkpoint_key") or "(not set)")
+            self.tr_status.setText("No key detected -- kept the previous checkpoint key.")
+            return
+        self.checkpoint_label.setText(name)
+        self.model.set_pref("transcribe_checkpoint_key", name)
 
     # ------------------------------------------------------------------ aliases
 

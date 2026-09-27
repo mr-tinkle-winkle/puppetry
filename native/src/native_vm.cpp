@@ -417,6 +417,13 @@ Op compile_op(const CompiledStatement& stmt, const std::vector<ArgumentDecl>& pa
             act_as_fn(rt, all[0].get(b).as_key_code(), all[1].get(b).as_bool(), acting);
         };
     }
+    if (n == "checkpoint") {
+        c.allow({});
+        if (!c.pos.empty()) {
+            throw MacroCompileError("line " + std::to_string(stmt.line_no) + ": checkpoint() takes no arguments");
+        }
+        return [](Runtime&, MacroRegistry&, const Bindings&) { checkpoint_fn(); };
+    }
     if (n == "command") {
         c.allow({});
         if (c.pos.empty()) throw MacroCompileError("line " + std::to_string(stmt.line_no) + ": command() needs a command");

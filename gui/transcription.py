@@ -36,17 +36,21 @@ class TranscriptionController(QObject):
 
     def start(self, *, keyboard_path, mouse_path, transcribe_keyboard, transcribe_mouse, raw,
               set_positions, same_start, raw_hz, precise, ping_key, abort_key=None, hotkey_key=None,
+              restart_key=None, checkpoint_key=None,
               ignore_alt_tab=False, ignore_puppetry=False) -> str | None:
         """Returns an error message, or None if started.
 
         `abort_key`, if given, makes the abort key end this session on its
         own (mirrors the daemon's own abort-key handling) -- see the exit
-        code 3 check in _finished. `hotkey_key`, if given, is filtered out
-        of the transcript like the ping key: the GUI's own toggle hotkey
-        starts/stops this process, so its keypress should never itself be
-        recorded, including the press that stops us. `ignore_alt_tab` drops
-        Alt+Tab from the transcript; `ignore_puppetry` mutes everything
-        while Puppetry's own window has focus."""
+        code 3 check in _finished. `hotkey_key` and `restart_key`, if
+        given, are filtered out of the transcript like the ping key: the
+        GUI's own hotkeys start/stop/restart this process, so their
+        keypresses should never themselves be recorded. `checkpoint_key`,
+        if given, is different -- pressing it DOES produce a line (a
+        literal checkpoint() call), it just never shows up as a keypress
+        itself; see transcriber.hpp for what that's for. `ignore_alt_tab`
+        drops Alt+Tab from the transcript; `ignore_puppetry` mutes
+        everything while Puppetry's own window has focus."""
         if self._proc is not None:
             return None
         exe = cfg.find_binary("puppetry-transcribe")
@@ -58,6 +62,10 @@ class TranscriptionController(QObject):
             args += ["--abort-key", abort_key]
         if hotkey_key:
             args += ["--hotkey-key", hotkey_key]
+        if restart_key:
+            args += ["--restart-key", restart_key]
+        if checkpoint_key:
+            args += ["--checkpoint-key", checkpoint_key]
         for flag, on in (("--transcribe-keyboard", transcribe_keyboard), ("--transcribe-mouse", transcribe_mouse),
                          ("--raw", raw), ("--set-positions", set_positions), ("--same-start", same_start),
                          ("--precise", precise), ("--ignore-alt-tab", ignore_alt_tab),

@@ -55,8 +55,26 @@ int main() {
     combo_macro->run(rt, registry, {});
     CHECK(rt.synth_held.empty());
 
-    // Rejects control flow outright, with a clear per-line message.
+    // checkpoint() -- a pure marker for the editor, no runtime effect at
+    // all. Compiles, runs, touches nothing (no held keys, no crash), and
+    // rejects an argument the way every other zero-arg call would.
+    json checkpoint_def = {
+        {"id", "m6"}, {"name", "Checkpoint Macro"},
+        {"code", "kd(KEY_A)\ncheckpoint()\nku(KEY_A)\n"},
+    };
+    auto checkpoint_macro = compile_native_macro(checkpoint_def, registry);
+    checkpoint_macro->run(rt, registry, {});
+    CHECK(rt.synth_held.empty());
+
     bool threw = false;
+    try {
+        json bad3 = {{"id", "m7"}, {"name", "Bad3"}, {"code", "checkpoint(KEY_A)\n"}};
+        compile_native_macro(bad3, registry);
+    } catch (const MacroCompileError&) { threw = true; }
+    CHECK(threw);
+
+    // Rejects control flow outright, with a clear per-line message.
+    threw = false;
     try {
         json bad = {{"id", "m4"}, {"name", "Bad"}, {"code", "if True:\n    kd(KEY_A)\n"}};
         compile_native_macro(bad, registry);

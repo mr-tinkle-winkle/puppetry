@@ -155,6 +155,48 @@ int main() {
         CHECK_EQ(h.take(), "wait(0.002000)\nkd(KEY_A)\n"); // filtered keys never move last_us_ forward
     }
 
+    // Restart hotkey: filtered from the transcript exactly like the toggle
+    // hotkey -- the GUI does the actual stop/start, this side just must
+    // never let the keypress itself leak into either recording.
+    {
+        TranscribeOptions o; o.keyboard = true; o.restart_code = KEY_F10;
+        Harness h(o);
+        h.core.start(T0);
+        h.core.feed(Source::Keyboard, ev(T0 + 1000, EV_KEY, KEY_F10, 1));
+        h.core.feed(Source::Keyboard, ev(T0 + 1500, EV_KEY, KEY_F10, 0));
+        CHECK_EQ(h.take(), "");
+        if (h.core.abort_requested()) { std::fprintf(stderr, "FAILED: restart key must not flag abort\n"); std::exit(1); }
+        h.core.feed(Source::Keyboard, ev(T0 + 2000, EV_KEY, KEY_A, 1));
+        CHECK_EQ(h.take(), "wait(0.002000)\nkd(KEY_A)\n");
+    }
+
+    // Checkpoint key: UNLIKE the other special keys, it DOES produce a
+    // line -- a literal checkpoint() call -- but only on press, never on
+    // release or autorepeat, and it never itself shows up as a keypress.
+    {
+        TranscribeOptions o; o.keyboard = true; o.checkpoint_code = KEY_F11;
+        Harness h(o);
+        h.core.start(T0);
+        h.core.feed(Source::Keyboard, ev(T0 + 1000, EV_KEY, KEY_A, 1));
+        h.core.feed(Source::Keyboard, ev(T0 + 2000, EV_KEY, KEY_F11, 1));
+        CHECK_EQ(h.take(), "wait(0.001000)\nkd(KEY_A)\nwait(0.001000)\ncheckpoint()\n");
+        h.core.feed(Source::Keyboard, ev(T0 + 2100, EV_KEY, KEY_F11, 2)); // autorepeat: ignored
+        h.core.feed(Source::Keyboard, ev(T0 + 2200, EV_KEY, KEY_F11, 0)); // release: ignored
+        CHECK_EQ(h.take(), "");
+        // A checkpoint can be followed by mouse motion accumulated before
+        // it -- flush_motion() is called first, same guarantee a normal
+        // keypress gets (a click never overtakes the motion that preceded
+        // it, and neither does a checkpoint).
+        TranscribeOptions o2; o2.keyboard = true; o2.mouse = true; o2.raw = true; o2.checkpoint_code = KEY_F11;
+        Harness h2(o2);
+        h2.core.start(T0);
+        h2.core.feed(Source::Mouse, ev(T0 + 500, EV_REL, REL_X, 5));
+        h2.core.feed(Source::Mouse, syn(T0 + 500));
+        h2.core.feed(Source::Keyboard, ev(T0 + 1000, EV_KEY, KEY_F11, 1));
+        CHECK_EQ(h2.take(), "wait(0.000500)\nmove_mouse(5, 0, time_=0, easing=\"none\")\n"
+                             "wait(0.000500)\ncheckpoint()\n");
+    }
+
     // Alt+Tab filtering: Tab while Alt is held drops both keys entirely;
     // a plain Alt press (no Tab) still transcribes, just emitted once
     // Alt comes back up instead of immediately.
@@ -221,6 +263,78 @@ int main() {
         Harness h(o, true, 7, 8);
         h.core.start(T0);
         CHECK_EQ(h.take(), "move_mouse(7, 8, move_to=True, time_=0)\n");
+    }
+
+    // -----------------------------------------------------------------
+    // EventReorderQueue: the keyboard and the mouse are separate fds, and
+    // whichever poll() happens to report first used to decide the order
+    // events reached the core.
+    // -----------------------------------------------------------------
+    {
+        // The actual bug: the mouse's click is stamped BEFORE the
+        // keyboard's keypress but arrives (is pushed) after it, because
+        // its fd woke up a moment later. Fed straight through, the core's
+        // no-backwards-clock guard would clamp the gap to zero and emit
+        // them in the wrong order; through the queue they come out by
+        // timestamp.
+        EventReorderQueue q;
+        q.push(Source::Keyboard, ev(T0 + 2000, EV_KEY, KEY_A, 1)); // arrived first...
+        q.push(Source::Mouse, ev(T0 + 1500, EV_KEY, BTN_LEFT, 1)); // ...but happened earlier
+        std::string order;
+        q.drain_all([&](Source role, const RawEvent& e) {
+            order += (role == Source::Mouse ? "M" : "K");
+            order += std::to_string(e.time_us - T0) + " ";
+        });
+        CHECK_EQ(order, "M1500 K2000 ");
+        ++checks;
+        if (!q.empty()) { std::fprintf(stderr, "FAILED: drain_all left events behind\n"); std::exit(1); }
+
+        // And end to end through the core: the click lands first, with the
+        // real 500us gap between them preserved rather than flattened.
+        TranscribeOptions o; o.keyboard = true; o.mouse = true;
+        Harness h(o);
+        h.core.start(T0);
+        EventReorderQueue q2;
+        q2.push(Source::Keyboard, ev(T0 + 2000, EV_KEY, KEY_A, 1));
+        q2.push(Source::Mouse, ev(T0 + 1500, EV_KEY, BTN_LEFT, 1));
+        q2.drain_all([&](Source role, const RawEvent& e) { h.core.feed(role, e); });
+        CHECK_EQ(h.take(), "wait(0.001500)\nkd(BTN_LEFT)\nwait(0.000500)\nkd(KEY_A)\n");
+    }
+    {
+        // Only events past the window are released; the rest stay queued
+        // so a straggler from the other device can still slot in front.
+        EventReorderQueue q;
+        q.push(Source::Keyboard, ev(T0 + 1000, EV_KEY, KEY_A, 1));
+        q.push(Source::Keyboard, ev(T0 + 9000, EV_KEY, KEY_B, 1));
+        std::string got;
+        auto collect = [&](Source, const RawEvent& e) { got += std::to_string(e.code) + " "; };
+        q.drain_until(T0 + 5000, collect);
+        CHECK_EQ(got, std::to_string(KEY_A) + " ");
+        ++checks;
+        if (q.size() != 1) { std::fprintf(stderr, "FAILED: expected 1 event still held\n"); std::exit(1); }
+        ++checks;
+        if (q.oldest_us() != T0 + 9000) { std::fprintf(stderr, "FAILED: wrong oldest_us\n"); std::exit(1); }
+
+        // A late arrival stamped in between goes out before the one that
+        // was already waiting.
+        q.push(Source::Mouse, ev(T0 + 6000, EV_KEY, BTN_RIGHT, 1));
+        got.clear();
+        q.drain_until(T0 + 100000, collect);
+        CHECK_EQ(got, std::to_string(BTN_RIGHT) + " " + std::to_string(KEY_B) + " ");
+    }
+    {
+        // Events sharing a timestamp -- one hardware frame is several --
+        // must keep the order the device reported, so a press can't
+        // overtake the motion in its own frame.
+        EventReorderQueue q;
+        q.push(Source::Mouse, ev(T0 + 1000, EV_REL, REL_X, 5));
+        q.push(Source::Mouse, ev(T0 + 1000, EV_REL, REL_Y, -3));
+        q.push(Source::Mouse, ev(T0 + 1000, EV_SYN, SYN_REPORT, 0));
+        std::string got;
+        q.drain_all([&](Source, const RawEvent& e) { got += std::to_string(e.type) + ":" + std::to_string(e.code) + " "; });
+        CHECK_EQ(got, std::to_string(EV_REL) + ":" + std::to_string(REL_X) + " " +
+                      std::to_string(EV_REL) + ":" + std::to_string(REL_Y) + " " +
+                      std::to_string(EV_SYN) + ":" + std::to_string(SYN_REPORT) + " ");
     }
 
     std::printf("All %d checks passed.\n", checks);

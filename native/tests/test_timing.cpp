@@ -55,16 +55,58 @@ int main() {
     // 4. No drift: 200 x (work + wait(1ms)) should take ~200ms total --
     //    the per-iteration work is absorbed by the timeline anchor
     //    instead of accumulating (without anchoring it'd be 200ms +
-    //    200 x overhead).
-    Runtime::wait_anchor().reset();
-    t0 = clk::now();
-    for (int i = 0; i < 200; ++i) {
-        auto busy_until = clk::now() + std::chrono::microseconds(100); // simulated per-line cost
-        while (clk::now() < busy_until) {}
-        wait_fn(rt, 0.001);
+    //    200 x overhead, i.e. 220ms+).
+    //
+    //    Median of 5 runs, for the same reason checks 2/3 take a median:
+    //    a single run on shared hardware can lose a whole timeslice to the
+    //    host, which no wait strategy can absorb and which has nothing to
+    //    do with drift. Taking the median keeps the bound tight enough to
+    //    still catch anchoring actually breaking, without the suite crying
+    //    wolf every few runs.
+    double total = 0;
+    {
+        std::vector<double> totals;
+        for (int trial = 0; trial < 5; ++trial) {
+            Runtime::wait_anchor().reset();
+            auto s0 = clk::now();
+            for (int i = 0; i < 200; ++i) {
+                auto busy_until = clk::now() + std::chrono::microseconds(100); // simulated per-line cost
+                while (clk::now() < busy_until) {}
+                wait_fn(rt, 0.001);
+            }
+            totals.push_back(secs_since(s0));
+        }
+        std::sort(totals.begin(), totals.end());
+        total = totals[totals.size() / 2];
+        CHECK(total >= 0.200 && total < 0.205, "200 x wait(1ms) with 100us work each took %.4fs (median of 5; drift)", total);
     }
-    double total = secs_since(t0);
-    CHECK(total >= 0.200 && total < 0.205, "200 x wait(1ms) with 100us work each took %.4fs (drift)", total);
+
+    // 4b. The TAIL, which is what "playback is slightly inconsistent"
+    //     actually means: the median has been fine for a while, but a
+    //     wait that lands 300us late once in a while is audible/visible in
+    //     a recorded macro. Measures the distribution over many waits
+    //     rather than the middle of it.
+    double p50 = 0, p99 = 0, worst = 0;
+    {
+        std::vector<double> late;
+        late.reserve(2000);
+        for (int i = 0; i < 2000; ++i) {
+            Runtime::wait_anchor().reset();
+            auto s0 = clk::now();
+            wait_fn(rt, 0.001);
+            late.push_back((secs_since(s0) - 0.001) * 1e6);
+        }
+        std::sort(late.begin(), late.end());
+        p50 = late[late.size() / 2];
+        p99 = late[(size_t)(late.size() * 0.99)];
+        worst = late.back();
+        // The printed numbers are the point of this check -- they're how
+        // you tell whether a timing change helped (on this sandbox the p99
+        // moves between ~80us and ~330us purely from host noise, so judge
+        // a change by several runs, not one). The assertion is only a
+        // backstop for the margin logic breaking outright.
+        CHECK(p99 < 1500.0, "99th percentile wait(1ms) lateness is %.1fus", p99);
+    }
 
     // 5. speed() scales it.
     Runtime::wait_anchor().reset();
@@ -85,5 +127,6 @@ int main() {
 
     std::printf("All %d checks passed. (tiny wait %.3fus; wait(5ms) median +%.1fus; precise wait(3ms) median +%.1fus; 200x1ms %.4fs)\n",
                 checks, per_us, (med - 0.005) * 1e6, (med_precise - 0.003) * 1e6, total);
+    std::printf("  wait(1ms) lateness over 2000 waits: p50 +%.1fus, p99 +%.1fus, worst +%.1fus\n", p50, p99, worst);
     return 0;
 }

@@ -80,6 +80,30 @@ static constexpr auto kSpinMargin = std::chrono::microseconds(100);
 static constexpr auto kPreciseMargin = std::chrono::milliseconds(1);
 static constexpr auto kMaxSleepChunk = std::chrono::milliseconds(30); // abort responsiveness
 static constexpr auto kAnchorWindow = std::chrono::milliseconds(2);
+// ON THE SIZE OF THE MARGIN -- and why it's a constant rather than
+// something that adapts to the machine.
+//
+// The margin decides how early we stop sleeping and start spinning, so it
+// needs to cover however late clock_nanosleep actually wakes us. That
+// suggests measuring the real overshoot and growing the margin to match
+// (a deep-idle CPU can take a few hundred microseconds to wake), which
+// would in theory shrink the late tail: waits land at a median of +0.1us
+// but a p99 of ~150us, and that tail is what "playback is slightly
+// inconsistent" means.
+//
+// It was implemented and MEASURED, and it made the tail WORSE -- p99 rose
+// from ~120us to ~270us and the no-drift test started failing. The reason
+// it backfires is that most of the tail isn't wakeup latency at all, it's
+// the scheduler taking the CPU away; spinning earlier can't prevent that,
+// and the extra spinning causes more preemption, which lengthens the very
+// tail it was trying to cut. Filtering the outliers out of the estimate
+// didn't rescue it either.
+//
+// So: fixed margins, and the lever for genuine multi-millisecond
+// preemption is scheduling priority instead (the "realtime_priority"
+// option -- see macro.cpp), which addresses the actual cause. Don't
+// re-litigate this without a before/after tail measurement; test_timing
+// prints one.
 
 static inline void cpu_relax() {
 #if defined(__x86_64__) || defined(__i386__)

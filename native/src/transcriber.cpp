@@ -184,6 +184,27 @@ void TranscriberCore::feed(Source src, const RawEvent& ev) {
         if (opts_.hotkey_code >= 0 && ev.code == opts_.hotkey_code) {
             return;
         }
+        // Restart hotkey: same treatment as the toggle hotkey above -- the
+        // GUI does the actual stop-then-start-fresh, this side just has to
+        // make sure the keypress that triggered it never shows up in
+        // either the recording that's ending or the one that's starting.
+        if (opts_.restart_code >= 0 && ev.code == opts_.restart_code) {
+            return;
+        }
+        // Checkpoint key: unlike every other special key above, this one
+        // DOES produce output -- a literal checkpoint() line, at the
+        // moment the key went down. It's a no-op primitive (see its
+        // comment in primitives.hpp); it exists purely as a marker the
+        // editor's "clear before transcribing" option looks for. Autorepeat
+        // and the release are both ignored, same as a real primitive call
+        // would only happen once per press.
+        if (opts_.checkpoint_code >= 0 && ev.code == opts_.checkpoint_code) {
+            if (ev.value == 1) {
+                flush_motion();
+                emit_timed(ev.time_us, "checkpoint()");
+            }
+            return;
+        }
         // Alt+Tab filtering: an Alt press is buffered (never emitted yet)
         // until Alt comes back up. If Tab arrives first, this was
         // Alt+Tab -- neither key gets transcribed. If Alt comes back up
