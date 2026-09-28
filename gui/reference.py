@@ -37,6 +37,7 @@ speed(multiplier)
   calls. Resets to 1 at the start of every run/loop iteration.
 
 move_mouse(x_pixels, y_pixels, time_=0.25, easing="inout", async_=False, move_to=False)
+move_mouse(position, ...)   -- a saved getMousePosition() (absolute)
   Move by (x, y) over time_ seconds. easing: none, linear, in, out, inout.
   move_to=True: (x, y) is an absolute screen position (KDE/kdotool),
   corrected for pointer acceleration. async_=True returns immediately.
@@ -70,6 +71,27 @@ checkpoint()
   the whole macro. Drop one in by hand, or use the Checkpoint key while
   transcribing.
 
+waitForPress(button="any", repress=False)
+  Waits until you press that real key/button -- or, with no button (or
+  "any"/"all"), ANY key or mouse button -- and returns the key that was
+  pressed:  b = waitForPress()  then tap(b) etc. repress=True swallows
+  that press so nothing else sees it.
+
+waitForReactivation(repress=False)
+  Waits until this macro's own key combo is pressed again. That press
+  wakes this run instead of restarting (or toggling off) the macro.
+  repress=True swallows it so nothing else sees it.
+
+getMousePosition()
+  The mouse position as (x, y). pos = getMousePosition(), then pos.x /
+  pos.y (or pos[0] / pos[1], or x, y = pos). getMousePosition.x reads it
+  directly. move_mouse(pos) moves back to a saved position. Needs kdotool
+  (KDE Plasma).
+
+getButtonsHeld()
+  A list of every real key/button held right now, e.g.
+  if KEY_A in getButtonsHeld(): ...
+
 command(cmd, *args)
   Runs a shell command fire-and-forget (/bin/sh). Extra args are
   shell-quoted into {0}, {1}, ... placeholders:
@@ -87,10 +109,17 @@ underscores): "Flick and Click" -> Flick_and_Click(hits=5).
 Every KEY_* and BTN_* name is available directly (KEY_A, BTN_LEFT).
 
 Run as embedded Python (on by default): the macro is real Python --
-loops, if, variables, anything. Turn it OFF for the fast native path:
-one primitive or macro call per line, literal arguments/parameters only,
-no control flow. Both are far past the old ~16k/s tap ceiling; native
-has the least per-line overhead.
+anything goes, including imports. Turn it OFF for the fast native path:
+Puppetry's own interpreter for the everyday subset -- variables, math,
+comparisons, and/or/not, if/elif/else, while, for, break/continue, your
+own functions (def/return), lists/tuples, int()/float()/str()/len()/
+min()/max()/abs()/round()/range()/print(), every primitive, and other
+macros. No imports, classes, try, or methods like "a".upper(). Both are
+far past the old ~16k/s tap ceiling; native has the least overhead.
+
+Arguments passed to a macro (CLI, another macro) arrive as text and are
+converted to the type of that parameter's default: arguments(hits=3)
+gets the number 5 from "5", arguments(key=KEY_A) gets KEY_B's code.
 
 From outside Puppetry: `puppetry --name="Macro Name" [args...]` triggers
 a macro on the running daemon; `puppetry --abort` = the abort key."""
@@ -118,22 +147,25 @@ def alias_targets() -> list[str]:
 # Structured primitive table
 #
 # One entry per primitive the daemon registers (python_embed.cpp's FC(...)
-# table / native_vm.cpp's compile_op()). The block editor builds its
-# palette, block labels and input sockets from this, and the parser uses it
-# to map calls onto blocks. The Dictionary page (planned) should render
-# from this too rather than re-deriving anything from DICTIONARY_TEXT.
+# table / native_vm.cpp's compile_primitive()). The block editor builds its
+# palette, block labels, sockets and tooltips from this, and the parser
+# uses it to map calls onto blocks. A test cross-checks the names against
+# the daemon source so this can't silently drift.
 #
 # Param fields:
 #   name      -- the real Python keyword name (what the daemon accepts)
 #   default   -- None = required; otherwise the default's SOURCE text
-#   kind      -- "key" | "number" | "bool" | "choice" | "string" | "keys"
-#                ("keys"/"values" = a *varargs tail, edited as one
-#                comma-separated field)
+#   kind      -- "key" | "number" | "bool" | "choice" | "string" | "keys" | "values"
+#                ("keys"/"values" = a *varargs tail: one socket per value,
+#                plus an empty one that grows the list)
 #   caption   -- short label drawn before the socket ("" = none)
 #   choices   -- for kind="choice": source-text options
 #   kw_only   -- can only be passed as a keyword (combo's time_)
 #   vararg    -- True for the *args tail
+#   doc       -- tooltip for the socket
 # category: "input" | "output" | "neutral" (orange / blue / grey).
+# label: plain-English block text (actAs -> "act as").
+# reporter: returns a value -- shown as a round reporter, not a statement.
 # ---------------------------------------------------------------------------
 
 from dataclasses import dataclass, field as _field
@@ -148,6 +180,7 @@ class Param:
     choices: tuple = ()
     kw_only: bool = False
     vararg: bool = False
+    doc: str = ""
 
     @property
     def required(self) -> bool:
@@ -160,44 +193,86 @@ class Primitive:
     params: tuple
     category: str
     summary: str = ""
-    python_only: bool = False
-    extra: dict = _field(default_factory=dict)
+    label: str = ""
+    reporter: bool = False
+
+    @property
+    def title(self) -> str:
+        return self.label or self.name
 
 
-_BOOL = ("True", "False")
+_REPRESS = Param("repress", "False", kind="bool", caption="block it",
+                 doc="True: the press is swallowed -- nothing else (no app, no other macro) sees it.")
 
 PRIMITIVES: tuple = (
-    Primitive("tap", (Param("key", kind="key"), Param("time_", "0.1", caption="hold")),
-              "output", "Press and release a key or mouse button."),
-    Primitive("kd", (Param("key", kind="key"),), "output", "Key/button down only -- pair it with ku."),
-    Primitive("ku", (Param("key", kind="key"),), "output", "Key/button up only."),
-    Primitive("combo", (Param("keys", kind="keys", vararg=True), Param("time_", "0.1", caption="hold", kw_only=True)),
-              "output", "Press keys in order, hold, release in reverse."),
-    Primitive("type", (Param("text", kind="string"), Param("time_per_letter", "0.05", caption="per letter"),
-                       Param("async_", "False", kind="bool", caption="async")),
-              "output", "Type a string."),
-    Primitive("move_mouse", (Param("x_pixels", caption="x"), Param("y_pixels", caption="y"),
-                             Param("time_", "0.25", caption="over"),
+    Primitive("tap", (Param("key", kind="key", doc="The key or mouse button, e.g. KEY_A or BTN_LEFT."),
+                      Param("time_", "0.1", caption="hold", doc="Seconds to hold it down.")),
+              "output", "Press and release a key or mouse button.", "tap"),
+    Primitive("kd", (Param("key", kind="key", doc="The key or mouse button to press down."),), "output",
+              "Press a key/button down and keep holding it -- pair it with key up.", "key down"),
+    Primitive("ku", (Param("key", kind="key", doc="The key or mouse button to let go of."),), "output",
+              "Let go of a key/button that key down pressed.", "key up"),
+    Primitive("combo", (Param("keys", kind="keys", vararg=True, doc="Keys pressed in this order, released in reverse."),
+                        Param("time_", "0.1", caption="hold", kw_only=True, doc="Seconds to hold them all down.")),
+              "output", "Press several keys together (like Ctrl+C), then release them.", "combo"),
+    Primitive("type", (Param("text", kind="string", doc="The text to type, in quotes."),
+                       Param("time_per_letter", "0.05", caption="per letter", doc="Seconds between letters."),
+                       Param("async_", "False", kind="bool", caption="in background",
+                             doc="True: keep going while it types.")),
+              "output", "Type out some text.", "type"),
+    Primitive("move_mouse", (Param("x_pixels", caption="x", doc="Pixels right (negative = left), or a screen x with absolute on. "
+                                                          "Can also be a saved mouse position."),
+                             Param("y_pixels", caption="y", doc="Pixels down (negative = up), or a screen y with absolute on."),
+                             Param("time_", "0.25", caption="over", doc="Seconds the movement takes."),
                              Param("easing", '"inout"', kind="choice", caption="easing",
-                                   choices=('"none"', '"linear"', '"in"', '"out"', '"inout"')),
-                             Param("async_", "False", kind="bool", caption="async"),
-                             Param("move_to", "False", kind="bool", caption="absolute")),
-              "output", "Move the mouse by (x, y), or to (x, y) with absolute on."),
-    Primitive("wheel", (Param("amount"),), "output", "Scroll. Positive = up."),
-    Primitive("command", (Param("cmd", kind="string"), Param("args", kind="values", caption="args", vararg=True)),
-              "output", "Run a shell command; extra args fill {0}, {1}, ..."),
-    Primitive("wait", (Param("time_", caption=""), Param("precise", "False", kind="bool", caption="precise")),
-              "neutral", "Pause for this many seconds."),
-    Primitive("speed", (Param("multiplier"),), "neutral", "Scale every duration from here on."),
-    Primitive("checkpoint", (), "neutral", "Marker for Clear-before-transcribing. Does nothing when run."),
+                                   choices=('"none"', '"linear"', '"in"', '"out"', '"inout"'),
+                                   doc="How the speed changes along the way."),
+                             Param("async_", "False", kind="bool", caption="in background",
+                                   doc="True: keep going while it moves."),
+                             Param("move_to", "False", kind="bool", caption="absolute",
+                                   doc="True: (x, y) is a spot on the screen instead of a distance.")),
+              "output", "Move the mouse by (x, y) -- or to (x, y) with absolute on.", "move mouse"),
+    Primitive("wheel", (Param("amount", doc="Clicks to scroll. Positive = up, negative = down."),), "output",
+              "Scroll the mouse wheel.", "scroll"),
+    Primitive("command", (Param("cmd", kind="string", doc="The shell command, in quotes. {0}, {1}... are filled from the extra values."),
+                          Param("args", kind="values", caption="with", vararg=True,
+                                doc="Values for {0}, {1}, ... (shell-quoted for you).")),
+              "output", "Run a shell command (doesn't wait for it to finish).", "run command"),
+    Primitive("wait", (Param("time_", caption="", doc="Seconds to wait."),
+                       Param("precise", "False", kind="bool", caption="precise",
+                             doc="True: spin the last millisecond for extra accuracy (uses more CPU).")),
+              "neutral", "Pause for this many seconds.", "wait"),
+    Primitive("speed", (Param("multiplier", doc="2 = twice as fast, 0.5 = half speed."),), "neutral",
+              "Speed up or slow down every wait/hold/move after this, for the rest of this run.", "speed"),
+    Primitive("checkpoint", (), "neutral",
+              "A marker: \"Clear macro before transcribing\" only clears what comes after the last one. "
+              "Does nothing when the macro runs.", "checkpoint"),
     Primitive("ignore", (Param("what", kind="choice", choices=('"keyboard"', '"mouse_buttons"', '"mouse_movement"',
-                                                              '"mouse"')),),
-              "neutral", "Toggle blocking real input from a device."),
-    Primitive("ignore_keys", (Param("keys", kind="keys", vararg=True),), "neutral",
-              "Toggle blocking specific real keys/buttons."),
-    Primitive("actAs", (Param("key", kind="key"), Param("ignore", kind="bool", caption="suppress"),
-                        Param("acting", kind="keys", caption="→", vararg=True)),
-              "neutral", "Remap: every press of key also presses the acting keys."),
+                                                              '"mouse"'),
+                               doc="Which real input to block (or unblock -- it's a toggle)."),),
+              "input", "Toggle blocking your real keyboard/mouse from reaching anything else.", "ignore"),
+    Primitive("ignore_keys", (Param("keys", kind="keys", vararg=True, doc="Keys/buttons to block (or unblock)."),),
+              "input", "Toggle blocking specific real keys/buttons.", "ignore keys"),
+    Primitive("actAs", (Param("key", kind="key", doc="The real key/button being remapped."),
+                        Param("ignore", kind="bool", caption="suppress original",
+                              doc="True: the original key's own press is blocked."),
+                        Param("acting", kind="keys", caption="also press", vararg=True,
+                              doc="Keys/buttons pressed whenever the key is.")),
+              "input", "From now on, pressing the key also presses these (run again with the same values to undo).",
+              "act as"),
+    Primitive("waitForPress", (Param("button", '"any"', kind="key",
+                                     doc="The real key or mouse button to wait for -- leave it empty (or \"any\") "
+                                         "for any key or button."), _REPRESS),
+              "input", "Wait here until you press this key/button (or any). As a value, it's the key that was "
+                       "pressed: button = wait for press.", "wait for press"),
+    Primitive("waitForReactivation", (_REPRESS,), "input",
+              "Wait here until this macro's key combo is pressed again (that press doesn't restart or stop it).",
+              "wait for reactivation"),
+    Primitive("getMousePosition", (), "input",
+              "Where the mouse is: (x, y). Use .x / .y for one number, or move mouse back to a saved one.",
+              "mouse position", reporter=True),
+    Primitive("getButtonsHeld", (), "input", "Every real key/button held down right now.", "buttons held",
+              reporter=True),
 )
 
 PRIMITIVES_BY_NAME: dict = {p.name: p for p in PRIMITIVES}

@@ -200,8 +200,12 @@ static void apply_grab_state(Runtime& rt) {
         for (int code : rt.ignored_keys) {
             (is_button_code(code) ? any_mouse_key_ignored : any_kb_key_ignored) = true;
         }
-        kb_needed = rt.ignore_keyboard || any_kb_key_ignored;
-        mouse_needed = rt.ignore_mouse_buttons || rt.ignore_mouse_movement || any_mouse_key_ignored;
+        for (const auto& [code, count] : rt.repress_codes) {
+            if (count > 0) (is_button_code(code) ? any_mouse_key_ignored : any_kb_key_ignored) = true;
+        }
+        kb_needed = rt.ignore_keyboard || any_kb_key_ignored || rt.repress_any > 0;
+        mouse_needed = rt.ignore_mouse_buttons || rt.ignore_mouse_movement || any_mouse_key_ignored ||
+                       rt.repress_any > 0;
     }
     {
         std::lock_guard<std::mutex> lock(rt.act_as_mutex);
@@ -240,6 +244,86 @@ static void apply_grab_state(Runtime& rt) {
         } catch (const std::exception&) {
         }
     }
+}
+
+void refresh_grab_state(Runtime& rt) { apply_grab_state(rt); }
+
+void add_repress(Runtime& rt, const std::vector<int>& codes) {
+    {
+        std::lock_guard<std::mutex> lock(rt.ignore_mutex);
+        for (int c : codes) ++rt.repress_codes[c];
+    }
+    apply_grab_state(rt);
+}
+
+void remove_repress(Runtime& rt, const std::vector<int>& codes) {
+    {
+        std::lock_guard<std::mutex> lock(rt.ignore_mutex);
+        for (int c : codes) {
+            auto it = rt.repress_codes.find(c);
+            if (it != rt.repress_codes.end() && --it->second <= 0) rt.repress_codes.erase(it);
+        }
+    }
+    apply_grab_state(rt);
+}
+
+void get_mouse_position_fn(Runtime& rt, int& x, int& y) {
+    if (rt.cursor.get(x, y, std::chrono::steady_clock::now())) return;
+    if (!get_cursor_pos_kde(x, y)) {
+        throw std::runtime_error("getMousePosition(): couldn't read the cursor position "
+                                 "(needs kdotool on KDE Plasma)");
+    }
+}
+
+std::vector<int> get_buttons_held_fn(Runtime& rt) {
+    std::lock_guard<std::mutex> lock(rt.held_mutex);
+    return std::vector<int>(rt.held.begin(), rt.held.end());
+}
+
+bool is_any_key_word(const std::string& s) {
+    std::string t;
+    for (char c : s) if (!std::isspace((unsigned char)c)) t += (char)std::tolower((unsigned char)c);
+    return t.empty() || t == "any" || t == "all" || t == "none";
+}
+
+static void set_repress_any(Runtime& rt, int delta) {
+    {
+        std::lock_guard<std::mutex> lock(rt.ignore_mutex);
+        rt.repress_any = std::max(0, rt.repress_any + delta);
+    }
+    apply_grab_state(rt);
+}
+
+int wait_for_press_fn(Runtime& rt, int code, bool repress) {
+    Runtime::PressWaiter waiter;
+    waiter.code = code;
+    {
+        std::lock_guard<std::mutex> lock(rt.press_waiters_mutex);
+        rt.press_waiters.push_back(&waiter);
+    }
+    if (repress) {
+        if (code < 0) set_repress_any(rt, +1);
+        else add_repress(rt, {code});
+    }
+    struct Cleanup {
+        Runtime& rt; Runtime::PressWaiter* w; bool repress; int code;
+        ~Cleanup() {
+            {
+                std::lock_guard<std::mutex> lock(rt.press_waiters_mutex);
+                auto& v = rt.press_waiters;
+                v.erase(std::remove(v.begin(), v.end(), w), v.end());
+            }
+            if (repress) {
+                if (code < 0) set_repress_any(rt, -1);
+                else remove_repress(rt, {code});
+            }
+        }
+    } cleanup{rt, &waiter, repress, code};
+    while (!waiter.fired.load(std::memory_order_acquire)) {
+        rt.check_abort();
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    return waiter.pressed.load(std::memory_order_relaxed);
 }
 
 void ignore_fn(Runtime& rt, const std::string& what) {
@@ -669,6 +753,8 @@ void abort_all(Runtime& rt) {
         std::lock_guard<std::mutex> lock(rt.ignore_mutex);
         rt.ignore_keyboard = rt.ignore_mouse_buttons = rt.ignore_mouse_movement = false;
         rt.ignored_keys.clear();
+        rt.repress_codes.clear();
+        rt.repress_any = 0;
     }
     {
         // actAs is fully cleared on abort, per the settled spec.

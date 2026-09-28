@@ -260,6 +260,11 @@ int main(int argc, char** argv) {
     for (const auto& macro_def : macro_defs) {
         all_macro_names.push_back(sanitize_macro_name(json_str(macro_def, "name", "")));
     }
+    json custom_doc = load_custom_blocks();
+    json custom_defs = (custom_doc.contains("blocks") && custom_doc["blocks"].is_array()) ? custom_doc["blocks"] : json::array();
+    for (const auto& block_def : custom_defs) {
+        all_macro_names.push_back(sanitize_macro_name(json_str(block_def, "name", "")));
+    }
 
     python_embed_init(rt);
 
@@ -285,6 +290,17 @@ int main(int argc, char** argv) {
         } catch (const std::exception& exc) {
             std::fprintf(stderr, "Skipping macro '%s': %s\n",
                           json_str(macro_def, "name", json_str(macro_def, "id", "?")).c_str(), exc.what());
+        }
+    }
+
+    // Custom blocks: registered like macros (callable by name from any
+    // macro), but they have no combo and never appear as triggerable.
+    for (const auto& block_def : custom_defs) {
+        std::string bname = json_str(block_def, "name", "");
+        try {
+            registry.set(sanitize_macro_name(bname), compile_macro_body(block_def, registry, all_macro_names));
+        } catch (const std::exception& exc) {
+            std::fprintf(stderr, "Skipping custom block '%s': %s\n", bname.c_str(), exc.what());
         }
     }
 

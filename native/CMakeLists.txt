@@ -123,6 +123,7 @@ puppetry_test(test_control_socket tests/test_control_socket.cpp)
 puppetry_test(test_python_embed tests/test_python_embed.cpp)
 puppetry_test(test_native_vm tests/test_native_vm.cpp)
 puppetry_test(test_mixed_calls tests/test_mixed_calls.cpp)
+puppetry_test(test_native_interp tests/test_native_interp.cpp)
 puppetry_test(test_timing tests/test_timing.cpp)
 # Timing-sensitive: meaningful on a desktop, but a loaded build machine can
 # deschedule it. Labelled so packaged builds can skip it (ctest -LE timing).

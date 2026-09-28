@@ -22,7 +22,7 @@ from ui_kit.custom_message_dialog import show_message
 from ui_kit.custom_spinbox import CustomDoubleSpinBox
 from ui_kit.theme_editor import ThemeEditorGroup
 from ui_kit.theme import Theme
-from widgets import Collapsible, PageBase, ask, dim_label, label_style, prompt_text
+from widgets import Collapsible, PageBase, ask, dim_label, label_style, mark_input, mark_output, prompt_text
 
 
 class SettingsPage(PageBase):
@@ -77,6 +77,7 @@ class SettingsPage(PageBase):
             self.show_paths[kind] = eye
             r.addWidget(eye)
             det = CustomButton(detect_text)
+            mark_input(det)
             det.clicked.connect(lambda _=False, k=kind, b=det, t=detect_text: self._detect(k, b, t))
             r.addWidget(det)
             dl.addLayout(r)
@@ -99,6 +100,7 @@ class SettingsPage(PageBase):
         self.abort_label = QLabel(model.state.get("abort_key") or "KEY_PAUSE")
         r.addWidget(self.abort_label, stretch=1)
         self.abort_btn = CustomButton("Change")
+        mark_input(self.abort_btn)
         self.abort_btn.clicked.connect(self._change_abort)
         r.addWidget(self.abort_btn)
         al.addLayout(r)
@@ -138,6 +140,12 @@ class SettingsPage(PageBase):
         self.autosave.toggled.connect(self._autosave_toggled)
         bl.addWidget(self.autosave)
 
+        self.content_layout.addWidget(beh)
+        beh = CustomGroupBox("Playback (Puppetry's virtual keyboard + mouse)")
+        bl = beh.make_layout(QVBoxLayout)
+        self.playback_title = QLabel("Output -- how Puppetry acts on your system")
+        mark_output(self.playback_title)
+        bl.addWidget(self.playback_title)
         self.flat_accel = CustomCheckBox("No pointer acceleration on Puppetry's virtual mouse")
         self.flat_accel.setChecked(bool(model.state.get("disable_pointer_accel", True)))
         self.flat_accel.setToolTip("Recommended. KDE otherwise applies its usual mouse acceleration curve to\n"

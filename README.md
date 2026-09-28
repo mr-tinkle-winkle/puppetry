@@ -77,6 +77,10 @@ session to take effect.
 - Macros can be edited as snap-together **Blocks** or as **Text** -- the
   toggle above the code flips any macro between them (same code
   underneath). Which one macros open in is under **Settings > Behavior**.
+- Make your own blocks under **My blocks > Create a custom block** -- they
+  work in every macro.
+- Icons: drop SVGs into `gui/ui_kit/resources/icons/` (the file names are
+  listed at the top of `gui/ui_kit/icons.py`).
 - Devices, profiles, the abort key and appearance live in the **Settings** tab.
 - **Input Visualizer** has a CPS tester that measures what an app actually
   receives (daemon -> kernel -> compositor -> app).

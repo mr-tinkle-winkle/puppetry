@@ -120,6 +120,21 @@ struct ExtractedBody {
 // "first line only" and "every param needs a default" rules apply).
 ExtractedBody extract_arguments_signature(const std::string& body);
 
+// Macro arguments arrive as STRINGS (CLI, other macros on the native
+// path, custom blocks). Session 13: a string argument is converted to the
+// TYPE of that parameter's default when the default is a number/bool --
+// "5" -> 5 for arguments(hits=3), "KEY_B" -> its key code for
+// arguments(key=KEY_A) (key names are ints), "False" -> False for
+// arguments(on=True). Anything that doesn't convert stays a string.
+enum class ArgKind { Other, Int, Float, Bool };
+struct CoercedArg {
+    ArgKind kind = ArgKind::Other; // Other = keep the string
+    long long i = 0;
+    double d = 0;
+    bool b = false;
+};
+CoercedArg coerce_macro_arg(const std::string& text, ArgKind wanted);
+
 enum class RepeatMode { None, Hold, Toggle };
 enum class TriggerEdge { Down, Up };
 
@@ -131,6 +146,10 @@ struct RunningMacroState {
     std::atomic<bool> stop_flag{false};
     std::atomic<bool> active_hold{false};
     std::atomic<bool> armed_up{false};
+    // waitForReactivation(): while > 0, a trigger of this macro wakes
+    // the waiting run instead of starting/toggling/stopping anything.
+    std::atomic<int> reactivation_waiters{0};
+    std::atomic<bool> reactivated{false};
 
     ~RunningMacroState() {
         if (thread.joinable()) thread.detach();
@@ -169,6 +188,19 @@ MacroThreadHooks& macro_thread_hooks();
 void trigger_macro(Runtime& rt, MacroRegistry& registry, Macro& macro,
                     const std::vector<std::string>& args = {});
 bool macro_is_looping(const Macro& macro);
+
+// The top-level macro whose thread is running right now (nullptr off a
+// macro thread, e.g. in a unit test calling run() directly).
+Macro* current_macro();
+// Test hook: pretend this thread belongs to `m`.
+void set_current_macro(Macro* m);
+
+// waitForReactivation(repress): blocks the current macro until it is
+// triggered again (its combo, or `puppetry --name=...`). That trigger is
+// consumed -- it doesn't start/toggle/stop anything. repress=True also
+// swallows the combo keys' presses while waiting, so the reactivating
+// press never reaches other apps. Abortable.
+void wait_for_reactivation(Runtime& rt, bool repress);
 void stop_macro_loop(Macro& macro);
 
 } // namespace puppetry

@@ -73,13 +73,14 @@ int main() {
     } catch (const MacroCompileError&) { threw = true; }
     CHECK(threw);
 
-    // Rejects control flow outright, with a clear per-line message.
+    // Control flow compiles on the native path now (Session 13).
     threw = false;
     try {
-        json bad = {{"id", "m4"}, {"name", "Bad"}, {"code", "if True:\n    kd(KEY_A)\n"}};
-        compile_native_macro(bad, registry);
+        json cf = {{"id", "m4"}, {"name", "CF"}, {"code", "if True:\n    kd(KEY_A)\n    ku(KEY_A)\n"}};
+        compile_native_macro(cf, registry)->run(rt, registry, {});
     } catch (const MacroCompileError&) { threw = true; }
-    CHECK(threw);
+    CHECK(!threw);
+    CHECK(rt.synth_held.empty());
 
     // Rejects an unresolvable bare name.
     threw = false;

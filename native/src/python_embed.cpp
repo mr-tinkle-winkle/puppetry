@@ -6,6 +6,7 @@
 #include <thread>
 #include <vector>
 #include "keycodes.hpp"
+#include "macro.hpp"
 #include "primitives.hpp"
 #include "simplified_names.hpp"
 
@@ -14,6 +15,10 @@ namespace puppetry {
 // Process-lifetime Runtime pointer -- every exposed primitive operates
 // on this (C-level Python callables can't carry C++ closures).
 static Runtime* g_runtime = nullptr;
+// MousePosition class + the getMousePosition wrapper object, built once
+// from kMouseHelpersSource (see install_mouse_helpers()).
+static PyObject* g_mouse_position_type = nullptr;
+static PyObject* g_get_mouse_position = nullptr;
 static PyThreadState* g_main_thread_state = nullptr;
 
 // ---------------------------------------------------------------------
@@ -205,13 +210,32 @@ FASTCALL_SIG(py_move_mouse) {
     if (!a.check_kwargs("move_mouse", {"x_pixels", "y_pixels", "time_", "easing", "async_", "move_to"})) return nullptr;
     PyObject* xo = a.get(0, "x_pixels");
     PyObject* yo = a.get(1, "y_pixels");
-    if (!xo || !yo) { PyErr_SetString(PyExc_TypeError, "move_mouse() needs x_pixels and y_pixels"); return nullptr; }
-    int x = (int)PyLong_AsLong(xo), y = (int)PyLong_AsLong(yo);
-    if (PyErr_Occurred()) return nullptr;
+    if (!xo) { PyErr_SetString(PyExc_TypeError, "move_mouse() needs x_pixels and y_pixels (or a position)"); return nullptr; }
+    int x, y;
+    // move_mouse(pos): a saved getMousePosition() -- or any (x, y) pair.
+    // A real saved position means "go back there", so it's absolute unless
+    // move_to is given explicitly.
+    bool position_arg = false;
+    if ((!yo || yo == Py_None) && PySequence_Check(xo) && !PyUnicode_Check(xo)) {
+        if (PySequence_Size(xo) != 2) { PyErr_SetString(PyExc_TypeError, "move_mouse(): a position needs exactly 2 numbers (x, y)"); return nullptr; }
+        PyObject* px = PySequence_GetItem(xo, 0);
+        PyObject* py = PySequence_GetItem(xo, 1);
+        x = px ? (int)PyLong_AsLong(px) : 0;
+        y = py ? (int)PyLong_AsLong(py) : 0;
+        Py_XDECREF(px);
+        Py_XDECREF(py);
+        if (PyErr_Occurred()) return nullptr;
+        position_arg = g_mouse_position_type && PyObject_IsInstance(xo, g_mouse_position_type) == 1;
+    } else {
+        if (!yo) { PyErr_SetString(PyExc_TypeError, "move_mouse() needs x_pixels and y_pixels (or a position)"); return nullptr; }
+        x = (int)PyLong_AsLong(xo);
+        y = (int)PyLong_AsLong(yo);
+        if (PyErr_Occurred()) return nullptr;
+    }
     double t;
     bool async_, move_to;
     if (!double_arg(a.get(2, "time_"), 0.25, t) || !bool_arg(a.get(4, "async_"), false, async_) ||
-        !bool_arg(a.get(5, "move_to"), false, move_to))
+        !bool_arg(a.get(5, "move_to"), position_arg, move_to))
         return nullptr;
     std::string easing = "inout";
     if (PyObject* e = a.get(3, "easing")) {
@@ -320,12 +344,101 @@ FASTCALL_SIG(py_command) {
     return run_native(false, [&] { command_fn(format_command(cmd, extra)); });
 }
 
+FASTCALL_SIG(py_get_mouse_position) {
+    ARGS;
+    if (!a.check_kwargs("getMousePosition", {})) return nullptr;
+    int x = 0, y = 0;
+    PyObject* r = run_native(true, [&] { get_mouse_position_fn(*g_runtime, x, y); });
+    if (!r) return nullptr;
+    Py_DECREF(r);
+    return Py_BuildValue("(ii)", x, y);
+}
+
+FASTCALL_SIG(py_get_buttons_held) {
+    ARGS;
+    if (!a.check_kwargs("getButtonsHeld", {})) return nullptr;
+    std::vector<int> held = get_buttons_held_fn(*g_runtime);
+    PyObject* list = PyList_New((Py_ssize_t)held.size());
+    if (!list) return nullptr;
+    for (size_t i = 0; i < held.size(); ++i) PyList_SET_ITEM(list, (Py_ssize_t)i, PyLong_FromLong(held[i]));
+    return list;
+}
+
+FASTCALL_SIG(py_wait_for_reactivation) {
+    ARGS;
+    if (!a.check_kwargs("waitForReactivation", {"repress"})) return nullptr;
+    bool repress;
+    if (!bool_arg(a.get(0, "repress"), false, repress)) return nullptr;
+    return run_native(true, [&] { wait_for_reactivation(*g_runtime, repress); });
+}
+
+FASTCALL_SIG(py_wait_for_press) {
+    ARGS;
+    if (!a.check_kwargs("waitForPress", {"button", "repress"})) return nullptr;
+    int code = -1; // any
+    PyObject* b = a.get(0, "button");
+    if (b && b != Py_None && !(PyUnicode_Check(b) && is_any_key_word(PyUnicode_AsUTF8(b)))) {
+        if (!key_arg(b, "waitForPress", code)) return nullptr;
+    }
+    bool repress;
+    if (!bool_arg(a.get(1, "repress"), false, repress)) return nullptr;
+    int pressed = -1;
+    PyObject* r = run_native(true, [&] { pressed = wait_for_press_fn(*g_runtime, code, repress); });
+    if (!r) return nullptr;
+    Py_DECREF(r);
+    return PyLong_FromLong(pressed);
+}
+
+// getMousePosition() returns a MousePosition: a real (x, y) tuple (index
+// it, unpack it, print it) that also has .x and .y. getMousePosition.x /
+// getMousePosition.y read the live position without the call.
+static const char* kMouseHelpersSource = R"PY(
+class MousePosition(tuple):
+    __slots__ = ()
+    def __new__(cls, x, y):
+        return tuple.__new__(cls, (x, y))
+    x = property(lambda self: self[0])
+    y = property(lambda self: self[1])
+
+class _GetMousePosition:
+    __slots__ = ("_raw",)
+    def __init__(self, raw):
+        self._raw = raw
+    def __call__(self):
+        return MousePosition(*self._raw())
+    x = property(lambda self: self._raw()[0])
+    y = property(lambda self: self._raw()[1])
+    def __repr__(self):
+        return "<getMousePosition>"
+)PY";
+
+static void install_mouse_helpers(PyObject* native_dict) {
+    if (g_get_mouse_position) return;
+    PyObject* ns = PyDict_New();
+    PyDict_SetItemString(ns, "__builtins__", PyEval_GetBuiltins());
+    PyObject* r = PyRun_String(kMouseHelpersSource, Py_file_input, ns, ns);
+    if (!r) { PyErr_Print(); Py_DECREF(ns); return; }
+    Py_DECREF(r);
+    PyObject* cls = PyDict_GetItemString(ns, "MousePosition");        // borrowed
+    PyObject* wrapper_cls = PyDict_GetItemString(ns, "_GetMousePosition");
+    PyObject* raw = PyDict_GetItemString(native_dict, "getMousePosition");
+    if (cls && wrapper_cls && raw) {
+        g_get_mouse_position = PyObject_CallOneArg(wrapper_cls, raw);
+        Py_INCREF(cls);
+        g_mouse_position_type = cls;
+    }
+    PyErr_Clear();
+    Py_DECREF(ns);
+}
+
 #define FC(name, fn) {name, (PyCFunction)(void (*)(void))fn, METH_FASTCALL | METH_KEYWORDS, nullptr}
 static PyMethodDef kMethods[] = {
     FC("kd", py_kd), FC("ku", py_ku), FC("tap", py_tap), FC("combo", py_combo),
     FC("type", py_type), FC("move_mouse", py_move_mouse), FC("wheel", py_wheel),
     FC("wait", py_wait), FC("speed", py_speed), FC("checkpoint", py_checkpoint), FC("ignore", py_ignore),
     FC("ignore_keys", py_ignore_keys), FC("actAs", py_act_as), FC("command", py_command),
+    FC("getMousePosition", py_get_mouse_position), FC("getButtonsHeld", py_get_buttons_held),
+    FC("waitForReactivation", py_wait_for_reactivation), FC("waitForPress", py_wait_for_press),
     {nullptr, nullptr, 0, nullptr},
 };
 #undef FC
@@ -375,6 +488,8 @@ void python_embed_shutdown() {
     macro_thread_hooks() = MacroThreadHooks{};
     if (g_main_thread_state) {
         PyEval_RestoreThread(g_main_thread_state);
+        Py_CLEAR(g_get_mouse_position);
+        Py_CLEAR(g_mouse_position_type);
         Py_Finalize();
         g_main_thread_state = nullptr;
     }
@@ -414,7 +529,21 @@ std::string fetch_python_error() {
 
 class PythonMacroBody : public CompiledMacro {
 public:
-    PythonMacroBody(PyObject* func, std::string name) : func_(func), name_(std::move(name)) {}
+    PythonMacroBody(PyObject* func, std::string name) : func_(func), name_(std::move(name)) {
+        // Remember each parameter default's type so string arguments can
+        // be converted to it (see coerce_macro_arg in macro.hpp).
+        GilGuard guard;
+        PyObject* defaults = PyObject_GetAttrString(func_, "__defaults__");
+        if (defaults && PyTuple_Check(defaults)) {
+            for (Py_ssize_t i = 0; i < PyTuple_GET_SIZE(defaults); ++i) {
+                PyObject* d = PyTuple_GET_ITEM(defaults, i);
+                kinds_.push_back(PyBool_Check(d) ? ArgKind::Bool : PyLong_Check(d) ? ArgKind::Int
+                                 : PyFloat_Check(d) ? ArgKind::Float : ArgKind::Other);
+            }
+        }
+        Py_XDECREF(defaults);
+        PyErr_Clear();
+    }
     ~PythonMacroBody() override {
         // A Macro's shared_ptr<CompiledMacro> can legitimately outlive
         // python_embed_shutdown() (e.g. static-duration containers,
@@ -447,7 +576,12 @@ public:
         } else {
             PyObject* py_args = PyTuple_New((Py_ssize_t)args.size());
             for (size_t i = 0; i < args.size(); ++i) {
-                PyTuple_SetItem(py_args, (Py_ssize_t)i, PyUnicode_FromString(args[i].c_str()));
+                CoercedArg c = coerce_macro_arg(args[i], i < kinds_.size() ? kinds_[i] : ArgKind::Other);
+                PyObject* v = c.kind == ArgKind::Int ? PyLong_FromLongLong(c.i)
+                            : c.kind == ArgKind::Float ? PyFloat_FromDouble(c.d)
+                            : c.kind == ArgKind::Bool ? PyBool_FromLong(c.b)
+                            : PyUnicode_FromString(args[i].c_str());
+                PyTuple_SetItem(py_args, (Py_ssize_t)i, v);
             }
             result = PyObject_CallObject(func_, py_args);
             Py_DECREF(py_args);
@@ -467,6 +601,7 @@ public:
 private:
     PyObject* func_;
     std::string name_;
+    std::vector<ArgKind> kinds_;
 };
 
 // A trampoline for calling another macro by its sanitized name, looked
@@ -557,15 +692,46 @@ std::shared_ptr<CompiledMacro> compile_python_macro(const json& macro_def, Macro
     if (json_bool(macro_def, "ignore_mouse_buttons", false)) ignore_targets.push_back("mouse_buttons");
     if (json_bool(macro_def, "ignore_mouse_movement", false)) ignore_targets.push_back("mouse_movement");
 
+    // Indents the body into the _macro() function -- EXCEPT lines that
+    // start inside a triple-quoted string, whose text is string CONTENT
+    // (indenting those used to add spaces to type("""multi\nline""")).
     auto indent = [](const std::string& text, const std::string& prefix) {
+        std::vector<bool> in_string_at_line_start{false};
+        char quote = 0;
+        bool triple = false;
+        for (size_t i = 0; i < text.size(); ++i) {
+            char c = text[i];
+            if (c == '\n') {
+                if (quote && !triple) quote = 0; // unterminated single-line string: let Python report it
+                in_string_at_line_start.push_back(quote != 0);
+                continue;
+            }
+            if (quote) {
+                if (c == '\\') { ++i; if (i < text.size() && text[i] == '\n') in_string_at_line_start.push_back(true); continue; }
+                if (c == quote && (!triple || (i + 2 < text.size() && text[i + 1] == quote && text[i + 2] == quote))) {
+                    if (triple) i += 2;
+                    quote = 0;
+                }
+                continue;
+            }
+            if (c == '#') { while (i + 1 < text.size() && text[i + 1] != '\n') ++i; continue; }
+            if (c == '"' || c == '\'') {
+                quote = c;
+                triple = i + 2 < text.size() && text[i + 1] == c && text[i + 2] == c;
+                if (triple) i += 2;
+            }
+        }
         std::string out;
-        std::istringstream iss(text);
-        std::string line;
-        bool first = true;
-        while (std::getline(iss, line)) {
-            if (!first) out += "\n";
-            first = false;
-            out += prefix + line;
+        size_t start = 0, line_no = 0;
+        while (start <= text.size()) {
+            size_t nl = text.find('\n', start);
+            std::string line = text.substr(start, nl == std::string::npos ? std::string::npos : nl - start);
+            if (line_no) out += "\n";
+            bool raw = line_no < in_string_at_line_start.size() && in_string_at_line_start[line_no];
+            out += (raw ? "" : prefix) + line;
+            ++line_no;
+            if (nl == std::string::npos) break;
+            start = nl + 1;
         }
         return out;
     };
@@ -596,6 +762,11 @@ std::shared_ptr<CompiledMacro> compile_python_macro(const json& macro_def, Macro
     // globals, bare (no module prefix) -- matches PRIMITIVES_NAMESPACE.
     PyObject* native_dict = PyModule_GetDict(native_module);
     PyDict_Update(globals, native_dict);
+    install_mouse_helpers(native_dict);
+    if (g_get_mouse_position) {
+        PyDict_SetItemString(globals, "getMousePosition", g_get_mouse_position);
+        PyDict_SetItemString(globals, "MousePosition", g_mouse_position_type);
+    }
     PyObject* time_module = PyImport_ImportModule("time");
     if (time_module) { PyDict_SetItemString(globals, "time", time_module); Py_DECREF(time_module); }
 

@@ -97,12 +97,28 @@ class Theme:
     def neutral_block_color(self) -> QColor:
         return QColor(self._s.color_neutral_block)
 
+    def custom_color(self) -> QColor:
+        return QColor(self._s.color_custom)
+
+    def function_color(self) -> QColor:
+        return QColor(self._s.color_function)
+
+    def true_color(self) -> QColor:
+        return QColor(self._s.color_true)
+
+    def false_color(self) -> QColor:
+        return QColor(self._s.color_false)
+
     def category_color(self, category: str) -> QColor:
         """"input" / "output" / anything else -> neutral."""
         if category == "input":
             return self.input_color()
         if category == "output":
             return self.output_color()
+        if category == "custom":
+            return self.custom_color()
+        if category == "function":
+            return self.function_color()
         return self.neutral_block_color()
 
     # ---- derived ---------------------------------------------------------

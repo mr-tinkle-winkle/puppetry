@@ -63,7 +63,11 @@ class ThemeSettings:
     # the color-scheme pass. No system-palette equivalent -- always these.
     color_input: str = "#e0955a"           # orange: reads/receives (arguments, variable reads, conditions)
     color_output: str = "#5a9ee0"          # blue: synthesizes/acts (kd/ku/tap/combo/type/move_mouse/wheel/command)
-    color_neutral_block: str = "#8a8a8a"   # neither: control flow, timing, markers, ignore/actAs
+    color_neutral_block: str = "#8a8a8a"   # neither: control flow, timing, markers
+    color_custom: str = "#9b6ad6"          # purple: custom code / custom blocks
+    color_function: str = "#c9609c"        # pink: per-macro functions (create/run function, return)
+    color_true: str = "#4caf62"            # green: True
+    color_false: str = "#e05757"           # red: False
     text_outline_width: float = 1.0        # OutlinedLabel stroke width, px
 
 

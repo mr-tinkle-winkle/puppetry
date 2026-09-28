@@ -22,7 +22,7 @@ from PySide6.QtWidgets import QGridLayout, QHBoxLayout, QLabel, QWidget
 from ui_kit.custom_button import CustomButton
 from ui_kit.rounded_rect import rounded_rect_path
 from ui_kit.theme import Theme, contrast_text
-from widgets import PageBase, dim_label, label_style, section_title
+from widgets import PageBase, dim_label, label_style, section_title, mark_input
 
 WINDOW_S = 1.0     # "current" = events in the last second
 SAMPLE_MS = 50
@@ -131,7 +131,9 @@ class VisualizerPage(PageBase):
         self.clicks = RateCounter()
         self.keys = RateCounter()
 
-        self.content_layout.addWidget(section_title("CPS tester"))
+        self.cps_title = section_title("CPS tester")
+        mark_input(self.cps_title)   # measures real input as an app receives it
+        self.content_layout.addWidget(self.cps_title)
         self.content_layout.addWidget(dim_label(
             "Measures what an app actually receives. Past a certain rate the compositor and the "
             "receiving app become the limit rather than Puppetry -- and if the kernel's per-client "
@@ -151,6 +153,7 @@ class VisualizerPage(PageBase):
             for col, key in enumerate(("current", "peak", "avg", "total"), start=1):
                 lbl = QLabel("0")
                 lbl.setFont(big)
+                mark_input(lbl)
                 self.labels[(name, key)] = lbl
                 grid.addWidget(lbl, row, col)
         self.content_layout.addLayout(grid)

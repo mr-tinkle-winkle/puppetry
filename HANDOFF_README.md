@@ -550,7 +550,10 @@ order, now targeting the C++ daemon (`native/`) and the Qt GUI
   - `gui/reference.py` — function/simplified-name reference text, plus
     the structured `PRIMITIVES` table (Session 12).
   - `gui/block_model.py`, `block_render.py`, `block_editor.py` — the
-    block editor (Session 12): model + code round-trip, drawing, UI.
+    block editor (Sessions 12-13): model + code round-trip, drawing, UI.
+  - `gui/custom_blocks.py`, `custom_block_dialog.py` — the custom block
+    library + its editor dialog (Session 13).
+  - `gui/ui_kit/icons.py` — icon loader + the list of expected icon files.
   - `gui/puppetry_config.py` — on-disk config, control-socket client,
     helper-binary discovery ($PUPPETRY_BIN_DIR, then native/build, then
     $PATH), macro validation via `puppetry-daemon --check`.
@@ -1571,6 +1574,174 @@ re-read drops loose stacks and undo history — acceptable mid-recording.
 - Very long raw/comment lines aren't wrapped; the block just gets wide.
 - Palette is a fixed 300 px column; on a 1400 px window the canvas is
   narrow unless the settings splitter is dragged left.
+
+## Session 13 — native interpreter, new primitives, block editor round 2, app-wide colors
+
+mrtw's list after trying Session 12, plus two mid-session additions. All
+built. Verified: native ctest **8/8** incl. the new `test_native_interp`
+(67 checks, differential native-vs-Python), `gui/test_app.py` 161 ->
+**215**, `ui_kit_test_kit.py` green. Still **offscreen only** -- do a real
+display + real hardware pass (see "Needs a real-machine check" below).
+
+### 1. The native path is now a real interpreter (mrtw chose this)
+
+`native/src/native_vm.cpp` was rewritten: tokenizer (Python INDENT/DEDENT,
+triple-quoted/raw strings, line continuations) -> recursive-descent parser
+-> AST -> compile pass that resolves every name once (locals to slots,
+key names to constants) -> closure tree. Supports: variables, `+ - * / //
+% **`, comparisons (chained too), `and/or/not`, `x if c else y`,
+if/elif/else, while, for-in (`range()` is lazy -- `range(10**10)` is
+fine), break/continue, `def`/`return` (per-macro functions; they can read
+macro-level variables, `nonlocal` to write them; recursion capped at 200),
+top-level `return`, lists/tuples, indexing, tuple unpacking (`x, y = ...`,
+`for a, b in ...`), builtins `int float str bool len abs round min max
+range list print`, every primitive, other macros/custom blocks by name.
+Rejected AT COMPILE TIME with a clear message (so Save catches it): import,
+class, try, with, lambda, attribute access other than `.x/.y`, method
+calls, f-strings, slicing, dicts, nested def. Runtime errors carry the
+line number. Every loop iteration checks the abort flag.
+- `tests/test_native_interp.cpp` runs ~30 programs through BOTH backends
+  and requires identical output (a probe "macro" records values), plus
+  compile-error, abort, lazy-range and wait-primitive checks. Add a case
+  there whenever the interpreter grows.
+- Semantics match Python except: defs are hoisted (a function can be
+  called above its `def` natively; Python would NameError) and primitive
+  ARGUMENTS stay lenient (`tap("30")` works) like before.
+- Hot path: a literal-args primitive line is still one closure over
+  pre-resolved constants; typed `Arg` accessors avoid Value copies.
+  bench_cps: ~2.2-2.4M taps/s vs ~2.5M before (within noise-ish; the extra
+  cost is one more std::function hop per statement).
+- The block editor no longer forces "Run as embedded Python" on for loops/
+  if/variables (Session 12's auto-flip is gone) -- native runs them.
+- Python-path fix found by the differential test: multi-line triple-quoted
+  strings used to get the function-body indentation added to their
+  CONTENT (`type("""a\nb""")` typed "a\n    b"). `python_embed.cpp`'s
+  indent now skips lines that start inside a string.
+
+### 2. New primitives (both paths, `primitives.cpp` + `python_embed.cpp` + native)
+
+- `getMousePosition()` -> a position: a real `(x, y)` tuple with `.x`/`.y`
+  (Python: `MousePosition(tuple)` subclass; native: a tuple Value with
+  `is_point`). `getMousePosition.x` / `.y` read it live without the call
+  (Python: the global is a callable object with properties). Uses the
+  cursor cache when fresh, else kdotool; errors clearly without kdotool.
+- `move_mouse(pos)` takes a saved position; a real saved position defaults
+  to `move_to=True` (absolute) unless move_to is passed. A plain tuple
+  stays relative unless move_to=True.
+- `getButtonsHeld()` -> list of REAL held key codes (`KEY_A in
+  getButtonsHeld()` works on both paths).
+- `waitForPress(button="any", repress=False)` -> blocks until that real
+  key/button is pressed and RETURNS its code; blank / None / "any" / "all"
+  = any key or mouse button (`b = waitForPress()` then `tap(b)`).
+  repress=True swallows that press (see mechanics below).
+- `waitForReactivation(repress=False)` -> blocks until THIS macro is
+  triggered again (combo or `puppetry --name`); that trigger is consumed
+  (doesn't start/toggle/stop anything). repress=True swallows the combo
+  keys' presses while waiting. Uses a thread-local "current macro" set by
+  macro threads (`current_macro()` in macro.cpp).
+- Mechanics: `Runtime::repress_codes` (counted) / `repress_any` make the
+  grab logic grab the device and `should_forward` drop those presses;
+  `watch_device` now decides forwarding BEFORE handling the event, so a
+  waiter that wakes and drops its repress codes can't leak the press it
+  waited for. Waiters poll every 1 ms and are abortable; cleanup is RAII.
+- Macro arguments passed as strings are now converted to the type of that
+  parameter's default (`coerce_macro_arg`): `arguments(hits=3)` gets 5
+  from "5", `arguments(key=KEY_A)` gets KEY_B's code from "KEY_B", bools
+  from "True"/"False". Both paths. (Needed for custom blocks + "run macro
+  with arguments", and just nicer.)
+
+### 3. Custom blocks (daemon side)
+
+`~/.config/macro-daemon/custom_blocks.json` (`gui/custom_blocks.py`). The
+daemon (`main.cpp`) registers each entry's `code` under
+`sanitize(name)` like a macro with no combo, and adds the names to the
+Python trampoline list, so any macro can call `click_at(100, 200)` on
+either path. The GUI generates `code` = `arguments(<arg>=<default>, ...)`
++ the template with `{arg}` -> `arg`, and validates it with `--check`
+before saving. Saving/deleting a custom block restarts the daemon.
+
+### 4. Block editor changes (all of mrtw's list)
+
+- **Growing list sockets**: every varargs socket (combo keys, ignore keys,
+  act as, run command's values, arguments, run macro/function arguments,
+  function parameters) shows its values + one empty `+` slot; filling it
+  adds another, clearing one removes it. Model: those fields are Python
+  lists (`bm.set_socket` handles append/remove).
+- **Plain-English labels** from `Primitive.label` (`actAs` -> "act as",
+  `move_mouse` -> "move mouse", `kd`/`ku` -> "key down"/"key up",
+  `wheel` -> "scroll", `command` -> "run command", ...). A test enforces no
+  camelCase/snake_case in labels.
+- **Reporters** (`block_model.Rep`, nestable, drawn inside sockets):
+  variables, true/false (**green / red**, click to flip), "[] is [equal to
+  ▾] []" (six ops, hexagon), "[key] is held", mouse position / mouse x /
+  mouse y, buttons held, "key pressed" (`waitForPress()` as a value). The
+  parser turns matching code into these (`x >= 5`, `KEY_A in
+  getButtonsHeld()`, `getMousePosition.y`, `b = waitForPress()`...).
+  **Drag any reporter OUT of its socket** into another one; drop it on
+  nothing (or the palette) to remove it.
+- **Palette**: Output (+ "run macro"), Timing & control (+ true, false),
+  **Conditions** (if, if/else, compare, is held), Real input (wait for
+  press / reactivation, ignore, ignore keys, act as, key pressed, mouse
+  position, buttons held), Variables, **Functions**, **My blocks**, Other
+  (note, custom code). Wide blocks shrink to fit.
+- **Run macro**: one block, "run macro [name ▾] with arguments [..][+]".
+- **Notes anywhere**: a note dropped away from a stack (or dragged off one
+  on its own) becomes a free-floating card with no notch/tab. Saved as a
+  `#@note x,y: text` comment line at the end of the code (the daemon
+  ignores comments), so position and text survive. Drag it into a stack to
+  attach it again.
+- **Custom code block** = the old raw block, now purple and named so.
+- **Create a custom block**: "My blocks > + Create a custom block" opens
+  `custom_block_dialog.py`: name, category (any palette section), color
+  (orange/blue/gray/purple presets or any hex), arguments (add/remove;
+  default; choices from any value / keyboard keys / mouse buttons /
+  keyboard + mouse / a custom list -> dropdown or completions), code
+  template, embedded-Python toggle, tooltip. Right-click a custom block in
+  the palette to edit/delete it.
+- **Per-macro functions**: "create function [name] with [params][+]" hat;
+  blocks snap under it; "run function [name ▾] with arguments", and
+  "return [value]". Code: top-level `def`s, emitted after `arguments()` and
+  before the main script. Functions are their own stacks (auto-placed to
+  the right; positions aren't saved -- only notes' are).
+- **Hat moves** the whole script (was already true; now tested), and a
+  function's hat moves the function (drop it on the palette to delete).
+- **Tooltips** on every block, socket (per-param docs in `Param.doc`),
+  reporter and palette entry.
+- **Undo transcriptions**: Block view pushes one undo snapshot when a
+  transcription starts and re-reads keep that undo stack; Text view does
+  the clear + every inserted chunk inside ONE QTextDocument edit block
+  (it used to `setPlainText`, which wiped undo history).
+- **Scroll bars only when needed**: the scene rect is the blocks' bounds +
+  a small margin, at least the visible area.
+
+### 5. App-wide color scheme + icons
+
+- Orange (input): record combo, every key picker (ping/transcribe/restart/
+  checkpoint/abort), device Detect buttons, Start Transcribing, the mouse
+  readout, "Transcribe Inputs"/"While this macro runs" titles, macro-row
+  combo buttons, the Input Visualizer's title and counters. Blue (output):
+  sound previews, the new Settings "Playback (virtual keyboard + mouse)"
+  group (pointer accel + real-time priority moved there). Helpers:
+  `widgets.mark_input()` / `mark_output()`. New theme roles (editable in
+  Settings > Appearance): `color_custom` (purple), `color_function`
+  (pink), `color_true` (green), `color_false` (red).
+- **Icons: waiting on mrtw's art.** `gui/ui_kit/icons.py` documents the
+  exact filenames (nav_*, block_* per palette section, optional
+  primitive_<name>) and loads `resources/icons/<name>.svg` (recolored via
+  `currentColor`/black -> the theme color where it's shown) or `.png`.
+  Wired into the sidebar (icon left of the label) and the palette (section
+  headers, per-primitive). Missing files = text only; nothing breaks.
+
+### Needs a real-machine check
+
+- waitForPress/waitForReactivation with repress=True on real devices (the
+  grab + forwarding path is exercised in tests only via notify_press and
+  the repress sets, not a real evdev grab).
+- getMousePosition via kdotool on KDE; move_mouse(pos) accuracy.
+- Drag feel: reporter drag-out threshold, note dragging, hat dragging,
+  palette shrink-to-fit on a real DPI.
+- Custom block Save restarts the daemon (same `systemctl --user restart`
+  as macro Save).
 
 ## Build/run/environment
 

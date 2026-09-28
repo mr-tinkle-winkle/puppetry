@@ -22,11 +22,12 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from pathlib import Path
 
 from PySide6.QtCore import QPoint, QPointF, Qt
-from PySide6.QtGui import QCursor
+from PySide6.QtGui import QColor, QCursor
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
 import puppetry_config as cfg
+from ui_kit.theme import Theme
 
 qapp = QApplication.instance() or QApplication([])
 QCursor.setPos(4000, 4000)  # offscreen windows under the cursor render hovered (pitfall #12)
@@ -54,7 +55,7 @@ BLOCK_ROUND_TRIP_SAMPLES = [
     "        pass\n    else:\n        # nothing\n        wait(0.1)\n",
     "for i in range(3):\n    move_mouse(10*i, 0, time_=0.1, easing=\"linear\")\n    # inner\n# outer\ntap(KEY_C)\n",
     "combo(KEY_LEFTCTRL, KEY_S, time_=0.2)\nactAs(BTN_LEFT, False, KEY_Q, KEY_E)\ncommand(\"notify-send {0}\", \"hi\")\n",
-    "import os\nprint('x'); tap(KEY_A)\nif True: tap(KEY_B)\ndef f():\n    pass\n",
+    "def f():\n    pass\nimport os\nprint('x'); tap(KEY_A)\nif True: tap(KEY_B)\n",
     "type(\"\"\"multi\nline\"\"\")\nfor _ in range(2):\n    type(\"\"\"a\nb\"\"\")\n",
     "if True:\n\ttap(KEY_A)\n\twhile False:\n\t\tpass\n",
     "checkpoint()\nspeed(2)\nignore(\"keyboard\")\nignore_keys(KEY_W, BTN_LEFT)\nkd(KEY_A)\nku(KEY_A)\nwheel(-3)\n",
@@ -68,22 +69,69 @@ BLOCK_ROUND_TRIP_SAMPLES = [
 def block_tests(w, ed, model) -> None:
     import block_model as bm
     import block_render as br
+    import custom_blocks
     import editor_page
+    from block_model import Rep
     from reference import PRIMITIVES, PRIMITIVES_BY_NAME
 
     # ------------------------------------------------------------ model: round-trip
     bad = [s for s in BLOCK_ROUND_TRIP_SAMPLES if not bm.round_trips(s, ["second"])]
     check("blocks: code -> blocks -> code is byte-for-byte for every sample", bad == [])
+    if bad:
+        print("   round-trip failures:", bad)
     d = bm.code_to_blocks("import os\ntry:\n    tap(KEY_A)\nexcept Exception:\n    pass\nwith open('x') as f: pass\n")
-    check("blocks: unrecognized statements become raw blocks (nothing dropped)",
+    check("blocks: unrecognized statements become custom-code blocks (nothing dropped)",
           [b.kind for b in d.main] == ["raw", "raw", "raw"] and "except Exception:" in d.main[1].fields["code"])
     d = bm.code_to_blocks("a; b\nif x: tap(KEY_A)\n")
-    check("blocks: one-line compound/semicolon statements stay raw", [b.kind for b in d.main] == ["raw", "raw"])
+    check("blocks: one-line compound/semicolon statements stay custom code", [b.kind for b in d.main] == ["raw", "raw"])
     try:
         bm.code_to_blocks("for _ in range(3:\n")
         check("blocks: a syntax error raises BlockParseError", False)
     except bm.BlockParseError as exc:
         check("blocks: a syntax error raises BlockParseError", exc.line == 1)
+
+    # ------------------------------------------------------------ model: reporters
+    d = bm.code_to_blocks("x = 0\nif x >= 5:\n    pass\nwhile KEY_A in getButtonsHeld():\n    pass\n"
+                          "p = getMousePosition()\ny = getMousePosition.y\nb = waitForPress(repress=True)\n"
+                          "tap(b, time_=0.1)\ntype('a', async_=True)\n")
+    cond = d.main[1].fields["cond0"]
+    check("reporters: a comparison becomes a compare reporter with a variable inside",
+          isinstance(cond, Rep) and cond.kind == "compare" and cond.name == ">=" and cond.fields["left"] == Rep("var", "x")
+          and cond.fields["right"] == "5")
+    check("reporters: `key in getButtonsHeld()` becomes \"key is held\"",
+          d.main[2].fields["cond"] == Rep("held", "", {"key": "KEY_A"}))
+    check("reporters: mouse position (and .y)", d.main[3].fields["value"] == Rep("mouse", "")
+          and d.main[4].fields["value"] == Rep("mouse", "y"))
+    press = d.main[5].fields["value"]
+    check("reporters: b = waitForPress(...) holds a \"key pressed\" reporter",
+          isinstance(press, Rep) and press.kind == "press" and press.fields["repress"] == Rep("bool", "True"))
+    check("reporters: True/False are true/false reporters", d.main[7].fields["async_"] == Rep("bool", "True"))
+    for b in bm.walk(d.main):
+        b.touch()
+    regen = bm.blocks_to_code(d)
+    check("reporters regenerate valid, equivalent code",
+          "if x >= 5:" in regen and "while KEY_A in getButtonsHeld():" in regen and "y = getMousePosition.y" in regen
+          and "b = waitForPress(repress=True)" in regen and "type('a', async_=True)" in regen)
+    t = Theme()
+    check("true is green, false is red", br.rep_color(Rep("bool", "True"), t) == t.true_color()
+          and br.rep_color(Rep("bool", "False"), t) == t.false_color() and t.true_color() != t.false_color())
+
+    # ------------------------------------------------------------ model: list sockets
+    cb = bm.new_call("combo")
+    check("list sockets start with the starter values", cb.fields["keys"] == ["KEY_LEFTCTRL", "KEY_C"])
+    bm.set_socket(cb, ("keys", 2, ()), "KEY_V")
+    check("filling the + slot appends", cb.fields["keys"] == ["KEY_LEFTCTRL", "KEY_C", "KEY_V"])
+    bm.set_socket(cb, ("keys", 0, ()), "")
+    check("clearing a list element removes it", cb.fields["keys"] == ["KEY_C", "KEY_V"])
+    ar = bm.new_block("arguments")
+    bm.set_socket(ar, ("params", 1, ()), "key=KEY_A")
+    check("arguments grows the same way", bm.blocks_to_code([ar]) == "arguments(count=3, key=KEY_A)\n")
+    cmp_ = bm.new_rep("compare")
+    ib = bm.new_block("if")
+    ib.fields["cond0"] = cmp_
+    bm.set_socket(ib, ("cond0", None, ("left",)), Rep("var", "n"))
+    bm.set_socket(ib, ("cond0", None, ("right",)), "3")
+    check("nested sockets inside a comparison", bm.blocks_to_code([ib]) == "if n == 3:\n    pass\n")
 
     # ------------------------------------------------------------ model: codegen per block type
     def gen(*blocks):
@@ -103,27 +151,69 @@ def block_tests(w, ed, model) -> None:
     mm.fields["easing"] = '"linear"'
     check("codegen: skipped optional -> later ones become keywords", gen(mm) == 'move_mouse(100, 0, easing="linear")\n')
     check("codegen: checkpoint/wait", gen(bm.new_call("checkpoint"), bm.new_call("wait")) == "checkpoint()\nwait(0.1)\n")
+    check("codegen: wait for press / reactivation",
+          gen(bm.new_call("waitForPress"), bm.new_call("waitForReactivation")) == "waitForPress()\nwaitForReactivation()\n")
     rep = bm.new_block("repeat")
     rep.bodies[0].append(bm.new_call("kd"))
     check("codegen: repeat nests its children", gen(rep) == "for _ in range(10):\n    kd(KEY_A)\n")
     check("codegen: empty mouth emits pass", gen(bm.new_block("while")) == "while True:\n    pass\n")
     ie = bm.new_block("if", has_else=True)
+    ie.fields["cond0"] = Rep("bool", "True")
     ie.bodies[1].append(bm.new_call("ku"))
     check("codegen: if/else", gen(ie) == "if True:\n    pass\nelse:\n    ku(KEY_A)\n")
     fo = bm.new_block("for")
     check("codegen: for each", gen(fo) == "for i in range(10):\n    pass\n")
     ch = bm.new_block("change")
     ch.fields["op"] = "*"
-    check("codegen: set / change / comment / arguments / macro call",
+    check("codegen: set / change / note / arguments / run macro",
           gen(bm.new_block("arguments"), bm.new_block("assign"), ch, bm.new_block("comment"),
               bm.new_block("macro_call", name="second"))
           == "arguments(count=3)\nx = 0\nx *= 1\n# note\nsecond()\n")
+    mc = bm.new_block("macro_call", name="second")
+    mc.fields["args"] = ["5", Rep("var", "n")]
+    check("codegen: run macro with arguments", gen(mc) == "second(5, n)\n")
     d = bm.code_to_blocks("tap( KEY_A ,0.2)\n")
     d.main[0].fields["time_"] = "0.5"
     d.main[0].touch()
     check("codegen: an edited block is regenerated from its sockets", bm.blocks_to_code(d) == "tap(KEY_A, 0.5)\n")
 
-    # the dictionary table can't drift from what the daemon registers
+    # ------------------------------------------------------------ model: functions + notes
+    code = ("arguments(n=2)\n\ndef burst(k, times=3):\n    for _ in range(times):\n        tap(k)\n    return times\n\n"
+            "burst(KEY_A)\n#@note 300,40: remember to test this\n")
+    d = bm.code_to_blocks(code)
+    check("functions: a top-level def becomes its own function stack",
+          [f.name for f in d.functions] == ["burst"] and d.functions[0].fields["params"] == ["k", "times=3"]
+          and [b.kind for b in d.main] == ["arguments", "func_call"])
+    check("functions: return is a block", d.functions[0].bodies[0][-1].kind == "return")
+    check("notes: #@note lines become free-floating notes", len(d.notes) == 1 and d.notes[0].text == "remember to test this"
+          and (d.notes[0].x, d.notes[0].y) == (300, 40))
+    check("functions + notes round-trip byte-for-byte", bm.blocks_to_code(d) == code)
+    d.notes[0].x = 123
+    check("a moved note saves its new position", "#@note 123,40: remember to test this" in bm.blocks_to_code(d))
+
+    # ------------------------------------------------------------ custom blocks
+    cdef = bm.CustomDef(name="click at", func="click_at", category="Output", color="#123456",
+                        args=[bm.CustomArg("x", "0"), bm.CustomArg("y", "0"), bm.CustomArg("btn", "BTN_LEFT", "mouse")],
+                        template="move_mouse({x}, {y}, time_=0, move_to=True)\ntap({btn}, time_=0)\n")
+    check("custom block body: arguments() + template with {arg} -> arg",
+          bm.custom_body_code(cdef) == "arguments(x=0, y=0, btn=BTN_LEFT)\nmove_mouse(x, y, time_=0, move_to=True)\n"
+                                       "tap(btn, time_=0)\n")
+    customs = {"click_at": cdef}
+    d = bm.code_to_blocks("click_at(10, 20)\n", customs=customs)
+    check("custom block calls parse into custom blocks", d.main[0].kind == "custom" and d.main[0].fields["x"] == "10"
+          and d.main[0].fields["btn"] == "BTN_LEFT")
+    cb2 = bm.new_block("custom", defn=cdef)
+    check("custom block codegen passes every argument", bm.blocks_to_code([cb2], customs=customs) == "click_at(0, 0, BTN_LEFT)\n")
+    custom_blocks.save(customs)
+    check("custom blocks save/load", custom_blocks.load()["click_at"].template == cdef.template
+          and custom_blocks.load()["click_at"].args[2].source == "mouse")
+    if cfg.find_binary("puppetry-daemon"):
+        ok, msg = custom_blocks.check(cdef)
+        check("a custom block's code compiles with the daemon (native path)", ok)
+        bad_def = bm.CustomDef(name="bad", func="bad", template="tap({nope})\n")
+        check("a broken custom block is rejected", not custom_blocks.check(bad_def)[0])
+
+    # ------------------------------------------------------------ primitive table vs daemon
     src = (Path(__file__).resolve().parent.parent / "native" / "src" / "python_embed.cpp").read_text()
     import re as _re
     native = set(_re.findall(r'FC\("([A-Za-z_]+)"', src))
@@ -131,22 +221,35 @@ def block_tests(w, ed, model) -> None:
           native == {p.name for p in PRIMITIVES})
     check("every primitive has an input/output/neutral category",
           all(p.category in ("input", "output", "neutral") for p in PRIMITIVES))
+    check("block labels are plain English (no camelCase / snake_case)",
+          all(p.title == p.title.lower() and "_" not in p.title for p in PRIMITIVES)
+          and PRIMITIVES_BY_NAME["actAs"].title == "act as" and PRIMITIVES_BY_NAME["move_mouse"].title == "move mouse")
 
-    # every fresh palette block compiles on the NATIVE fast path (the
-    # strictest compiler) exactly as the daemon will run it
+    # everything the palette makes compiles on the NATIVE path, control flow included
     if cfg.find_binary("puppetry-daemon"):
         failures = []
         for p in PRIMITIVES:
+            if p.reporter:
+                continue
             code = bm.blocks_to_code([bm.new_call(p.name)])
             ok, msg = cfg.check_macro({"name": "t", "code": code, "python_on": False})
             if not ok:
                 failures.append((p.name, msg))
         check("every palette primitive block compiles on the native path", failures == [])
-        py = bm.blocks_to_code([bm.new_block("arguments"), bm.new_block("assign"), bm.new_block("change"),
-                                rep, ie, fo, bm.new_block("while")])
-        ok, msg = cfg.check_macro({"name": "t", "code": py.replace("while True", "while False"), "python_on": True})
-        check("control-flow/variable blocks compile as embedded Python", ok)
-    check("needs_python: loops/variables/if only", bm.needs_python([rep]) and not bm.needs_python([bm.new_call("tap")]))
+        cmpif = bm.new_block("if", has_else=True)
+        cmpif.fields["cond0"] = Rep("compare", ">", {"left": Rep("var", "x"), "right": "1"})
+        fdef = bm.new_block("def", name="helper")
+        fdef.fields["params"] = ["a"]
+        fdef.bodies[0] = [bm.new_block("return")]
+        fdef.bodies[0][0].fields["value"] = Rep("var", "a")
+        doc = bm.Doc(main=[bm.new_block("arguments"), bm.new_block("assign"), bm.new_block("change"), rep, cmpif, fo,
+                           bm.new_block("func_call", name="helper")], functions=[fdef],
+                     notes=[bm.Note("a note", 5, 5)])
+        doc.main[-1].fields["args"] = ["1"]
+        full = bm.blocks_to_code(doc)
+        for py in (False, True):
+            ok, msg = cfg.check_macro({"name": "t", "code": full, "python_on": py})
+            check(f"control flow / variables / functions / notes compile ({'python' if py else 'native'})", ok)
 
     # ------------------------------------------------------------ editor: views
     odd = "tap( KEY_A ,0.2)\n\n# note\nfor _ in range(2):\n  wait(0.1)  # two-space indent\n"
@@ -155,24 +258,30 @@ def block_tests(w, ed, model) -> None:
     m["code"], m["python_on"] = odd, True
     ed.load_macro("m1")
     be = ed.blocks
-    # room to drag without the canvas auto-scrolling under the test's feet
     w.resize(2000, 1100)
     from PySide6.QtWidgets import QSplitter
     ed.findChild(QSplitter).setSizes([300, 1700])
     pump(50)
     check("editor opens macros in Block view by default", ed.view_mode() == "blocks"
           and ed.code_stack.currentWidget() is be and ed.blocks_view_btn.isChecked())
-    check("the hat shows the macro's trigger combo", be.hat_text.startswith("when ") and "pressed" in be.hat_text
-          or be.hat_text == "when this macro runs")
+    check("the hat shows the macro's trigger combo", be.hat_text.startswith("when "))
+    check("no horizontal scroll bar when the blocks fit", be.view.horizontalScrollBar().maximum() == 0)
     ed.set_view_mode("text")
     ed.set_view_mode("blocks")
     ed.set_view_mode("text")
     check("just looking at blocks never rewrites the code", ed.code.toPlainText() == odd and not ed.has_unsaved_changes())
     ed.set_view_mode("blocks")
 
+    titles = [t for t, _c, _e in __import__("block_editor").palette_sections(be)]
+    check("palette has a Conditions section", any(t.startswith("Conditions") for t in titles))
+    tc = next(e for t, _c, e in __import__("block_editor").palette_sections(be) if t.startswith("Timing"))
+    check("true and false live under Timing & control",
+          any(x[0] == "rep" and x[1] == Rep("bool", "True") for x in tc) and any(x[0] == "rep" and x[1] == Rep("bool", "False") for x in tc))
+
     def lb_of(block):
         for it in be._items:
-            for lb in it.layout.blocks:
+            lay = getattr(it, "layout", None)
+            for lb in (lay.blocks if lay else []):
                 if lb.block is block:
                     return it, lb
         return None, None
@@ -189,6 +298,11 @@ def block_tests(w, ed, model) -> None:
         QTest.mouseRelease(vpt, Qt.LeftButton, mods, p1)
         pump()
 
+    # tooltips everywhere
+    missing = [lb.block.kind for it in be._items for lb in getattr(it, "layout", br.StackLayout([], [], 0, 0)).blocks
+               if not be.tip_for(__import__("block_editor").Hit(it, lb, None, "block"))]
+    check("every block on the canvas has a hover tooltip", missing == [])
+
     # drag the loop out onto empty canvas -> loose, not part of the macro
     it, lb = lb_of(be.doc.main[2])
     p0 = vpos(it, lb.x + 4, lb.y + 10)
@@ -196,7 +310,6 @@ def block_tests(w, ed, model) -> None:
     check("dragging a block away detaches it and everything below", ed.code_text() == "tap( KEY_A ,0.2)\n\n# note\n"
           and be.loose_count() == 2)
     check("loose blocks are called out as not saved", "won't be saved" in be.loose_label.text())
-    # ...and back under the comment: snaps, ghost shown while hovering
     it, lb = lb_of(be.doc.loose[0].blocks[0])
     cit, clb = lb_of(be.doc.main[1])
     p0 = vpos(it, lb.x + 4, lb.y + 10)
@@ -220,6 +333,31 @@ def block_tests(w, ed, model) -> None:
     check("redo moves it again", be.loose_count() == 1)
     be.undo()
 
+    # a lone note dragged to empty canvas becomes a free-floating note -- and is saved
+    it, lb = lb_of(be.doc.main[1])
+    p0 = vpos(it, lb.x + 4, lb.y + 10)
+    drag(p0, p0 + QPoint(600, 40), mods=Qt.ControlModifier)
+    check("a note dropped on empty canvas floats free (not a loose block) and is saved",
+          len(be.doc.notes) == 1 and be.loose_count() == 0 and "#@note " in ed.code_text()
+          and ed.code_text().rstrip().endswith(": note"))
+    note_item = next(i for i in be._items if isinstance(i, __import__("block_editor").NoteItem))
+    p0 = v.mapFromScene(note_item.mapToScene(QPointF(10, 10)))
+    it, lb = lb_of(be.doc.main[0])
+    p1 = vpos(it, lb.x + 12, lb.y + lb.h + 12)
+    drag(p0, p1)
+    check("dragging a free note into a stack attaches it again", not be.doc.notes
+          and be.doc.main[1].kind == "comment" and "#@note" not in ed.code_text())
+    be.undo()
+    be.undo()
+    check("(undo back to the start)", ed.code_text() == odd)
+
+    # the hat moves the whole script
+    x0 = be.doc.main_x
+    hat_lb = be.main_item.layout.blocks[0]
+    p0 = v.mapFromScene(be.main_item.mapToScene(QPointF(hat_lb.x + 30, hat_lb.y + 10)))
+    drag(p0, p0 + QPoint(80, 30))
+    check("dragging \"when ... pressed\" moves the script", abs(be.doc.main_x - (x0 + 80)) < 2 and ed.code_text() == odd)
+
     # click a socket -> inline editor -> Enter commits
     it, lb = lb_of(be.doc.main[0])
     fh = lb.fields[0]
@@ -235,44 +373,75 @@ def block_tests(w, ed, model) -> None:
     check("editing a socket rewrites just that block", ed.code_text().startswith("tap(KEY_Z, 0.2)\n\n# note\nfor _ in range(2):\n  wait(0.1)  # two-space indent"))
     check("block edits mark the macro unsaved", ed.has_unsaved_changes())
 
-    # dropping a variable onto a socket
-    be.variable_drop("x", vpos(it, 0, 0) and it.mapToScene(lb.fields[0].rect.center()))
+    # reporters: drop a variable in, then drag it back OUT
+    it, lb = lb_of(be.doc.main[0])
+    be.rep_drop(Rep("var", "x"), it.mapToScene(lb.fields[0].rect.center()))
     check("dropping a variable onto a socket uses it", ed.code_text().startswith("tap(x, 0.2)"))
+    it, lb = lb_of(be.doc.main[0])
+    vf = lb.fields[0]
+    p0 = vpos(it, vf.rect.center().x(), vf.rect.center().y())
+    QTest.mousePress(vpt, Qt.LeftButton, Qt.NoModifier, p0)
+    for k in range(1, 9):
+        QTest.mouseMove(vpt, p0 + QPoint(40 * k, 30 * k))
+    lifted = be.drag is not None and be.drag[0] == "rep"
+    QTest.mouseRelease(vpt, Qt.LeftButton, Qt.NoModifier, p0 + QPoint(320, 240))
+    pump()
+    check("a reporter can be dragged OUT of its socket (dropped on nothing = removed)",
+          lifted and ed.code_text().startswith("tap(, 0.2)") is False and be.doc.main[0].fields["key"] == "")
+    be.undo()
+    be.undo()
+    check("(undo restores it)", ed.code_text().startswith("tap(KEY_Z, 0.2)"))
+
+    # list sockets in the UI: the + slot
+    be.add_blocks([bm.new_call("combo")])
+    it, lb = lb_of(be.doc.main[-1])
+    plus = [f for f in lb.fields if f.kind == "append"]
+    check("a list socket shows one empty + slot", len(plus) == 1 and plus[0].ref == ("keys", 2, ()))
+    be.set_socket(be.doc.main[-1], plus[0].ref, "KEY_V")
+    it, lb = lb_of(be.doc.main[-1])
+    plus = [f for f in lb.fields if f.kind == "append"]
+    check("...filling it adds another", plus[0].ref == ("keys", 3, ()) and ed.code_text().endswith("combo(KEY_LEFTCTRL, KEY_C, KEY_V)\n"))
+    be.undo()
     be.undo()
 
-    # python_on is locked on while a loop/variable/if block exists...
+    # python_on is NOT forced any more: the native path runs loops/ifs itself
     ed.python_cb.setChecked(False)
-    check("embedded Python can't be turned off while a loop block exists",
-          ed.python_cb.isChecked() and "remove them first" in ed.error.text())
-    be.delete_block(next(b for b in be.doc.main if b.kind == "repeat"))
-    ed.python_cb.setChecked(False)
-    check("...but can once it's gone", not ed.python_cb.isChecked())
-    # ...and a palette drop of a loop into a python_off macro turns it on
     it, lb = lb_of(be.doc.main[0])
     be.external_drop({"spec": {"kind": "repeat"}, "hx": 10, "hy": 10},
                      it.mapToScene(QPointF(lb.x + 10, lb.y + lb.h + 10)))
     pump()
     check("palette drop snaps a new block in", ed.code_text().startswith("tap(KEY_Z, 0.2)\nfor _ in range(10):\n  pass\n"))
     check("new blocks follow the macro's own indentation (2 spaces here)", "\n  pass\n" in ed.code_text())
-    check("adding a loop block auto-enables embedded Python, with a note",
-          ed.python_cb.isChecked() and "embedded Python" in ed.error.text())
-    ed.python_cb.setChecked(False)
-    check("...and it can't be turned back off while the loop is there", ed.python_cb.isChecked())
+    check("a loop leaves \"Run as embedded Python\" alone (native runs it)", not ed.python_cb.isChecked())
+    if cfg.find_binary("puppetry-daemon"):
+        check("...and the macro saves on the native path", ed.save())
+    ed.python_cb.setChecked(True)
+
+    # functions from the palette
+    be.external_drop({"spec": {"kind": "def"}, "hx": 10, "hy": 10}, QPointF(900, 80))
+    pump()
+    check("dropping \"create function\" makes a function stack", [f.name for f in be.doc.functions] == ["my_function"]
+          and "def my_function():\n  pass\n" in ed.code_text())
+    fit = next(i for i in be._items if getattr(i, "role", "") == "def")
+    be.external_drop({"spec": {"kind": "call", "name": "tap"}, "hx": 10, "hy": 10},
+                     fit.mapToScene(QPointF(4, fit.layout.blocks[0].h + 4)))
+    pump()
+    check("blocks snap under a function's hat", "def my_function():\n  tap(KEY_A)\n" in ed.code_text())
+    be.add_blocks([bm.new_block("func_call", name="my_function")])
+    check("run function calls it", ed.code_text().endswith("my_function()\n"))
+    be.undo(); be.undo(); be.undo()
 
     # arguments() only ever snaps to the very top of the macro
     args = [bm.new_block("arguments")]
     it, lb = lb_of(be.doc.main[1])
     be._find_snap(it.mapToScene(QPointF(lb.x, lb.y + lb.h)), args, 40)
     check("arguments() won't snap mid-macro", be.snap is None)
-    be._find_snap(it.mapToScene(QPointF(0, 0)) - QPointF(0, 0) + QPointF(be.main_item.pos().x() - it.pos().x(), 0)
-                  if False else be.main_item.mapToScene(QPointF(0, br.HAT_BUMP + br.MIN_H)), args, 40)
+    be._find_snap(be.main_item.mapToScene(QPointF(0, br.MIN_H)), args, 40)
     check("arguments() snaps right under the hat", be.snap is not None and be.snap.index == 0
           and be.snap.container is be.doc.main)
     be.clear_hover_state()
-
     be.undo()   # the loop drop
-    be.undo()   # the delete
-    ed.python_cb.setChecked(True)
+
     # delete + context helpers
     n = len(be.doc.main)
     be.duplicate_block(be.doc.main[0])
@@ -282,9 +451,38 @@ def block_tests(w, ed, model) -> None:
     loop = next(b for b in be.doc.main if b.kind == "repeat" and b.bodies[0])
     be.to_text_block(loop)
     raw = next(b for b in be.doc.main if b.kind == "raw")
-    check("Edit as text turns a block into a raw text block", raw.fields["code"].startswith("for _ in range(2):"))
+    check("Edit as custom code turns a block into a custom code block", raw.fields["code"].startswith("for _ in range(2):"))
+    check("custom code blocks are purple", br.block_color(raw, Theme()) == Theme().custom_color())
     be.raw_to_blocks(raw)
     check("...and Turn into blocks parses it back", any(b.kind == "repeat" for b in be.doc.main))
+
+    # custom blocks through the dialog
+    import custom_block_dialog
+    dlg = custom_block_dialog.CustomBlockDialog(be, None, be.customs, be.key_names)
+    dlg.name.setText("double tap")
+    dlg.category.setCurrentText("Output")
+    dlg._set_color("#aa3344")
+    dlg.arg_rows[0].name.setText("key")
+    dlg.arg_rows[0].default.setText("KEY_A")
+    dlg.arg_rows[0].source.setCurrentIndex(1)
+    dlg.template.setPlainText("tap({key}, time_=0)\ntap({key}, time_=0)\n")
+    built = dlg.build()
+    check("custom block dialog builds the definition", built is not None and built.func == "double_tap"
+          and built.color == "#aa3344" and built.args[0].source == "keys")
+    if cfg.find_binary("puppetry-daemon"):
+        dlg._save()
+        check("custom block dialog validates with the daemon before saving", dlg.result_def is not None)
+    be.customs[built.func] = built
+    custom_blocks.save(be.customs)
+    be.palette_widget.refresh(force=True)
+    out_sec = next(e for t, _c, e in __import__("block_editor").palette_sections(be) if t.startswith("Output"))
+    check("a custom block shows up in the category it picked",
+          any(x[0] == "block" and x[1].get("func") == "double_tap" for x in out_sec))
+    be.add_blocks([bm.new_block("custom", defn=built)])
+    check("custom blocks generate a call", ed.code_text().endswith("double_tap(KEY_A)\n"))
+    if cfg.find_binary("puppetry-daemon"):
+        check("a macro using a custom block still saves", ed.save())
+    be.undo()
 
     # text <-> blocks after edits
     ed.set_view_mode("text")
@@ -296,20 +494,63 @@ def block_tests(w, ed, model) -> None:
     ed.code.setPlainText("while True:\n    tap(KEY_Q)\n")
     check("fixed code switches to blocks", ed.set_view_mode("blocks") and [b.kind for b in be.doc.main] == ["while"])
 
-    # transcription in Block view appends and re-reads the blocks
-    ed._insert_transcribed("wait(0.25)\nkd(KEY_A)\n")
+    # transcription in Block view appends, re-reads, and undoes as ONE step
+    before = ed.code_text()
+    ed._tr_join = False
+    be.begin_external_edit()
+    ed._insert_transcribed("wait(0.25)\n")
+    ed._insert_transcribed("kd(KEY_A)\n")
     ed._reparse_timer.stop()
     ed._reparse_after_transcription()
     check("transcribed lines show up as blocks", [b.kind for b in be.doc.main] == ["while", "call", "call"]
           and ed.code_text().endswith("wait(0.25)\nkd(KEY_A)\n"))
+    be.undo()
+    check("one undo removes the whole transcription (Block view)", ed.code_text() == before)
+    # ...and in Text view: the text box's own undo
+    ed.set_view_mode("text")
+    ed.code.setPlainText("tap(KEY_A)\ncheckpoint()\nold()\n")
+    ed.tr_clear.setChecked(True)
+    ed._tr_join = False
+    ed._apply_clear_before_transcribing()
+    ed._insert_transcribed("new1()\n")
+    ed._insert_transcribed("new2()\n")
+    after = ed.code.toPlainText()
+    ed.code.undo()
+    check("one undo removes the whole transcription, clearing included (Text view)",
+          after == "tap(KEY_A)\ncheckpoint()\nnew1()\nnew2()\n" and ed.code.toPlainText() == "tap(KEY_A)\ncheckpoint()\nold()\n")
+    ed.tr_clear.setChecked(False)
+    ed.code.setPlainText("while True:\n    tap(KEY_Q)\n")
+    ed.set_view_mode("blocks")
 
     # loose blocks aren't saved, and Save says so
     be.doc.loose.append(bm.Stack([bm.new_call("tap")], 600, 300))
     be._rebuild()
     ok = ed.save()
     check("save with loose blocks saves only the attached ones and says so",
-          ok and "loose block" in ed.error.text() and cfg.load_macros()["macros"][0]["code"].endswith("kd(KEY_A)\n")
-          and "tap(KEY_A)" not in cfg.load_macros()["macros"][0]["code"])
+          ok and "loose block" in ed.error.text() and "tap(KEY_A)" not in cfg.load_macros()["macros"][0]["code"])
+
+    # icons: text until the art exists, then recolored SVG
+    from ui_kit import icons
+    check("no icon files yet -> None (callers fall back to text)", icons.icon_pixmap("nav_macros") is None
+          or icons.icon_path("nav_macros") is not None)
+    tmp_icons = Path(tempfile.mkdtemp())
+    (tmp_icons / "nav_test.svg").write_text('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10">'
+                                           '<rect width="10" height="10" fill="currentColor"/></svg>')
+    old_dir, icons.ICON_DIR = icons.ICON_DIR, tmp_icons
+    pm = icons.icon_pixmap("nav_test", 16, QColor("#ff0000"))
+    img = pm.toImage() if pm else None
+    check("an SVG icon loads and is recolored to the requested color",
+          img is not None and img.pixelColor(img.width() // 2, img.height() // 2).name() == "#ff0000")
+    icons.ICON_DIR = old_dir
+    check("every expected icon name is documented", all(n in (icons.__doc__ or "") for n in icons.EXPECTED))
+
+    # the input/output colors are used outside the block editor too
+    t = Theme()
+    check("record combo / key pickers / transcribe are input-orange",
+          all(b._fill_override == t.input_color() for b in (ed.record_btn, ed.ping_btn, ed.tr_btn)))
+    check("sound previews are output-blue", all(b._fill_override == t.output_color() for b in ed.sound_test_btns))
+    check("macro rows' combo buttons are input-orange",
+          all(r.combo_btn._fill_override == t.input_color() for r in w.macro_page.rows))
 
     # global default: Text
     model.set_pref("editor_default_mode", "text")
@@ -457,9 +698,11 @@ def main() -> int:
 
     if have_daemon:
         ed.python_cb.setChecked(False)
-        ed.code.setPlainText("if True:\n    tap(KEY_A)\n")
-        check("python_off macro with control flow is rejected by the daemon's own compiler",
-              not ed.save() and "primitives-only" in ed.error.text())
+        ed.code.setPlainText("import os\n")
+        check("python_off macro with unsupported Python is rejected by the daemon's own compiler",
+              not ed.save() and "isn't supported" in ed.error.text())
+        ed.code.setPlainText("x = 2\nif x > 1:\n    tap(KEY_B)\n")
+        check("python_off macro with control flow now compiles (native interpreter)", ed.save())
         ed.code.setPlainText("tap(KEY_A, tme_=0.1)\n")
         check("typo'd keyword argument is caught at save time", not ed.save() and "tme_" in ed.error.text())
         ed.python_cb.setChecked(True)

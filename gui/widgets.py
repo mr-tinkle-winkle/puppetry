@@ -324,3 +324,28 @@ class PageBase(QWidget):
         p.fillRect(self.rect(), self._bg)
         p.end()
         paint_page_outline(self, self._bg)
+
+
+# ---------------------------------------------------------------------------
+# The input/output color scheme, app-wide: orange = reads the real world
+# (recording, key pickers, the mouse readout, the input visualizer),
+# blue = acts on it (playback, sounds, the virtual devices).
+# ---------------------------------------------------------------------------
+
+def mark_input(widget) -> None:
+    _mark(widget, Theme().input_color())
+
+
+def mark_output(widget) -> None:
+    _mark(widget, Theme().output_color())
+
+
+def _mark(widget, color: QColor) -> None:
+    if hasattr(widget, "set_fill_color"):
+        widget.set_fill_color(color)
+    elif isinstance(widget, QLabel):
+        sheet = widget.styleSheet()
+        extra = ""
+        if "font-weight: bold" in sheet:
+            extra = "font-size: 15px; font-weight: bold;"
+        widget.setStyleSheet(label_style(color, extra))

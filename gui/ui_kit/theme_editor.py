@@ -58,6 +58,10 @@ _DEFAULT_LABELS = {
     "color_input": "Input (reads real input):",
     "color_output": "Output (acts / injects):",
     "color_neutral_block": "Neutral (control flow, timing):",
+    "color_custom": "Custom code / custom blocks:",
+    "color_function": "Functions:",
+    "color_true": "True:",
+    "color_false": "False:",
     "text_outline_width": "Text Outline Width (px)",
 }
 

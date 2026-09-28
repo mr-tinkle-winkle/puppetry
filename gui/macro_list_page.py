@@ -16,7 +16,7 @@ from ui_kit import theme_config
 from ui_kit.custom_button import CustomButton
 from ui_kit.custom_combo_style import combo_box_stylesheet
 from ui_kit.theme import Theme
-from widgets import LockToggle, NameBox, PageBase, ToggleSwitch, ask, label_style
+from widgets import LockToggle, NameBox, PageBase, ToggleSwitch, ask, label_style, mark_input
 
 REPEAT_MODES = ["none", "hold", "toggle"]
 REPEAT_LABELS = ["No Repeat", "Hold", "Toggle"]
@@ -47,6 +47,7 @@ class MacroRow(QWidget):
         lay.addStretch(1)
 
         self.combo_btn = CustomButton(combo_text(macro.get("combo", [])))
+        mark_input(self.combo_btn)   # the trigger: real input
         self.combo_btn.setToolTip("Click, then hold your combo still to rebind it (click again to cancel)")
         self.combo_btn.clicked.connect(self._combo_clicked)
         lay.addWidget(self.combo_btn)

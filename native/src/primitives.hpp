@@ -92,6 +92,32 @@ void type_text_fn(Runtime& rt, const std::string& text, double time_per_letter =
 // Formats cmd with shell-quoted args, .format()-style ({0}, {1}, ...).
 std::string format_command(const std::string& cmd, const std::vector<std::string>& args);
 
+// Re-evaluates whether the real keyboard/mouse must be grabbed (after
+// anything that changes ignore flags, ignored keys, repress codes or
+// suppressing actAs mappings).
+void refresh_grab_state(Runtime& rt);
+
+// Adds/removes codes from Runtime::repress_codes (counted) and refreshes
+// the grab. Used by waitForPress/waitForReactivation(repress=True).
+void add_repress(Runtime& rt, const std::vector<int>& codes);
+void remove_repress(Runtime& rt, const std::vector<int>& codes);
+
+// getMousePosition(): the cached position if it's fresh, else kdotool.
+// Throws std::runtime_error if it can't be read (no kdotool / not KDE).
+void get_mouse_position_fn(Runtime& rt, int& x, int& y);
+
+// getButtonsHeld(): real keys/buttons held right now (codes, ascending).
+std::vector<int> get_buttons_held_fn(Runtime& rt);
+
+// waitForPress(button, repress): blocks until the next REAL press of
+// `code`. repress=True swallows that press (and any other press of the
+// same key while waiting) so nothing else sees it. Abortable.
+// code < 0 = any key/button. Returns the code that was pressed.
+int wait_for_press_fn(Runtime& rt, int code, bool repress);
+
+// "any"/"all"/""/None -> -1 (any key); otherwise the key code (names ok).
+bool is_any_key_word(const std::string& s);
+
 // Panic button -- mirrors abort_all(): stops every running macro
 // (cooperative, via check_abort()), releases every key/button our own
 // virtual devices currently have held down, force-releases any active

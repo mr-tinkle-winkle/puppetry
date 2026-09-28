@@ -32,6 +32,13 @@ void save_state(const json& state);
 json load_macros();       // {"macros": [...]}
 void save_macros(const json& data);
 
+// Custom blocks made in the editor's "Create a custom block" dialog:
+// {"blocks": [{"name", "code", "python_on", ...editor-only fields}]}.
+// The daemon registers each one like a macro (callable by sanitized name
+// from any macro), never triggered by a combo.
+fs::path custom_blocks_file();
+json load_custom_blocks();
+
 json load_aliases();      // {"aliases": {...}}
 void save_aliases(const json& data);
 

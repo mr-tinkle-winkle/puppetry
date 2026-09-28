@@ -49,6 +49,7 @@ void handle_key_event(Runtime& rt, std::vector<std::unique_ptr<Macro>>& macros, 
     }
 
     if (value == 1) { // fresh key down (autorepeat is value == 2, ignored below)
+        rt.notify_press(code); // waitForPress()
         std::vector<int> current;
         {
             std::lock_guard<std::mutex> lock(rt.held_mutex);
@@ -135,6 +136,8 @@ static bool should_forward(Runtime& rt, const std::string& kind, int code, bool 
     if (kind == "keyboard" && rt.ignore_keyboard) return false;
     if (kind == "mouse" && rt.ignore_mouse_buttons && is_button_code(code)) return false;
     if (rt.ignored_keys.count(code)) return false;
+    if (rt.repress_codes.count(code)) return false;
+    if (rt.repress_any > 0) return false;
     return true;
 }
 
@@ -171,15 +174,17 @@ void watch_device(Runtime& rt, MacroRegistry& registry, std::vector<std::unique_
             const RawEvent& ev = evs[i];
             if (ev.type == EV_KEY) {
                 bool original_wants_forward = apply_act_as(rt, ev.code, ev.value);
-                handle_key_event(rt, macros, abort_code, ev.code, ev.value, on_trigger);
-
+                // Decide forwarding BEFORE handling the event: handling it
+                // can wake a waitForPress()/waitForReactivation(repress)
+                // thread that immediately drops its repress codes, and the
+                // press it was waiting for must still be swallowed.
                 bool grabbed = (kind == "keyboard") ? rt.keyboard_grabbed.load() : rt.mouse_grabbed.load();
-                if (grabbed) {
-                    // A real key-UP is ALWAYS forwarded (stuck-key safety
-                    // net), a key-DOWN only if nothing suppresses it.
-                    bool forward = (ev.value == 0) || should_forward(rt, kind, ev.code, original_wants_forward);
-                    if (forward) push(is_mouse_button(ev.code) ? out_mouse : out_kb, EV_KEY, ev.code, ev.value);
-                }
+                // A real key-UP is ALWAYS forwarded (stuck-key safety
+                // net), a key-DOWN only if nothing suppresses it.
+                bool forward = grabbed &&
+                               ((ev.value == 0) || should_forward(rt, kind, ev.code, original_wants_forward));
+                handle_key_event(rt, macros, abort_code, ev.code, ev.value, on_trigger);
+                if (forward) push(is_mouse_button(ev.code) ? out_mouse : out_kb, EV_KEY, ev.code, ev.value);
             } else if (ev.type == EV_REL && kind == "mouse") {
                 // The user just moved the real mouse, so any position
                 // move_mouse(move_to=True) had cached is now wrong. One

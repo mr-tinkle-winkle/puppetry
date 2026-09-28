@@ -77,6 +77,17 @@ json load_macros() {
 
 void save_macros(const json& data) { write_json(macros_file(), data); }
 
+fs::path custom_blocks_file() { return config_dir() / "custom_blocks.json"; }
+
+json load_custom_blocks() {
+    if (!fs::exists(custom_blocks_file())) return json{{"blocks", json::array()}};
+    try {
+        return read_json(custom_blocks_file());
+    } catch (const std::exception&) {
+        return json{{"blocks", json::array()}};
+    }
+}
+
 json load_aliases() {
     if (!fs::exists(aliases_file())) return json{{"aliases", json::object()}};
     return read_json(aliases_file());

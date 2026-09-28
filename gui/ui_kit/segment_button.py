@@ -63,6 +63,10 @@ class SegmentButton(QAbstractButton):
         self._loading = False
         self._theme = Theme()
 
+    def set_icon_pixmap(self, pixmap: "QPixmap | None") -> None:
+        self._icon_pixmap = pixmap
+        self.update()
+
     def set_loading(self, loading: bool) -> None:
         if self._loading != loading:
             self._loading = loading
@@ -116,7 +120,17 @@ class SegmentButton(QAbstractButton):
         else:
             painter.fillRect(rect, bg)
 
-        if self._icon_pixmap is not None and not self._icon_pixmap.isNull():
+        if self._icon_pixmap is not None and not self._icon_pixmap.isNull() and self.text():
+            # icon beside the label (sidebar entries)
+            side = min(self._icon_target_size, self.height() - 12)
+            fm = painter.fontMetrics()
+            total = side + 8 + fm.horizontalAdvance(self.text())
+            x = max(8, (self.width() - total) // 2)
+            painter.drawPixmap(QRectF(x, (self.height() - side) / 2, side, side).toRect(), self._icon_pixmap)
+            painter.setPen(contrast_text(bg))
+            painter.drawText(QRectF(x + side + 8, 0, self.width() - x - side - 8, self.height()),
+                             Qt.AlignVCenter | Qt.AlignLeft, self.text())
+        elif self._icon_pixmap is not None and not self._icon_pixmap.isNull():
             scaled = scaled_cached(self._icon_pixmap, self._icon_target_size, self._icon_target_size)
             painter.drawPixmap((self.width() - scaled.width()) // 2,
                                (self.height() - scaled.height()) // 2, scaled)

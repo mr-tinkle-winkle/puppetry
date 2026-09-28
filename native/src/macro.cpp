@@ -1,5 +1,6 @@
 #include "macro.hpp"
 #include "primitives.hpp"
+#include "keycodes.hpp"
 #include <algorithm>
 #include <cctype>
 #include <chrono>
@@ -146,6 +147,40 @@ ExtractedBody extract_arguments_signature(const std::string& body) {
     return result;
 }
 
+CoercedArg coerce_macro_arg(const std::string& raw, ArgKind wanted) {
+    CoercedArg out;
+    std::string t = trim(raw);
+    if (wanted == ArgKind::Bool) {
+        if (t == "True" || t == "true" || t == "1") { out.kind = ArgKind::Bool; out.b = true; }
+        else if (t == "False" || t == "false" || t == "0") { out.kind = ArgKind::Bool; out.b = false; }
+        return out;
+    }
+    if (wanted == ArgKind::Int) {
+        int code;
+        if (resolve_key_name(t, code)) { out.kind = ArgKind::Int; out.i = code; return out; }
+        try {
+            size_t used = 0;
+            long long v = std::stoll(t, &used);
+            if (used == t.size() && !t.empty()) { out.kind = ArgKind::Int; out.i = v; return out; }
+        } catch (...) {}
+        // "2.5" for an int parameter: a float is more useful than a string
+        try {
+            size_t used = 0;
+            double v = std::stod(t, &used);
+            if (used == t.size() && !t.empty()) { out.kind = ArgKind::Float; out.d = v; }
+        } catch (...) {}
+        return out;
+    }
+    if (wanted == ArgKind::Float) {
+        try {
+            size_t used = 0;
+            double v = std::stod(t, &used);
+            if (used == t.size() && !t.empty()) { out.kind = ArgKind::Float; out.d = v; }
+        } catch (...) {}
+    }
+    return out;
+}
+
 RepeatMode parse_repeat_mode(const std::string& s) {
     if (s == "hold") return RepeatMode::Hold;
     if (s == "toggle") return RepeatMode::Toggle;
@@ -175,6 +210,39 @@ struct ThreadHookScope {
 };
 } // namespace
 
+namespace {
+thread_local Macro* t_current_macro = nullptr;
+struct CurrentMacroScope {
+    Macro* prev;
+    explicit CurrentMacroScope(Macro* m) : prev(t_current_macro) { t_current_macro = m; }
+    ~CurrentMacroScope() { t_current_macro = prev; }
+};
+} // namespace
+
+Macro* current_macro() { return t_current_macro; }
+void set_current_macro(Macro* m) { t_current_macro = m; }
+
+void wait_for_reactivation(Runtime& rt, bool repress) {
+    Macro* m = current_macro();
+    if (!m) throw std::runtime_error("waitForReactivation() only works in a macro started by its trigger");
+    auto rs = m->runtime;
+    rs->reactivated.store(false);
+    std::vector<int> codes = repress ? m->combo : std::vector<int>{};
+    if (!codes.empty()) add_repress(rt, codes);
+    rs->reactivation_waiters.fetch_add(1);
+    struct Cleanup {
+        Runtime& rt; std::shared_ptr<RunningMacroState> rs; std::vector<int> codes;
+        ~Cleanup() {
+            rs->reactivation_waiters.fetch_sub(1);
+            if (!codes.empty()) remove_repress(rt, codes);
+        }
+    } cleanup{rt, rs, codes};
+    while (!rs->reactivated.exchange(false)) {
+        rt.check_abort();
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+}
+
 static void run_guarded(Runtime& rt, MacroRegistry& registry, Macro& macro, const std::vector<std::string>& args) {
     try {
         macro.func->run(rt, registry, args);
@@ -188,6 +256,7 @@ static void run_guarded(Runtime& rt, MacroRegistry& registry, Macro& macro, cons
 static void fire_once(Runtime& rt, MacroRegistry& registry, Macro& macro, std::vector<std::string> args) {
     std::thread([&rt, &registry, &macro, args = std::move(args)]() {
         ThreadHookScope scope;
+        CurrentMacroScope current(&macro);
         Runtime::speed_multiplier() = 1.0;
         try {
             run_guarded(rt, registry, macro, args);
@@ -200,6 +269,7 @@ static void fire_once(Runtime& rt, MacroRegistry& registry, Macro& macro, std::v
 static void loop_until_stopped(Runtime& rt, MacroRegistry& registry, Macro* macro,
                                 std::vector<std::string> args) {
     ThreadHookScope scope;
+    CurrentMacroScope current(macro);
     auto rts = macro->runtime;
     try {
         while (!rts->stop_flag.load(std::memory_order_relaxed)) {
@@ -230,6 +300,10 @@ static void start_loop(Runtime& rt, MacroRegistry& registry, Macro& macro, std::
 }
 
 void trigger_macro(Runtime& rt, MacroRegistry& registry, Macro& macro, const std::vector<std::string>& args) {
+    if (macro.runtime->reactivation_waiters.load() > 0) {
+        macro.runtime->reactivated.store(true); // consumed by waitForReactivation()
+        return;
+    }
     switch (macro.repeat_mode) {
         case RepeatMode::None:
             fire_once(rt, registry, macro, args);

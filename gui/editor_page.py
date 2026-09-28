@@ -16,7 +16,7 @@ import json
 import os
 
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QFont, QKeyEvent, QPalette, QWheelEvent
+from PySide6.QtGui import QFont, QKeyEvent, QPalette, QTextCursor, QWheelEvent
 from PySide6.QtWidgets import (
     QButtonGroup, QComboBox, QFileDialog, QHBoxLayout, QLabel, QPlainTextEdit, QSplitter, QStackedWidget,
     QVBoxLayout, QWidget,
@@ -25,7 +25,9 @@ from PySide6.QtWidgets import (
 import block_model as bm
 import puppetry_config as cfg
 import sound
+import custom_blocks
 from block_editor import BlockEditor
+from custom_block_dialog import CustomBlockDialog
 from input_tools import ComboRecorder, DetectKey, HotkeyListener, MousePositionPoller, resolve_key_code
 from model import AppModel
 from reference import DICTIONARY_TEXT, alias_targets, simplified_names_reference_text
@@ -39,7 +41,7 @@ from ui_kit.custom_spinbox import CustomDoubleSpinBox
 from ui_kit.segment_button import SegmentButton
 from ui_kit.smooth_scroll_area import SmoothScrollArea
 from ui_kit.theme import Theme
-from widgets import Collapsible, ask, dim_label, label_style, section_title
+from widgets import Collapsible, ask, dim_label, label_style, mark_input, mark_output, section_title
 
 REPEAT_MODES = ["none", "hold", "toggle"]
 REPEAT_LABELS = ["No Repeat", "Hold", "Toggle"]
@@ -194,7 +196,8 @@ class MacroEditorPage(QWidget):
         col.addLayout(pos_row)
 
         # ------------------------------------------------------------ transcription
-        col.addWidget(section_title("Transcribe Inputs"))
+        self.transcribe_title = section_title("Transcribe Inputs")
+        col.addWidget(self.transcribe_title)
         st = model.state
         self.tr_kb = CustomCheckBox("Transcribe Keyboard")
         self.tr_mouse = CustomCheckBox("Transcribe Mouse")
@@ -289,6 +292,7 @@ class MacroEditorPage(QWidget):
         # Audible cues: handy when transcription is started/stopped by the
         # hotkey from another window, where there's no status text to see.
         self.sound_labels: dict[str, QLabel] = {}
+        self.sound_test_btns: list = []
         for key, caption in (("start", "Start sound"), ("finish", "Finish sound")):
             row = QHBoxLayout()
             row.addWidget(QLabel(caption))
@@ -303,6 +307,7 @@ class MacroEditorPage(QWidget):
             test = CustomButton("▶")
             test.setToolTip("Play it now")
             test.clicked.connect(lambda _=False, k=key: self._test_sound(k))
+            self.sound_test_btns.append(test)
             row.addWidget(test)
             clear = CustomButton("✕")
             clear.setToolTip("No sound")
@@ -349,11 +354,20 @@ class MacroEditorPage(QWidget):
         self.tr_hz.valueChanged.connect(lambda v: model.set_pref("transcribe_raw_hz", v))
         self.tr_setpos.toggled.connect(lambda on: on and self.tr_samestart.setChecked(False))
         self.tr_samestart.toggled.connect(lambda on: on and self.tr_setpos.setChecked(False))
+        # input/output color scheme: everything here that READS real input
+        # is orange; the sound previews (Puppetry making noise) are blue.
+        for w in (self.record_btn, self.ping_btn, self.hotkey_btn, self.restart_btn, self.checkpoint_btn,
+                  self.tr_btn, self.mouse_pos, self.transcribe_title):
+            mark_input(w)
+        for b in self.sound_test_btns:
+            mark_output(b)
         self.transcriber.text_ready.connect(self._insert_transcribed)
         self.transcriber.stopped.connect(self._transcribe_stopped)
 
         # ------------------------------------------------------------ ignore
-        col.addWidget(section_title("While this macro runs"))
+        self.ignore_title = section_title("While this macro runs")
+        mark_input(self.ignore_title)
+        col.addWidget(self.ignore_title)
         self.ign_kb = CustomCheckBox("Ignore Keyboard Input (except Abort)")
         self.ign_btn = CustomCheckBox("Ignore Mouse Buttons")
         self.ign_move = CustomCheckBox("Ignore Mouse Movement")
@@ -412,8 +426,9 @@ class MacroEditorPage(QWidget):
         head.addStretch(1)
         self.simplified_cb = CustomCheckBox("Simplified Variable Names")
         self.python_cb = CustomCheckBox("Run as embedded Python")
-        self.python_cb.setToolTip("On: full Python (loops, if, variables).\n"
-                                  "Off: the fast native path -- one primitive/macro call per line, no control flow.")
+        self.python_cb.setToolTip("On: real embedded Python -- anything goes, imports included.\n"
+                                  "Off: Puppetry's fast native interpreter -- variables, if/else, loops, functions,\n"
+                                  "math, every block; no imports, classes, try or methods like \"a\".upper().")
         head.addWidget(self.simplified_cb)
         head.addWidget(self.python_cb)
         rcol.addLayout(head)
@@ -423,8 +438,8 @@ class MacroEditorPage(QWidget):
         cpal.setColor(QPalette.Text, theme.text())
         self.code.setPalette(cpal)
         self.blocks = BlockEditor()
-        self.blocks.python_needed.connect(self._python_needed)
-        self.python_cb.toggled.connect(self._python_toggled)
+        self.blocks.custom_dialog_factory = CustomBlockDialog
+        self.blocks.customs_changed.connect(self._customs_changed)
         self.simplified_cb.toggled.connect(lambda _on: self._refresh_block_context())
         self.code_stack = QStackedWidget()
         self.code_stack.addWidget(self.blocks)
@@ -750,14 +765,22 @@ class MacroEditorPage(QWidget):
         text = self.code.toPlainText()
         idx = text.rfind("checkpoint()")
         if idx == -1:
-            self.code.setPlainText("")
-            return
-        end = text.find("\n", idx)
-        keep = text[:end + 1] if end != -1 else text
-        self.code.setPlainText(keep)
-        cursor = self.code.textCursor()
-        cursor.movePosition(cursor.MoveOperation.End)
-        self.code.setTextCursor(cursor)
+            keep = ""
+        else:
+            end = text.find("\n", idx)
+            keep = text[:end + 1] if end != -1 else text
+        # an undoable edit (setPlainText would wipe the undo history), and
+        # the first piece of this transcription's single undo step
+        cursor = QTextCursor(self.code.document())
+        cursor.beginEditBlock()
+        cursor.setPosition(len(keep))
+        cursor.movePosition(QTextCursor.MoveOperation.End, QTextCursor.MoveMode.KeepAnchor)
+        cursor.removeSelectedText()
+        cursor.endEditBlock()
+        self._tr_join = True
+        end_cursor = self.code.textCursor()
+        end_cursor.movePosition(QTextCursor.MoveOperation.End)
+        self.code.setTextCursor(end_cursor)
 
     def _start_transcription(self) -> None:
         kb_on, mouse_on = self.tr_kb.isChecked(), self.tr_mouse.isChecked()
@@ -769,11 +792,15 @@ class MacroEditorPage(QWidget):
         if (kb_on and not kb) or (mouse_on and not mouse):
             self.tr_status.setText("Set a keyboard/mouse device in Settings first.")
             return
+        # The whole transcription (clearing included) is ONE undo step, in
+        # either view.
+        self._tr_join = False
         if self._view_mode == VIEW_BLOCKS:
             # Transcription writes text; in Block view it goes to the end of
             # the macro (there's no visible text cursor) and the blocks are
             # re-read from it as lines arrive.
             self.code_text()
+            self.blocks.begin_external_edit()
             cursor = self.code.textCursor()
             cursor.movePosition(cursor.MoveOperation.End)
             self.code.setTextCursor(cursor)
@@ -804,7 +831,15 @@ class MacroEditorPage(QWidget):
             cursor = self.code.textCursor()
             cursor.movePosition(cursor.MoveOperation.End)
             self.code.setTextCursor(cursor)
-        self.code.textCursor().insertText(text)
+        cursor = self.code.textCursor()
+        if getattr(self, "_tr_join", False):
+            cursor.joinPreviousEditBlock()
+        else:
+            cursor.beginEditBlock()
+        cursor.insertText(text)
+        cursor.endEditBlock()
+        self._tr_join = True
+        self.code.setTextCursor(cursor)
         self.code.ensureCursorVisible()
         if self._view_mode == VIEW_BLOCKS:
             self._reparse_timer.start()
@@ -941,7 +976,15 @@ class MacroEditorPage(QWidget):
         keys = list(tables.get("keys", []))
         if self.simplified_cb.isChecked():
             keys += list(tables.get("simplified", {}).keys())
-        self.blocks.set_context(macro_names=sorted(set(names)), hat_text=self._hat_text(), key_names=keys)
+        self.blocks.set_context(macro_names=sorted(set(names)), hat_text=self._hat_text(), key_names=keys,
+                                customs=custom_blocks.load())
+
+    def _customs_changed(self) -> None:
+        """A custom block was created/edited/deleted (already on disk): the
+        daemon registers custom blocks at startup, so restart it now."""
+        ok, msg = cfg.restart_daemon_service()
+        self.error.setText("Custom blocks saved." + ("" if ok else f" ({msg})"))
+        self.blocks.revision += 1   # custom block calls may render differently now
 
     def view_mode(self) -> str:
         return self._view_mode
@@ -967,7 +1010,7 @@ class MacroEditorPage(QWidget):
             if self._view_mode != VIEW_BLOCKS or self._blocks_synced_text != text:
                 if self._blocks_synced_text != text:
                     try:
-                        doc = bm.code_to_blocks(text, self.blocks.macro_names)
+                        doc = bm.code_to_blocks(text, self.blocks.macro_names, self.blocks.customs)
                     except bm.BlockParseError as exc:
                         self._view_mode = VIEW_TEXT
                         self._sync_view_buttons()
@@ -999,30 +1042,18 @@ class MacroEditorPage(QWidget):
             return
         text = self.code.toPlainText()
         try:
-            doc = bm.code_to_blocks(text, self.blocks.macro_names)
+            doc = bm.code_to_blocks(text, self.blocks.macro_names, self.blocks.customs)
         except bm.BlockParseError:
             return
         old = self.blocks.doc
         doc.main_x, doc.main_y = old.main_x, old.main_y
-        self.blocks.set_doc(doc, reset_view=False)
+        where = {f.name: (f.x, f.y) for f in old.functions}
+        for f in doc.functions:
+            f.x, f.y = where.get(f.name, (0, 0))
+        # keep_undo: the snapshot taken when transcription started undoes it all
+        self.blocks.set_doc(doc, reset_view=False, keep_undo=True)
         self._blocks_synced_text = text
         self._blocks_synced_rev = self.blocks.revision
-
-    def _python_needed(self) -> None:
-        """A loop/variable/if block landed in the macro: those only run as
-        embedded Python, so turn it on -- visibly, not silently."""
-        if not self.python_cb.isChecked():
-            self.python_cb.setChecked(True)
-            self.error.setText("Turned on \"Run as embedded Python\" -- loop, variable and if blocks need it "
-                               "(the fast native path only runs one primitive per line).")
-
-    def _python_toggled(self, on: bool) -> None:
-        if on or getattr(self, "_loading", False) or self._view_mode != VIEW_BLOCKS:
-            return
-        if bm.needs_python(self.blocks.doc.main):
-            self.python_cb.setChecked(True)
-            self.error.setText("Can't turn off embedded Python while the macro has loop, variable or if "
-                               "blocks -- remove them first.")
 
     # ------------------------------------------------------------------ aliases
 

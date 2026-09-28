@@ -23,6 +23,7 @@ from macro_list_page import MacroListPage
 from model import AppModel
 from settings_page import SettingsPage
 from ui_kit import theme_config
+from ui_kit.icons import icon_pixmap
 from ui_kit.scale_reveal import crossfade_to_index
 from ui_kit.segment_button import SegmentButton
 from ui_kit.theme import Theme
@@ -82,9 +83,16 @@ class MainWindow(QMainWindow):
 
         self.nav = QButtonGroup(self)
         self.nav.setExclusive(True)
+        nav_icons = {PAGE_MACROS: "nav_macros", PAGE_EDITOR: "nav_editor", PAGE_VISUALIZER: "nav_visualizer",
+                     PAGE_SETTINGS: "nav_settings"}
         for idx, label in ((PAGE_MACROS, "Macros"), (PAGE_EDITOR, "Macro Editor"),
                            (PAGE_VISUALIZER, "Input Visualizer"), (PAGE_SETTINGS, "Settings")):
-            b = SegmentButton(text=label, position="full")
+            # icon beside the label once mrtw's art exists (ui_kit/icons.py
+            # lists the file names); text-only until then. The visualizer
+            # reads real input, so its icon is tinted input-orange.
+            tint = theme.input_color() if idx == PAGE_VISUALIZER else theme.text()
+            b = SegmentButton(icon_pixmap=icon_pixmap(nav_icons[idx], 22, tint), text=label, position="full")
+            b.set_icon_target_size(22)
             b.setMinimumHeight(40)
             self.nav.addButton(b, idx)
             side.addWidget(b)

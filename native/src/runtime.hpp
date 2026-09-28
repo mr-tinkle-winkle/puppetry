@@ -161,6 +161,37 @@ public:
     // ---- abort ----
     std::atomic<bool> abort_flag{false};
 
+    // ---- waitForPress()/waitForReactivation(repress=True) ----
+    // Codes whose real PRESSES are swallowed while something waits on
+    // them with repress=True (a count per code, several waiters can share
+    // one). Guarded by ignore_mutex, same as ignored_keys, and counted by
+    // the grab logic exactly like an ignored key.
+    std::unordered_map<int, int> repress_codes;
+
+    // Threads blocked in waitForPress(): the dispatch loop flips `fired`
+    // on the next real press of `code`.
+    // Any-key waits with repress=True: while > 0, EVERY real press is
+    // swallowed (guarded by ignore_mutex; both devices get grabbed).
+    int repress_any = 0;
+
+    struct PressWaiter {
+        int code = 0;                  // -1 = any key/button
+        std::atomic<bool> fired{false};
+        std::atomic<int> pressed{-1};  // which code woke it
+    };
+    std::mutex press_waiters_mutex;
+    std::vector<PressWaiter*> press_waiters;
+
+    void notify_press(int code) {
+        std::lock_guard<std::mutex> lock(press_waiters_mutex);
+        for (PressWaiter* w : press_waiters) {
+            if ((w->code == code || w->code < 0) && !w->fired.load(std::memory_order_relaxed)) {
+                w->pressed.store(code, std::memory_order_relaxed);
+                w->fired.store(true, std::memory_order_release);
+            }
+        }
+    }
+
     // ---- external pause (GUI recording a combo) ----
     std::atomic<bool> external_pause{false};
 
