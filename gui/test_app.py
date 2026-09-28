@@ -19,7 +19,9 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 os.environ["HOME"] = tempfile.mkdtemp(prefix="puppetry_gui_test_")
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from PySide6.QtCore import QPoint, Qt
+from pathlib import Path
+
+from PySide6.QtCore import QPoint, QPointF, Qt
 from PySide6.QtGui import QCursor
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
@@ -42,6 +44,284 @@ def check(name, cond):
 
 def pump(ms=0):
     QTest.qWait(ms) if ms else qapp.processEvents()
+
+
+BLOCK_ROUND_TRIP_SAMPLES = [
+    "", "tap(KEY_A)\n", "tap(KEY_A)", "tap( KEY_A ,0.2)\n",
+    "arguments(hits=3, key=KEY_A)\nfor _ in range(int(hits)):\n    tap(key)\n    wait(0.05)\n",
+    "# header\n\ntap(KEY_A)  # trailing\n\n\nwait(1)\n# end\n\n",
+    "x = 5\nx += 1\nwhile x > 0:\n    x -= 1\n    if x == 2:\n        tap(KEY_B)\n    elif x == 3:  # three\n"
+    "        pass\n    else:\n        # nothing\n        wait(0.1)\n",
+    "for i in range(3):\n    move_mouse(10*i, 0, time_=0.1, easing=\"linear\")\n    # inner\n# outer\ntap(KEY_C)\n",
+    "combo(KEY_LEFTCTRL, KEY_S, time_=0.2)\nactAs(BTN_LEFT, False, KEY_Q, KEY_E)\ncommand(\"notify-send {0}\", \"hi\")\n",
+    "import os\nprint('x'); tap(KEY_A)\nif True: tap(KEY_B)\ndef f():\n    pass\n",
+    "type(\"\"\"multi\nline\"\"\")\nfor _ in range(2):\n    type(\"\"\"a\nb\"\"\")\n",
+    "if True:\n\ttap(KEY_A)\n\twhile False:\n\t\tpass\n",
+    "checkpoint()\nspeed(2)\nignore(\"keyboard\")\nignore_keys(KEY_W, BTN_LEFT)\nkd(KEY_A)\nku(KEY_A)\nwheel(-3)\n",
+    "second(1, 2)\nUnknown_Thing()\n",
+    "x = [1,\n  2]\ntap(KEY_A,\n    time_=0.3)\n",
+    "try:\n    tap(KEY_A)\nexcept Exception:\n    pass\n",
+    "tap(key=KEY_A, time_=0.1)\n", "# only comments\n# here\n", "type(\"héllo ✓\")  # ünïcode\n",
+]
+
+
+def block_tests(w, ed, model) -> None:
+    import block_model as bm
+    import block_render as br
+    import editor_page
+    from reference import PRIMITIVES, PRIMITIVES_BY_NAME
+
+    # ------------------------------------------------------------ model: round-trip
+    bad = [s for s in BLOCK_ROUND_TRIP_SAMPLES if not bm.round_trips(s, ["second"])]
+    check("blocks: code -> blocks -> code is byte-for-byte for every sample", bad == [])
+    d = bm.code_to_blocks("import os\ntry:\n    tap(KEY_A)\nexcept Exception:\n    pass\nwith open('x') as f: pass\n")
+    check("blocks: unrecognized statements become raw blocks (nothing dropped)",
+          [b.kind for b in d.main] == ["raw", "raw", "raw"] and "except Exception:" in d.main[1].fields["code"])
+    d = bm.code_to_blocks("a; b\nif x: tap(KEY_A)\n")
+    check("blocks: one-line compound/semicolon statements stay raw", [b.kind for b in d.main] == ["raw", "raw"])
+    try:
+        bm.code_to_blocks("for _ in range(3:\n")
+        check("blocks: a syntax error raises BlockParseError", False)
+    except bm.BlockParseError as exc:
+        check("blocks: a syntax error raises BlockParseError", exc.line == 1)
+
+    # ------------------------------------------------------------ model: codegen per block type
+    def gen(*blocks):
+        return bm.blocks_to_code(list(blocks))
+
+    tap = bm.new_call("tap")
+    check("codegen: tap", gen(tap) == "tap(KEY_A)\n")
+    tap.fields["time_"] = "0.2"
+    check("codegen: optional param positional", gen(tap) == "tap(KEY_A, 0.2)\n")
+    tap.kw.add("time_")
+    check("codegen: param that was a keyword stays a keyword", gen(tap) == "tap(KEY_A, time_=0.2)\n")
+    cb = bm.new_call("combo")
+    cb.fields["time_"] = "0.3"
+    check("codegen: combo's time_ is always a keyword", gen(cb) == "combo(KEY_LEFTCTRL, KEY_C, time_=0.3)\n")
+    check("codegen: actAs positional + varargs", gen(bm.new_call("actAs")) == "actAs(KEY_A, False, KEY_B)\n")
+    mm = bm.new_call("move_mouse")
+    mm.fields["easing"] = '"linear"'
+    check("codegen: skipped optional -> later ones become keywords", gen(mm) == 'move_mouse(100, 0, easing="linear")\n')
+    check("codegen: checkpoint/wait", gen(bm.new_call("checkpoint"), bm.new_call("wait")) == "checkpoint()\nwait(0.1)\n")
+    rep = bm.new_block("repeat")
+    rep.bodies[0].append(bm.new_call("kd"))
+    check("codegen: repeat nests its children", gen(rep) == "for _ in range(10):\n    kd(KEY_A)\n")
+    check("codegen: empty mouth emits pass", gen(bm.new_block("while")) == "while True:\n    pass\n")
+    ie = bm.new_block("if", has_else=True)
+    ie.bodies[1].append(bm.new_call("ku"))
+    check("codegen: if/else", gen(ie) == "if True:\n    pass\nelse:\n    ku(KEY_A)\n")
+    fo = bm.new_block("for")
+    check("codegen: for each", gen(fo) == "for i in range(10):\n    pass\n")
+    ch = bm.new_block("change")
+    ch.fields["op"] = "*"
+    check("codegen: set / change / comment / arguments / macro call",
+          gen(bm.new_block("arguments"), bm.new_block("assign"), ch, bm.new_block("comment"),
+              bm.new_block("macro_call", name="second"))
+          == "arguments(count=3)\nx = 0\nx *= 1\n# note\nsecond()\n")
+    d = bm.code_to_blocks("tap( KEY_A ,0.2)\n")
+    d.main[0].fields["time_"] = "0.5"
+    d.main[0].touch()
+    check("codegen: an edited block is regenerated from its sockets", bm.blocks_to_code(d) == "tap(KEY_A, 0.5)\n")
+
+    # the dictionary table can't drift from what the daemon registers
+    src = (Path(__file__).resolve().parent.parent / "native" / "src" / "python_embed.cpp").read_text()
+    import re as _re
+    native = set(_re.findall(r'FC\("([A-Za-z_]+)"', src))
+    check("primitive table matches the daemon's registered primitives exactly",
+          native == {p.name for p in PRIMITIVES})
+    check("every primitive has an input/output/neutral category",
+          all(p.category in ("input", "output", "neutral") for p in PRIMITIVES))
+
+    # every fresh palette block compiles on the NATIVE fast path (the
+    # strictest compiler) exactly as the daemon will run it
+    if cfg.find_binary("puppetry-daemon"):
+        failures = []
+        for p in PRIMITIVES:
+            code = bm.blocks_to_code([bm.new_call(p.name)])
+            ok, msg = cfg.check_macro({"name": "t", "code": code, "python_on": False})
+            if not ok:
+                failures.append((p.name, msg))
+        check("every palette primitive block compiles on the native path", failures == [])
+        py = bm.blocks_to_code([bm.new_block("arguments"), bm.new_block("assign"), bm.new_block("change"),
+                                rep, ie, fo, bm.new_block("while")])
+        ok, msg = cfg.check_macro({"name": "t", "code": py.replace("while True", "while False"), "python_on": True})
+        check("control-flow/variable blocks compile as embedded Python", ok)
+    check("needs_python: loops/variables/if only", bm.needs_python([rep]) and not bm.needs_python([bm.new_call("tap")]))
+
+    # ------------------------------------------------------------ editor: views
+    odd = "tap( KEY_A ,0.2)\n\n# note\nfor _ in range(2):\n  wait(0.1)  # two-space indent\n"
+    cfg.save_macros({"macros": model.macros_data["macros"]})
+    m = model.find("m1")
+    m["code"], m["python_on"] = odd, True
+    ed.load_macro("m1")
+    be = ed.blocks
+    # room to drag without the canvas auto-scrolling under the test's feet
+    w.resize(2000, 1100)
+    from PySide6.QtWidgets import QSplitter
+    ed.findChild(QSplitter).setSizes([300, 1700])
+    pump(50)
+    check("editor opens macros in Block view by default", ed.view_mode() == "blocks"
+          and ed.code_stack.currentWidget() is be and ed.blocks_view_btn.isChecked())
+    check("the hat shows the macro's trigger combo", be.hat_text.startswith("when ") and "pressed" in be.hat_text
+          or be.hat_text == "when this macro runs")
+    ed.set_view_mode("text")
+    ed.set_view_mode("blocks")
+    ed.set_view_mode("text")
+    check("just looking at blocks never rewrites the code", ed.code.toPlainText() == odd and not ed.has_unsaved_changes())
+    ed.set_view_mode("blocks")
+
+    def lb_of(block):
+        for it in be._items:
+            for lb in it.layout.blocks:
+                if lb.block is block:
+                    return it, lb
+        return None, None
+
+    v, vpt = be.view, be.view.viewport()
+
+    def vpos(it, x, y):
+        return v.mapFromScene(it.mapToScene(QPointF(x, y)))
+
+    def drag(p0, p1, steps=10, mods=Qt.NoModifier):
+        QTest.mousePress(vpt, Qt.LeftButton, mods, p0)
+        for k in range(1, steps + 1):
+            QTest.mouseMove(vpt, p0 + (p1 - p0) * k / steps)
+        QTest.mouseRelease(vpt, Qt.LeftButton, mods, p1)
+        pump()
+
+    # drag the loop out onto empty canvas -> loose, not part of the macro
+    it, lb = lb_of(be.doc.main[2])
+    p0 = vpos(it, lb.x + 4, lb.y + 10)
+    drag(p0, p0 + QPoint(420, 160))
+    check("dragging a block away detaches it and everything below", ed.code_text() == "tap( KEY_A ,0.2)\n\n# note\n"
+          and be.loose_count() == 2)
+    check("loose blocks are called out as not saved", "won't be saved" in be.loose_label.text())
+    # ...and back under the comment: snaps, ghost shown while hovering
+    it, lb = lb_of(be.doc.loose[0].blocks[0])
+    cit, clb = lb_of(be.doc.main[1])
+    p0 = vpos(it, lb.x + 4, lb.y + 10)
+    p1 = vpos(cit, clb.x + 4, clb.y + clb.h + 12)
+    QTest.mousePress(vpt, Qt.LeftButton, Qt.NoModifier, p0)
+    for k in range(1, 11):
+        QTest.mouseMove(vpt, p0 + (p1 - p0) * k / 10)
+    check("a snap ghost shows while a block hovers near a notch", be.ghost is not None and be.snap is not None)
+    QTest.mouseRelease(vpt, Qt.LeftButton, Qt.NoModifier, p1)
+    pump()
+    check("dropping near a notch snaps it back in (original text kept)", ed.code_text() == odd and be.loose_count() == 0)
+
+    # Ctrl-drag takes just the one block
+    it, lb = lb_of(be.doc.main[0])
+    p0 = vpos(it, lb.x + 4, lb.y + 10)
+    drag(p0, p0 + QPoint(500, 300), mods=Qt.ControlModifier)
+    check("Ctrl-drag moves only that block", ed.code_text().startswith("\n# note\nfor _") and be.loose_count() == 1)
+    be.undo()
+    check("undo puts it back", ed.code_text() == odd and be.loose_count() == 0)
+    be.redo()
+    check("redo moves it again", be.loose_count() == 1)
+    be.undo()
+
+    # click a socket -> inline editor -> Enter commits
+    it, lb = lb_of(be.doc.main[0])
+    fh = lb.fields[0]
+    QTest.mouseClick(vpt, Qt.LeftButton, Qt.NoModifier, vpos(it, fh.rect.center().x(), fh.rect.center().y()))
+    pump()
+    from PySide6.QtWidgets import QLineEdit
+    editors = [c for c in vpt.findChildren(QLineEdit) if c.isVisible()]
+    check("clicking a socket opens an inline editor", len(editors) == 1 and editors[0].text() == "KEY_A")
+    if editors:
+        editors[0].setText("KEY_Z")
+        QTest.keyClick(editors[0], Qt.Key_Return)
+        pump()
+    check("editing a socket rewrites just that block", ed.code_text().startswith("tap(KEY_Z, 0.2)\n\n# note\nfor _ in range(2):\n  wait(0.1)  # two-space indent"))
+    check("block edits mark the macro unsaved", ed.has_unsaved_changes())
+
+    # dropping a variable onto a socket
+    be.variable_drop("x", vpos(it, 0, 0) and it.mapToScene(lb.fields[0].rect.center()))
+    check("dropping a variable onto a socket uses it", ed.code_text().startswith("tap(x, 0.2)"))
+    be.undo()
+
+    # python_on is locked on while a loop/variable/if block exists...
+    ed.python_cb.setChecked(False)
+    check("embedded Python can't be turned off while a loop block exists",
+          ed.python_cb.isChecked() and "remove them first" in ed.error.text())
+    be.delete_block(next(b for b in be.doc.main if b.kind == "repeat"))
+    ed.python_cb.setChecked(False)
+    check("...but can once it's gone", not ed.python_cb.isChecked())
+    # ...and a palette drop of a loop into a python_off macro turns it on
+    it, lb = lb_of(be.doc.main[0])
+    be.external_drop({"spec": {"kind": "repeat"}, "hx": 10, "hy": 10},
+                     it.mapToScene(QPointF(lb.x + 10, lb.y + lb.h + 10)))
+    pump()
+    check("palette drop snaps a new block in", ed.code_text().startswith("tap(KEY_Z, 0.2)\nfor _ in range(10):\n  pass\n"))
+    check("new blocks follow the macro's own indentation (2 spaces here)", "\n  pass\n" in ed.code_text())
+    check("adding a loop block auto-enables embedded Python, with a note",
+          ed.python_cb.isChecked() and "embedded Python" in ed.error.text())
+    ed.python_cb.setChecked(False)
+    check("...and it can't be turned back off while the loop is there", ed.python_cb.isChecked())
+
+    # arguments() only ever snaps to the very top of the macro
+    args = [bm.new_block("arguments")]
+    it, lb = lb_of(be.doc.main[1])
+    be._find_snap(it.mapToScene(QPointF(lb.x, lb.y + lb.h)), args, 40)
+    check("arguments() won't snap mid-macro", be.snap is None)
+    be._find_snap(it.mapToScene(QPointF(0, 0)) - QPointF(0, 0) + QPointF(be.main_item.pos().x() - it.pos().x(), 0)
+                  if False else be.main_item.mapToScene(QPointF(0, br.HAT_BUMP + br.MIN_H)), args, 40)
+    check("arguments() snaps right under the hat", be.snap is not None and be.snap.index == 0
+          and be.snap.container is be.doc.main)
+    be.clear_hover_state()
+
+    be.undo()   # the loop drop
+    be.undo()   # the delete
+    ed.python_cb.setChecked(True)
+    # delete + context helpers
+    n = len(be.doc.main)
+    be.duplicate_block(be.doc.main[0])
+    check("duplicate inserts a copy right after", len(be.doc.main) == n + 1 and ed.code_text().startswith("tap(KEY_Z, 0.2)\ntap(KEY_Z, 0.2)"))
+    be.delete_block(be.doc.main[1])
+    check("delete removes just that block", len(be.doc.main) == n)
+    loop = next(b for b in be.doc.main if b.kind == "repeat" and b.bodies[0])
+    be.to_text_block(loop)
+    raw = next(b for b in be.doc.main if b.kind == "raw")
+    check("Edit as text turns a block into a raw text block", raw.fields["code"].startswith("for _ in range(2):"))
+    be.raw_to_blocks(raw)
+    check("...and Turn into blocks parses it back", any(b.kind == "repeat" for b in be.doc.main))
+
+    # text <-> blocks after edits
+    ed.set_view_mode("text")
+    check("switching to Text shows the regenerated code", ed.code_stack.currentWidget() is ed.code
+          and "tap(KEY_Z, 0.2)" in ed.code.toPlainText())
+    ed.code.setPlainText("for _ in range(3:\n")
+    check("unparseable code stays in Text, with the reason", not ed.set_view_mode("blocks")
+          and ed.view_mode() == "text" and "syntax error" in ed.error.text())
+    ed.code.setPlainText("while True:\n    tap(KEY_Q)\n")
+    check("fixed code switches to blocks", ed.set_view_mode("blocks") and [b.kind for b in be.doc.main] == ["while"])
+
+    # transcription in Block view appends and re-reads the blocks
+    ed._insert_transcribed("wait(0.25)\nkd(KEY_A)\n")
+    ed._reparse_timer.stop()
+    ed._reparse_after_transcription()
+    check("transcribed lines show up as blocks", [b.kind for b in be.doc.main] == ["while", "call", "call"]
+          and ed.code_text().endswith("wait(0.25)\nkd(KEY_A)\n"))
+
+    # loose blocks aren't saved, and Save says so
+    be.doc.loose.append(bm.Stack([bm.new_call("tap")], 600, 300))
+    be._rebuild()
+    ok = ed.save()
+    check("save with loose blocks saves only the attached ones and says so",
+          ok and "loose block" in ed.error.text() and cfg.load_macros()["macros"][0]["code"].endswith("kd(KEY_A)\n")
+          and "tap(KEY_A)" not in cfg.load_macros()["macros"][0]["code"])
+
+    # global default: Text
+    model.set_pref("editor_default_mode", "text")
+    ed.load_macro("m1")
+    check("with the default set to Text, macros open as text", ed.view_mode() == "text"
+          and ed.code_stack.currentWidget() is ed.code)
+    check("...and can still be switched to Blocks per macro", ed.set_view_mode("blocks") and ed.view_mode() == "blocks")
+    model.set_pref("editor_default_mode", "blocks")
+    m = model.find("m1")
+    m["code"] = "if (\n"
+    ed.load_macro("m1")
+    check("a macro whose code can't parse opens in Text instead", ed.view_mode() == "text")
 
 
 def main() -> int:
@@ -159,7 +439,7 @@ def main() -> int:
     ed = w.editor_page
     check("editor opens over the macro page", w.stack.currentIndex() == app.PAGE_EDITOR)
     check("editor loads the macro", ed.name_edit.text() == "renamed clicker" and "tap(KEY_SPACE)" in ed.code.toPlainText())
-    left_scroll = ed.findChildren(__import__("ui_kit.smooth_scroll_area", fromlist=["x"]).SmoothScrollArea)[0]
+    left_scroll = ed.left_scroll
     check("editor settings column fits its pane (no horizontal overflow)",
           left_scroll.widget().width() <= left_scroll.viewport().width())
     buttons = [ed.save_btn, ed.save_close_btn, ed.close_btn]
@@ -418,6 +698,8 @@ def main() -> int:
     check("restart stops then starts fresh when one is already running",
           stopped_calls == [True] and started_calls == [True])
 
+    block_tests(w, ed, model)
+
     editor_page.ask = lambda *a, **k: 1
     ed.request_close()
     pump(300)
@@ -459,6 +741,13 @@ def main() -> int:
     check("pointer-acceleration opt-out persists", cfg.load_state().get("disable_pointer_accel") is False)
     sp.flat_accel.setChecked(True)
     check("...and back on again", cfg.load_state().get("disable_pointer_accel") is True)
+
+    # Which view the macro editor opens in (Blocks / Text) is a global pref.
+    check("macro editor defaults to opening in Blocks", sp.default_view.currentText() == "Blocks")
+    sp.default_view.setCurrentIndex(1)
+    check("default editor view persists", cfg.load_state().get("editor_default_mode") == "text")
+    sp.default_view.setCurrentIndex(0)
+    check("...and back to Blocks", cfg.load_state().get("editor_default_mode") == "blocks")
 
     # Real-time priority: off by default (it needs a privilege the service
     # unit has to grant), and opting in persists.

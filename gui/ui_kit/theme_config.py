@@ -58,6 +58,12 @@ class ThemeSettings:
     color_highlight: str = "#6a6a6a"       # nav/segment buttons (sidebar, page-switch tabs)
     color_text: str = "#e6e6e6"            # body text on surfaces, labels in checkboxes/dialogs
     color_text_outline: str = "#101010"    # OutlinedLabel stroke color
+    # Semantic roles (Puppetry): what READS the real world vs. what ACTS on
+    # it. Used by the block editor now; the rest of the app adopts them in
+    # the color-scheme pass. No system-palette equivalent -- always these.
+    color_input: str = "#e0955a"           # orange: reads/receives (arguments, variable reads, conditions)
+    color_output: str = "#5a9ee0"          # blue: synthesizes/acts (kd/ku/tap/combo/type/move_mouse/wheel/command)
+    color_neutral_block: str = "#8a8a8a"   # neither: control flow, timing, markers, ignore/actAs
     text_outline_width: float = 1.0        # OutlinedLabel stroke width, px
 
 

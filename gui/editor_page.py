@@ -15,14 +15,17 @@ import copy
 import json
 import os
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QFont, QKeyEvent, QPalette, QWheelEvent
 from PySide6.QtWidgets import (
-    QComboBox, QFileDialog, QHBoxLayout, QLabel, QPlainTextEdit, QSplitter, QVBoxLayout, QWidget,
+    QButtonGroup, QComboBox, QFileDialog, QHBoxLayout, QLabel, QPlainTextEdit, QSplitter, QStackedWidget,
+    QVBoxLayout, QWidget,
 )
 
+import block_model as bm
 import puppetry_config as cfg
 import sound
+from block_editor import BlockEditor
 from input_tools import ComboRecorder, DetectKey, HotkeyListener, MousePositionPoller, resolve_key_code
 from model import AppModel
 from reference import DICTIONARY_TEXT, alias_targets, simplified_names_reference_text
@@ -33,6 +36,7 @@ from ui_kit.custom_checkbox import CustomCheckBox
 from ui_kit.custom_combo_style import combo_box_stylesheet
 from ui_kit.custom_line_edit import CustomLineEdit
 from ui_kit.custom_spinbox import CustomDoubleSpinBox
+from ui_kit.segment_button import SegmentButton
 from ui_kit.smooth_scroll_area import SmoothScrollArea
 from ui_kit.theme import Theme
 from widgets import Collapsible, ask, dim_label, label_style, section_title
@@ -41,6 +45,20 @@ REPEAT_MODES = ["none", "hold", "toggle"]
 REPEAT_LABELS = ["No Repeat", "Hold", "Toggle"]
 EDGES = ["down", "up"]
 EDGE_LABELS = ["On Press", "On Release"]
+VIEW_BLOCKS, VIEW_TEXT = "blocks", "text"
+
+
+def default_view_mode(state: dict) -> str:
+    """The app-wide default (Settings > Behavior). Blocks unless set."""
+    return VIEW_TEXT if state.get("editor_default_mode") == VIEW_TEXT else VIEW_BLOCKS
+
+
+def sanitize_macro_name(name: str) -> str:
+    """Same rule as native/src/macro.cpp's sanitize_macro_name()."""
+    ident = "".join(c if (c.isalnum() and c.isascii()) or c == "_" else "_" for c in (name or "macro"))
+    if not ident or ident[0].isdigit():
+        ident = "m_" + ident
+    return ident
 
 
 def blank_macro() -> dict:
@@ -119,6 +137,7 @@ class MacroEditorPage(QWidget):
 
         # ------------------------------------------------------------ left column
         left_scroll = SmoothScrollArea()
+        self.left_scroll = left_scroll
         left_scroll.setWidgetResizable(True)
         left_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)  # content wraps to the pane instead
         left = QWidget()
@@ -373,7 +392,23 @@ class MacroEditorPage(QWidget):
         rcol = QVBoxLayout(right)
         rcol.setContentsMargins(pad // 2, 0, 0, 0)
         head = QHBoxLayout()
-        head.addWidget(section_title("Macro code"))
+        head.setSpacing(0)
+        self.view_group = QButtonGroup(self)
+        self.view_group.setExclusive(True)
+        self.blocks_view_btn = SegmentButton(text="Blocks", position="left")
+        self.text_view_btn = SegmentButton(text="Text", position="right")
+        for b in (self.blocks_view_btn, self.text_view_btn):
+            b.setMinimumHeight(32)
+            b.setMinimumWidth(84)
+            head.addWidget(b)
+        self.blocks_view_btn.setToolTip("Edit this macro as snap-together blocks.\n"
+                                        "Same code underneath -- switch back and forth any time.\n"
+                                        "(Which view macros open in: Settings > Behavior.)")
+        self.text_view_btn.setToolTip("Edit this macro's code as text.")
+        self.view_group.addButton(self.blocks_view_btn, 0)
+        self.view_group.addButton(self.text_view_btn, 1)
+        self.view_group.idClicked.connect(lambda i: self.set_view_mode(VIEW_BLOCKS if i == 0 else VIEW_TEXT))
+        head.addSpacing(pad)
         head.addStretch(1)
         self.simplified_cb = CustomCheckBox("Simplified Variable Names")
         self.python_cb = CustomCheckBox("Run as embedded Python")
@@ -387,7 +422,24 @@ class MacroEditorPage(QWidget):
         cpal.setColor(QPalette.Base, theme.surface())
         cpal.setColor(QPalette.Text, theme.text())
         self.code.setPalette(cpal)
-        rcol.addWidget(self.code, stretch=1)
+        self.blocks = BlockEditor()
+        self.blocks.python_needed.connect(self._python_needed)
+        self.python_cb.toggled.connect(self._python_toggled)
+        self.simplified_cb.toggled.connect(lambda _on: self._refresh_block_context())
+        self.code_stack = QStackedWidget()
+        self.code_stack.addWidget(self.blocks)
+        self.code_stack.addWidget(self.code)
+        rcol.addWidget(self.code_stack, stretch=1)
+        # Block view state: the text the canvas was last synced with, and
+        # the canvas revision at that moment. If neither side changed, a
+        # switch is free and lossless (no parse, no regeneration).
+        self._view_mode = VIEW_TEXT
+        self._blocks_synced_text: str | None = None
+        self._blocks_synced_rev = -1
+        self._reparse_timer = QTimer(self)
+        self._reparse_timer.setSingleShot(True)
+        self._reparse_timer.setInterval(250)
+        self._reparse_timer.timeout.connect(self._reparse_after_transcription)
         splitter.addWidget(right)
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
@@ -433,10 +485,16 @@ class MacroEditorPage(QWidget):
         self.ign_btn.setChecked(bool(m.get("ignore_mouse_buttons")))
         self.ign_move.setChecked(bool(m.get("ignore_mouse_movement")))
         self.simplified_cb.setChecked(bool(m.get("simplified_names", False)))
+        self._loading = True
         self.python_cb.setChecked(bool(m.get("python_on", True)))
+        self._loading = False
         self.code.setPlainText(m.get("code", ""))
         self.error.setText("")
         self.tr_status.setText("")
+        self._blocks_synced_text = None
+        self._view_mode = VIEW_TEXT
+        self._refresh_block_context()
+        self.set_view_mode(default_view_mode(self.model.state), quiet=True)
 
         for _e, _c, w in self._alias_rows:
             w.setParent(None)
@@ -455,7 +513,7 @@ class MacroEditorPage(QWidget):
         m["description"] = self.desc_edit.text().strip()
         m["repeat_mode"] = REPEAT_MODES[self.repeat.currentIndex()]
         m["trigger_edge"] = EDGES[self.edge.currentIndex()]
-        m["code"] = self.code.toPlainText()
+        m["code"] = self.code_text()
         m["simplified_names"] = self.simplified_cb.isChecked()
         m["python_on"] = self.python_cb.isChecked()
         m["ignore_keyboard"] = self.ign_kb.isChecked()
@@ -490,7 +548,11 @@ class MacroEditorPage(QWidget):
         self.macro = copy.deepcopy(self.model.find(macro.get("id")) or macro)
         self.model.save()
         self._snapshot = self._fingerprint()
-        self.error.setText("Saved." + ("" if msg in ("OK", "") else f" ({msg})"))
+        note = ""
+        if self._view_mode == VIEW_BLOCKS and self.blocks.loose_count():
+            n = self.blocks.loose_count()
+            note = f" {n} loose block{'s' if n != 1 else ''} on the canvas aren't attached, so weren't saved."
+        self.error.setText("Saved." + ("" if msg in ("OK", "") else f" ({msg})") + note)
         return True
 
     def save_and_close(self) -> None:
@@ -592,6 +654,8 @@ class MacroEditorPage(QWidget):
 
     def _set_combo_label(self, names: list) -> None:
         self.combo_label.setText(" + ".join(names) if names else "(none set)")
+        if hasattr(self, "blocks"):
+            self.blocks.set_context(hat_text=self._hat_text(names))
 
     def _record_clicked(self) -> None:
         if self._recorder is not None:
@@ -705,7 +769,17 @@ class MacroEditorPage(QWidget):
         if (kb_on and not kb) or (mouse_on and not mouse):
             self.tr_status.setText("Set a keyboard/mouse device in Settings first.")
             return
+        if self._view_mode == VIEW_BLOCKS:
+            # Transcription writes text; in Block view it goes to the end of
+            # the macro (there's no visible text cursor) and the blocks are
+            # re-read from it as lines arrive.
+            self.code_text()
+            cursor = self.code.textCursor()
+            cursor.movePosition(cursor.MoveOperation.End)
+            self.code.setTextCursor(cursor)
         self._apply_clear_before_transcribing()
+        if self._view_mode == VIEW_BLOCKS:
+            self._reparse_timer.start()
         err = self.transcriber.start(
             keyboard_path=kb, mouse_path=mouse, transcribe_keyboard=kb_on, transcribe_mouse=mouse_on,
             raw=self.tr_raw.isChecked(), set_positions=self.tr_setpos.isChecked(),
@@ -725,10 +799,20 @@ class MacroEditorPage(QWidget):
         self._play_sound("start")
 
     def _insert_transcribed(self, text: str) -> None:
+        if self._view_mode == VIEW_BLOCKS:
+            # no visible text cursor in Block view: always append
+            cursor = self.code.textCursor()
+            cursor.movePosition(cursor.MoveOperation.End)
+            self.code.setTextCursor(cursor)
         self.code.textCursor().insertText(text)
         self.code.ensureCursorVisible()
+        if self._view_mode == VIEW_BLOCKS:
+            self._reparse_timer.start()
 
     def _transcribe_stopped(self, msg: str) -> None:
+        if self._view_mode == VIEW_BLOCKS and self._reparse_timer.isActive():
+            self._reparse_timer.stop()
+            self._reparse_after_transcription()
         self.tr_btn.setText("Start Transcribing")
         self.tr_status.setText(msg)
         self._play_sound("finish")
@@ -843,6 +927,102 @@ class MacroEditorPage(QWidget):
             return
         self.checkpoint_label.setText(name)
         self.model.set_pref("transcribe_checkpoint_key", name)
+
+    # ------------------------------------------------------------------ blocks / text view
+
+    def _hat_text(self, combo=None) -> str:
+        names = self.macro.get("combo", []) if combo is None else combo
+        return f"when {' + '.join(names)} pressed" if names else "when this macro runs"
+
+    def _refresh_block_context(self) -> None:
+        mine = self.macro.get("id")
+        names = [sanitize_macro_name(m.get("name", "")) for m in self.model.macros() if m.get("id") != mine]
+        tables = cfg.name_tables()
+        keys = list(tables.get("keys", []))
+        if self.simplified_cb.isChecked():
+            keys += list(tables.get("simplified", {}).keys())
+        self.blocks.set_context(macro_names=sorted(set(names)), hat_text=self._hat_text(), key_names=keys)
+
+    def view_mode(self) -> str:
+        return self._view_mode
+
+    def code_text(self) -> str:
+        """The macro's code, whichever view is showing. In Block view the
+        text is regenerated from the blocks ONLY if they were edited since
+        the last sync -- so just looking at a macro as blocks never
+        rewrites it."""
+        if self._view_mode == VIEW_BLOCKS and self.blocks.revision != self._blocks_synced_rev:
+            text = self.blocks.code()
+            if text != self.code.toPlainText():
+                self.code.setPlainText(text)
+            self._blocks_synced_text = text
+            self._blocks_synced_rev = self.blocks.revision
+        return self.code.toPlainText()
+
+    def set_view_mode(self, mode: str, quiet: bool = False) -> bool:
+        """Switch this macro between Blocks and Text. Returns False (and
+        stays in Text) if the code can't be shown as blocks."""
+        if mode == VIEW_BLOCKS:
+            text = self.code_text()
+            if self._view_mode != VIEW_BLOCKS or self._blocks_synced_text != text:
+                if self._blocks_synced_text != text:
+                    try:
+                        doc = bm.code_to_blocks(text, self.blocks.macro_names)
+                    except bm.BlockParseError as exc:
+                        self._view_mode = VIEW_TEXT
+                        self._sync_view_buttons()
+                        self.error.setText(f"Showing Text: this code can't be shown as blocks until "
+                                           f"its syntax error is fixed ({exc}).")
+                        return False
+                    old = self.blocks.doc
+                    doc.main_x, doc.main_y = old.main_x, old.main_y
+                    self.blocks.set_doc(doc)
+                    self._blocks_synced_text = text
+                self._blocks_synced_rev = self.blocks.revision
+            self._view_mode = VIEW_BLOCKS
+        else:
+            self.code_text()
+            self._view_mode = VIEW_TEXT
+        self._sync_view_buttons()
+        if not quiet and self.error.text().startswith("Showing Text"):
+            self.error.setText("")
+        return True
+
+    def _sync_view_buttons(self) -> None:
+        blocks = self._view_mode == VIEW_BLOCKS
+        self.blocks_view_btn.setChecked(blocks)
+        self.text_view_btn.setChecked(not blocks)
+        self.code_stack.setCurrentWidget(self.blocks if blocks else self.code)
+
+    def _reparse_after_transcription(self) -> None:
+        if self._view_mode != VIEW_BLOCKS:
+            return
+        text = self.code.toPlainText()
+        try:
+            doc = bm.code_to_blocks(text, self.blocks.macro_names)
+        except bm.BlockParseError:
+            return
+        old = self.blocks.doc
+        doc.main_x, doc.main_y = old.main_x, old.main_y
+        self.blocks.set_doc(doc, reset_view=False)
+        self._blocks_synced_text = text
+        self._blocks_synced_rev = self.blocks.revision
+
+    def _python_needed(self) -> None:
+        """A loop/variable/if block landed in the macro: those only run as
+        embedded Python, so turn it on -- visibly, not silently."""
+        if not self.python_cb.isChecked():
+            self.python_cb.setChecked(True)
+            self.error.setText("Turned on \"Run as embedded Python\" -- loop, variable and if blocks need it "
+                               "(the fast native path only runs one primitive per line).")
+
+    def _python_toggled(self, on: bool) -> None:
+        if on or getattr(self, "_loading", False) or self._view_mode != VIEW_BLOCKS:
+            return
+        if bm.needs_python(self.blocks.doc.main):
+            self.python_cb.setChecked(True)
+            self.error.setText("Can't turn off embedded Python while the macro has loop, variable or if "
+                               "blocks -- remove them first.")
 
     # ------------------------------------------------------------------ aliases
 

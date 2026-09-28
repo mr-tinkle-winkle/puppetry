@@ -55,6 +55,9 @@ _DEFAULT_LABELS = {
     "color_highlight": "Navigation Buttons:",
     "color_text": "Text:",
     "color_text_outline": "Text Outline:",
+    "color_input": "Input (reads real input):",
+    "color_output": "Output (acts / injects):",
+    "color_neutral_block": "Neutral (control flow, timing):",
     "text_outline_width": "Text Outline Width (px)",
 }
 
@@ -97,7 +100,7 @@ class ThemeEditorGroup(QWidget):
             row.addWidget(edit, stretch=1)
             row.addWidget(pick)
             self._colors[name] = edit
-            c.addRow(self._labels[name], row)
+            c.addRow(self._labels.get(name, name), row)
         spin = CustomSpinBox()
         spin.setRange(0, 10)
         self._outline_width_spin = spin

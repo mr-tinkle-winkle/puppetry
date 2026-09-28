@@ -547,7 +547,10 @@ order, now targeting the C++ daemon (`native/`) and the Qt GUI
     `combo_recorder.py` reconstruction is gone).
   - `gui/transcription.py` — runs `puppetry-transcribe`, and reports
     Puppetry's own window focus to it (Session 8).
-  - `gui/reference.py` — function/simplified-name reference text.
+  - `gui/reference.py` — function/simplified-name reference text, plus
+    the structured `PRIMITIVES` table (Session 12).
+  - `gui/block_model.py`, `block_render.py`, `block_editor.py` — the
+    block editor (Session 12): model + code round-trip, drawing, UI.
   - `gui/puppetry_config.py` — on-disk config, control-socket client,
     helper-binary discovery ($PUPPETRY_BIN_DIR, then native/build, then
     $PATH), macro validation via `puppetry-daemon --check`.
@@ -1144,6 +1147,430 @@ feel of pressing a real checkpoint/restart key mid-recording (no input
 devices available here) — the logic paths are exercised directly instead
 (feeding synthetic `RawEvent`s to `TranscriberCore`/`Transcriber` for the
 native side, calling the handler methods directly for the GUI side).
+
+## Session 11 — planning handoff: color scheme + icons, Dictionary page, block coding
+
+**No feature code this session** — mrtw asked for a writeup + decisions
+before switching to a new chat to actually build. One small fix was made
+in passing (see below); everything else here is the plan for the next
+three sessions, in the order mrtw asked for: **(A) color scheme + icons
+first, (B) Dictionary page second, (C) block coding last.** Do them in
+that order — B and C both lean on data structures A/B introduce.
+
+### Small fix made this session
+
+`checkpoint()` (added in Session 10) was missing from `reference.py`'s
+`DICTIONARY_TEXT` — the in-editor "Function reference" panel didn't
+mention it at all. Added a normal entry for it, alphabetically where the
+zero-arg primitives cluster. `gui/test_app.py` re-run clean (102/102)
+after the change (it's plain text, no test exercises it directly, but the
+run confirms nothing else broke). No native changes, no version bump.
+
+### Decisions locked in by mrtw (asked via AskUserQuestion this session)
+
+1. **Block engine: a custom Qt canvas**, not embedded Blockly. Stays
+   PySide6-native, matches the existing `ui_kit` widget/theme system, no
+   new heavy dependency (no `pyside6-webengine`, no JS<->Qt bridge). This
+   is the harder path (snapping/shapes built from scratch) but it's what
+   he wants.
+2. **Blocks and the text editor share one source of truth** — the macro's
+   existing `code` string. Blocks compile down to it; existing/hand-typed
+   code parses back up into blocks wherever it can, with an escape hatch
+   (below) for whatever it can't. Both views stay switchable on the same
+   macro, same as `simplified_names`/`python_on` toggles today.
+3. **Icons: mrtw is drawing them himself.** Don't invent placeholder
+   icon *art* — build the *infrastructure* that expects icon files to
+   show up later (a loader, a resources convention, a documented list of
+   expected filenames/sizes) and degrade gracefully (text-only) wherever
+   a file isn't there yet. This applies to A and, later, to per-category
+   icons in the block palette (C).
+4. **Color scheme: orange vs. blue, mapped to input vs. output** — his
+   words: "try to have the choices be kinda clever, coloring things to
+   match whether or not they are an 'input' or an 'output'." He may give
+   exact hex codes later; the *concept* (input/output coloring) is
+   staying regardless. He said "for now" on the specific hex values
+   below — treat them as a reasonable starting proposal, not gospel.
+
+### Phase A — color scheme + icon infrastructure (do this first)
+
+**The input/output concept, applied across the whole app, not just
+blocks:** Puppetry's entire domain already splits cleanly into "reading
+the real world" and "acting on the real world" — lean into that instead
+of inventing an arbitrary two-color scheme:
+
+- **Orange = input** — anything that *reads* real hardware or *receives*
+  a value: transcription (it records real keystrokes/mouse movement),
+  the ping/hotkey/restart/checkpoint key pickers (`DetectKey`), the
+  mouse-position readout, `arguments()` declarations, variable reads,
+  conditions (in C, once ifs exist).
+- **Blue = output** — anything that *synthesizes*/*acts*: macro
+  playback in general, and specifically the primitives that inject
+  events or act on the outside world — `kd`, `ku`, `tap`, `combo`,
+  `type`, `move_mouse`, `wheel`, `command`. Variable *writes*/assignment
+  arguably belongs here too (an assignment "outputs" a value into a
+  name) — worth eyeballing once real blocks exist rather than deciding
+  in the abstract.
+- **A few primitives don't cleanly split** — `ignore`/`ignore_keys`
+  block/modify future real input (arguably input-side, since they're
+  about what's read), `actAs` remaps future input to different output
+  (genuinely both), `checkpoint()` is a pure no-op marker (neither).
+  Don't force these into orange/blue — give control-flow/neutral
+  primitives and markers a third, neutral color (extend
+  `ThemeSettings`, e.g. `color_neutral_block` alongside the accent/
+  surface/highlight roles already there) rather than mis-coloring them
+  for the sake of a clean binary.
+- Proposed starting hex (dark-theme-appropriate, sits on the existing
+  `#1e1e1e`/`#161616` backgrounds without fighting them): input orange
+  `#e0955a`, output blue `#5a9ee0`, neutral `#8a8a8a` (close to the
+  current `color_highlight`). These are a first pass for mrtw to look at
+  on screen and adjust — don't treat them as final.
+- Wire these in as new `ThemeSettings` fields (`color_input`,
+  `color_output`, `color_neutral_block` or similar — follow the existing
+  naming pattern in `theme_config.py`) with `Theme` accessors
+  (`theme.input_color()` / `theme.output_color()`), so the *existing*
+  live theme-editor page keeps working for these too — don't hardcode
+  the hex anywhere outside `theme_config.py`'s defaults, exactly like
+  every other color role in that file already works.
+
+**Icon infrastructure (art comes from mrtw later):**
+- Add `gui/ui_kit/icons.py`: a small loader, e.g.
+  `icon(name: str, color: QColor | None = None) -> QIcon | None`, that
+  looks for `ui_kit/resources/icons/<name>.svg` (prefer SVG over the
+  existing lone `checkmark_icon.png` — SVG lets an icon be recolored at
+  runtime by find/replacing `fill=`/`stroke=` in the source before
+  rendering to a `QPixmap`, which is how a monochrome icon can follow
+  the theme's `text()`/`accent()`/input/output colors instead of being
+  baked one color forever). Returns `None` (not a broken/blank icon)
+  when the file doesn't exist yet, and every call site must handle that
+  by falling back to text-only — mrtw is going to be dropping icons in
+  incrementally, and nothing should look broken in the gap.
+- Document the expected filenames up front (a comment block at the top
+  of `icons.py` is enough) so mrtw knows what to draw and name: one per
+  nav entry (`nav_macros`, `nav_editor`, `nav_visualizer`,
+  `nav_settings`, and `nav_dictionary` once B lands), plus — once C
+  lands — one per block category (`block_input`, `block_output`,
+  `block_neutral`) and optionally per-primitive icons later
+  (`primitive_kd`, `primitive_tap`, etc. — nice-to-have, not required
+  for C to function).
+- Wire nav buttons in `app.py` to show an icon beside the label when one
+  resolves, text-only otherwise. This is the only UI change this phase
+  actually needs to make visible — the rest is plumbing for B and C.
+
+### Phase B — Dictionary page (do this second)
+
+Currently the "reference" is two `Collapsible` text blobs
+(`DICTIONARY_TEXT` and `simplified_names_reference_text()`) stuffed into
+the macro editor's left column (`editor_page.py`, "references + aliases"
+section). Replace this with a **dedicated nav page** (new `PAGE_DICTIONARY`
+in `app.py`, using Phase A's icon slot).
+
+**The real work here isn't the page, it's turning `DICTIONARY_TEXT` from
+a prose blob into structured data**, because Phase C's block palette needs
+exactly the same information (name, parameters, category, description) and
+must not re-derive it independently. Concretely:
+
+- Replace the `DICTIONARY_TEXT` string in `reference.py` with something
+  like a list of small dataclasses/dicts — one per primitive — each
+  carrying: `name` (`"tap"`), `params` (structured enough to render a
+  signature AND, later, to generate block input sockets — e.g.
+  `[("key", None), ("time_", "0.1")]` for required vs. keyword-with-default),
+  `category` (`"input" | "output" | "neutral"`, per Phase A's scheme —
+  this is the categorization decision from Phase A, applied concretely
+  per-primitive here), and `description` (the existing prose, unchanged).
+  Keep a plain-text render function for anywhere that still wants the old
+  blob format (there may not be anywhere by the time this is done, but
+  don't break `simplified_names_reference_text()`'s callers without
+  checking first).
+- The Dictionary page: searchable (a line edit filtering by name/alias as-
+  you-type is enough, doesn't need to be fancy), grouped by category with
+  each entry's signature colored by Phase A's input/output/neutral colors,
+  and each primitive's simplified-name aliases (currently
+  `simplified_names_reference_text()`) shown inline with its entry instead
+  of as a separate wall of text — much more useful than two disconnected
+  panels.
+- Once the page exists, remove the two `Collapsible` panels from
+  `editor_page.py` and replace them with a single line/button pointing at
+  the new Dictionary page (`w.nav.button(PAGE_DICTIONARY).click()`-style
+  navigation, matching how `open_editor()` etc. already jump between
+  pages in `app.py`).
+- Add `gui/test_app.py` coverage: the structured primitive table has one
+  entry per real primitive (cross-check against the native side's actual
+  registered names so the dictionary can't silently drift out of sync —
+  worth a small assertion comparing `reference.py`'s primitive list against
+  the names in `native/src/native_vm.cpp`'s `compile_op()`/
+  `python_embed.cpp`'s `FC(...)` table, even if that means listing them by
+  hand in the test and failing loudly if native adds one this file doesn't
+  know about), search filtering, and page navigation.
+
+### Phase C — block coding (do this last)
+
+The biggest piece, and it depends on B's structured primitive table
+existing first.
+
+**Scope, from mrtw's request:** "basic python functions (loops, variable
+creation, etc)" + "all of the built in functions" + puzzle-piece-style
+snapping with visual top/bottom indicators. Concretely that means block
+shapes for:
+- Every registered primitive from Phase B's table (`kd`, `ku`, `tap`,
+  `combo`, `type`, `move_mouse`, `wheel`, `wait`, `speed`, `checkpoint`,
+  `ignore`, `ignore_keys`, `actAs`, `command`), each colored per its
+  Phase A/B category.
+- `arguments(...)` as a special top-of-macro-only block (mirrors its
+  "FIRST LINE ONLY" text rule today).
+- Cross-macro calls by name (already resolved via the registry at
+  compile time — a block that lets you pick another macro from a
+  dropdown, same list `alias_targets()`/the macro list already builds
+  elsewhere).
+- Loops (`for _ in range(n):`, and probably `while <cond>:` — mrtw said
+  "loops" generally; confirm which shapes he actually wants once you're
+  building rather than guessing both are required).
+- Variable creation/assignment (`x = <value>`) and variable-read blocks
+  usable as an input socket anywhere a value is expected.
+- **Not explicitly requested but implied by "basic python functions"**:
+  `if`/`elif`/`else` conditionals. Flag this to mrtw rather than silently
+  building or silently skipping it — "loops, variable creation, etc" could
+  mean he wants conditionals too, or could mean he's deliberately starting
+  narrower.
+
+**Compile-time constraint that shapes the whole design:** loops,
+variables and conditionals are Python control flow, and the native fast
+path (`python_on=False`) categorically rejects control flow at compile
+time — `test_native_vm.cpp` has a standing regression test proving
+`if True:` is a compile error there (see Session 3/4's native rewrite).
+So: a macro built with any loop/variable/if block **must** be
+`python_on=True`; a macro built from primitives-only blocks (no
+loop/var/if) can stay in whichever mode the macro's existing toggle says.
+The block editor should probably auto-flip `python_on` on (with a visible
+note, not silently) the moment a loop/variable/if block is dropped in,
+and let the user flip it back only after removing them.
+
+**Round-trip (per decision #2 above) — this is the hard part:**
+- **Blocks → code:** straightforward top-down codegen, block sequence to
+  indented Python lines. The puzzle-piece "snap" relationships directly
+  encode nesting (a block dropped into a loop's "mouth" becomes an
+  indented child) — build the block data model around a tree, not a flat
+  list, from the start.
+- **Code → blocks:** parse with Python's own `ast` module (macros are
+  already required to be valid Python when `python_on=True`, so `ast.parse`
+  is the right tool, not a hand-rolled parser) and walk the tree building
+  the matching block for each node type it recognizes.
+- **The escape hatch, and why it's necessary:** hand-typed code will
+  always be able to express things no block exists for yet (arbitrary
+  expressions, imports if anyone ever writes one, weird formatting).
+  Round-tripping "blocks are just another view of the same code" (decision
+  #2) only holds up if nothing is ever silently dropped or corrupted going
+  code → blocks → code. Give every unrecognized statement/line a generic
+  "raw code" block — still snaps top/bottom like any other piece, shows
+  the literal text, isn't editable via sub-blocks — so switching to Block
+  view and back never loses or mangles anything it doesn't fully
+  understand. This is more important to get right than any individual
+  block shape.
+- Native-path (`python_off`) macros are simpler in this direction: they're
+  already restricted to one primitive/macro-call per line with literal
+  args, so parsing them into blocks doesn't need `ast` at all — the
+  existing line-oriented grammar the native compiler already uses
+  (`native_vm.cpp`'s statement parsing) is the reference for what a line
+  can look like; reuse its shape rather than inventing a second grammar
+  for the same restricted language in Python.
+
+**Visual/interaction notes:**
+- Puzzle-piece silhouette (not just a Scratch-style flat-topped tab) per
+  mrtw's wording — actual notch/tab geometry on a `QPainterPath`, not a
+  plain rectangle, so blocks visually interlock rather than just abutting.
+- Snap feedback: highlight the target notch (or the whole receiving edge)
+  when a dragged block gets close enough to snap, distinct from the
+  block's own category color so it reads as "about to connect" rather
+  than changing the block's identity color.
+- `QGraphicsView`/`QGraphicsScene` is the natural fit for a draggable,
+  zoomable canvas in Qt — each block a `QGraphicsItem` subclass with its
+  own `paint()` drawing the puzzle silhouette in its category color, and
+  scene-level logic doing hit-testing against nearby blocks' notches to
+  decide when a drag-release becomes a snap.
+- A visible toggle on the macro editor page to switch between "Blocks"
+  and "Text" for the *same* macro (not a separate page — same spot the
+  code editor lives today), matching decision #2.
+
+**Testing:** this is the piece most likely to have subtle bugs (codegen
+correctness, round-trip fidelity, snap hit-testing), so budget real time
+for `gui/test_app.py` coverage of: blocks → code for each block type,
+code → blocks → code round-trip (build code by hand, parse to blocks,
+regenerate, assert it matches — byte-for-byte where reasonable, or
+semantically equivalent where whitespace/formatting can't be preserved
+exactly), the raw-code escape hatch actually firing on something
+unrecognized instead of crashing or eating it, and the python_on
+auto-flip behavior.
+
+### Suggested next-session opening move
+
+Don't try to do all three phases in one sitting — they're sized like
+Session 3 (the whole Qt rewrite), not like Session 9/10. Start a fresh
+chat per phase (or at least checkpoint/re-zip between A and B, and
+definitely between B and C — C is the large one). Read this section plus
+the "Architecture / file map" section below before touching code.
+
+## Session 12 — block coding (Phase C, done first at mrtw's call)
+
+mrtw chose to **start with block coding** rather than Phase A/B, and added
+one requirement on top of the Session 11 plan: **which view macros open
+in (Blocks or Text) is a global setting, and any macro can be flipped to
+the other view at any time.** Everything below is built; A and B are still
+open, but the two pieces of them C needed were built minimally here (see
+"What C pulled forward from A/B").
+
+Verified: `gui/test_app.py` 102 -> **161** (+59), `gui/ui_kit_test_kit.py`
+still green, native untouched (built it only so the GUI tests could
+validate generated code with the real `puppetry-daemon --check`).
+**Not verified on a real display** — every screenshot was offscreen. Do a
+real drag-and-drop pass before trusting the feel (snap distance, zoom,
+drag autoscroll, menus).
+
+### What mrtw sees
+
+- Macro editor, above the code: a **Blocks | Text** segment toggle (where
+  the "Macro code" title was). Same code underneath; switch whenever.
+- **Settings > Behavior > "Macro editor opens in" [Blocks | Text]** — the
+  global default (`state.json` `editor_default_mode`, default `"blocks"`).
+  Every macro opens in that view; the per-macro choice is NOT remembered
+  between opens (deliberate: the default stays predictable. If mrtw wants
+  per-macro memory, store `{macro_id: mode}` via `model.set_pref` in
+  `set_view_mode()` — don't put it in the macro dict, that would dirty the
+  macro just from switching views).
+- Block view = palette on the left (Output / Timing & control / Real
+  input / Variables / Other macros / Other), canvas on the right with an
+  input-orange **hat** ("when KEY_HOME pressed" — the macro's combo, or
+  "when this macro runs"). Only the stack under the hat is the macro.
+- Interactions: drag a block = it and everything below it (Ctrl-drag =
+  just that block); a dashed ghost shows the snap; drop on the palette =
+  delete; click a socket = inline editor (dropdown for True/False,
+  easing, ignore target, `+= -= *= /=`, macro names; key sockets get a
+  completer from `--dump-names`); `⋯` on a block shows/hides its optional
+  settings; right-click = duplicate / delete / delete-below / add else-if /
+  add-remove else / unwrap / show all options / edit as text / turn raw
+  text into blocks; drag empty space = pan; Ctrl+wheel = zoom; Ctrl+0;
+  Ctrl+Z / Ctrl+Shift+Z (or Ctrl+Y); Delete = delete selected; hover =
+  primitive summary tooltip; "Tidy up" lines up loose stacks.
+- Variables section: `arguments(...)`, `set [x] to`, `change [x] +=`,
+  one draggable orange chip per variable the macro defines (arguments
+  params, assignments, loop vars) + "+ New variable". Drop a chip on any
+  socket to use it. Sockets holding a known variable draw orange;
+  conditions draw as orange hexagons (input = orange, per Phase A).
+- Loose blocks (not under the hat) draw faded, the toolbar says they
+  won't be saved, and Save's status line repeats it.
+
+### Decisions made while building (flag any mrtw disagrees with)
+
+- **Conditionals were built** (if / else if / else), plus `while`,
+  `repeat N times` (`for _ in range(N)`) and `for each [i] in [iter]`.
+  Session 11 said to flag if/elif/else rather than guess — it's built and
+  flagged here; removing it is just dropping two palette entries.
+- **Sockets hold source text, not nested reporter blocks.** A variable
+  "reporter" is dragged onto a socket and fills it with the name (drawn
+  orange). No Scratch-style nested expression blocks (`x + 1` is typed).
+  This keeps every socket lossless and was far simpler; nested operator
+  blocks could be layered on later without changing the model.
+- **python_on auto-flip:** dropping a loop/variable/if block into a
+  `python_on=False` macro turns "Run as embedded Python" on with a visible
+  note; unticking it is refused (with a note) while such blocks exist in
+  the macro. Text view keeps its old behavior (the checker catches it).
+- **Colors:** control flow = neutral grey (slightly darker), timing/
+  markers/ignore/actAs = neutral, injectors = output blue, `arguments`/
+  hat/variable reads/conditions = input orange, `set`/`change` and
+  macro-calls = output blue (a write "outputs" a value). Comments/raw
+  text = darker neutral. Socket fill = `theme.text()` (no hex hardcoded
+  outside `theme_config.py`).
+
+### Round-trip fidelity (the part to not break)
+
+`gui/block_model.py` is Qt-free and holds it all:
+- `code_to_blocks()` uses `ast` (for python_off code too — its one-call-
+  per-line grammar is valid Python, so no second parser was needed).
+  Anything with no block (imports, try, with, def, `a; b`, one-line
+  `if x: tap(A)`, starred args, unknown calls...) becomes a **raw block**
+  holding its exact source lines — never dropped. Comments become comment
+  blocks (or stay inside raw blocks); blank lines are `blank_before`;
+  `# trailing` comments are kept per block/header; indentation unit
+  (tabs / 2 spaces / 4) is detected and reused for new blocks.
+- Every parsed block keeps its original text (`Block.src`) and re-emits
+  it verbatim until its sockets are edited (`touch()`), so odd spacing
+  like `tap( KEY_A ,0.2)` survives even after the block is moved.
+- **The editor never regenerates code at all unless the blocks were
+  edited** (`editor_page.code_text()` compares `BlockEditor.revision` to
+  the last sync). So opening a macro in Blocks and switching back is a
+  guaranteed no-op, whatever the parser thinks.
+- Parser note: `ast.get_source_segment()` re-splits the whole file on
+  every call — quadratic; a 2k-line transcription took 19 s. `_Parser._seg`
+  slices cached lines instead (20k lines: parse 0.4 s, first paint 0.4 s,
+  a socket edit ~0.7 s incl. undo snapshot + relayout). Undo snapshots use
+  `Block.copy_tree()`, not `deepcopy` (2.5x faster).
+- Syntax errors: the macro opens / stays in Text with "can't be shown as
+  blocks until its syntax error is fixed (line N: ...)".
+
+### Transcription while in Block view
+
+Transcription still writes text: in Block view it always appends at the
+end (no visible text cursor), and the blocks are re-read from the text
+250 ms after each batch (and once more on stop). Clear-before-transcribing
+/ checkpoint logic is unchanged (it runs on the synced text first). A
+re-read drops loose stacks and undo history — acceptable mid-recording.
+
+### What C pulled forward from A/B
+
+- **Phase A (partial):** `ThemeSettings.color_input` `#e0955a`,
+  `color_output` `#5a9ee0`, `color_neutral_block` `#8a8a8a` + `Theme.
+  input_color()/output_color()/neutral_block_color()/category_color()`;
+  they appear in the existing theme editor automatically. **Not done:**
+  applying orange/blue to the rest of the app, `icons.py`, nav icons.
+- **Phase B (partial):** `reference.py` now has the structured
+  `PRIMITIVES` table (`Primitive`/`Param` dataclasses: name, params with
+  defaults/kind/caption/choices/kw_only/vararg, category, summary). The
+  block palette, block labels, sockets and parser all read it. A test
+  asserts its names equal the `FC("...")` table in `python_embed.cpp`
+  exactly. **Not done:** the Dictionary page; `DICTIONARY_TEXT` is still
+  the prose blob and the two Collapsibles are still in the editor. Note:
+  `DICTIONARY_TEXT` says `ignore(target)` but the daemon's keyword is
+  `what` — the table uses `what`; fix the prose when B happens.
+
+### Files
+
+- `gui/block_model.py` — Block/Stack/Doc, `code_to_blocks`,
+  `blocks_to_code`, factories, `needs_python`, `variable_names`.
+- `gui/block_render.py` — geometry constants, puzzle silhouettes
+  (`stmt_path`, `c_path`, `hat_path`; notch cut into every top edge, tab
+  under every bottom edge, mouths get both), layout (numbers only; paths
+  built lazily on first paint/hit; `StackLayout.visible()` bisects so a
+  20k-block stack paints only what's on screen), painting.
+- `gui/block_editor.py` — `BlockEditor` (palette + toolbar + canvas; undo;
+  all mutations), `BlockView` (mouse/drag/zoom/drops), `StackItem` (one
+  per stack; the main one owns the hat), `GhostItem` (snap preview, z
+  between stacks and the dragged stack), `Palette`/`PaletteBlock`/
+  `VariableChip` (QDrag with `application/x-puppetry-block` /
+  `-variable` mime).
+- `gui/editor_page.py` — the toggle, `code_text()`, `set_view_mode()`,
+  python auto-flip, transcription hooks, `sanitize_macro_name()` (mirror of
+  `native/src/macro.cpp`'s), `self.left_scroll` (test hook).
+- `gui/settings_page.py` — the default-view combo.
+- `gui/test_app.py` — `block_tests()`: byte-for-byte round-trip over 19
+  samples (comments, blanks, elif/else, tabs, 2-space indent, unicode,
+  multi-line strings, raw constructs), raw escape hatch, codegen for every
+  block type, every palette primitive compiling on the **native** path via
+  the real daemon, control-flow blocks compiling as Python, primitive
+  table vs. native, real mouse drag-away / drag-back-with-ghost / Ctrl-
+  drag / undo / redo, inline socket editing, variable drop, palette drop,
+  python_on lock + auto-flip, arguments-only-at-top snapping, duplicate /
+  delete / edit-as-text / turn-into-blocks, Text<->Blocks after edits,
+  syntax-error fallback, transcription in Block view, loose blocks not
+  saved, and the global default (both values).
+
+### Known gaps / ideas
+
+- Blocks don't slide apart to make room while hovering (Scratch does);
+  the ghost marks the spot instead.
+- No per-socket key *detector* ("press the key you mean") — typing with a
+  completer only. `DetectKey` already exists and would slot into
+  `BlockEditor.edit_field()` for `kind == "key"` sockets.
+- Very long raw/comment lines aren't wrapped; the block just gets wide.
+- Palette is a fixed 300 px column; on a 1400 px window the canvas is
+  narrow unless the settings splitter is dragged left.
 
 ## Build/run/environment
 

@@ -8,13 +8,15 @@ from __future__ import annotations
 
 from dataclasses import asdict
 
-from PySide6.QtWidgets import QHBoxLayout, QLabel, QSizePolicy, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QComboBox, QHBoxLayout, QLabel, QSizePolicy, QVBoxLayout, QWidget
 
 import puppetry_config as cfg
 from input_tools import DetectDevice, DetectKey, list_all_devices
 from model import AppModel
 from ui_kit.custom_button import CustomButton
+from ui_kit import theme_config
 from ui_kit.custom_checkbox import CustomCheckBox
+from ui_kit.custom_combo_style import combo_box_stylesheet
 from ui_kit.custom_group_box import CustomGroupBox
 from ui_kit.custom_message_dialog import show_message
 from ui_kit.custom_spinbox import CustomDoubleSpinBox
@@ -117,6 +119,20 @@ class SettingsPage(PageBase):
         r.addWidget(self.record_time)
         r.addStretch(1)
         bl.addLayout(r)
+        r = QHBoxLayout()
+        r.addWidget(QLabel("Macro editor opens in"))
+        self.default_view = QComboBox()
+        self.default_view.addItems(["Blocks", "Text"])
+        self.default_view.setStyleSheet(combo_box_stylesheet(theme_config.get_settings()))
+        self.default_view.setCurrentIndex(1 if model.state.get("editor_default_mode") == "text" else 0)
+        self.default_view.currentIndexChanged.connect(
+            lambda i: model.set_pref("editor_default_mode", "text" if i == 1 else "blocks"))
+        r.addWidget(self.default_view)
+        r.addStretch(1)
+        bl.addLayout(r)
+        bl.addWidget(dim_label("The view every macro starts in when you open it. Either way, the Blocks / Text "
+                               "switch above the code flips any macro to the other view whenever you like -- "
+                               "both edit the same code."))
         self.autosave = CustomCheckBox("Auto-save on change")
         self.autosave.setChecked(bool(model.state.get("autosave", False)))
         self.autosave.toggled.connect(self._autosave_toggled)

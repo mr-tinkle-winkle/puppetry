@@ -88,6 +88,23 @@ class Theme:
         # No sensible system-palette equivalent; always the configured value.
         return QColor(self._s.color_text_outline)
 
+    def input_color(self) -> QColor:
+        return QColor(self._s.color_input)
+
+    def output_color(self) -> QColor:
+        return QColor(self._s.color_output)
+
+    def neutral_block_color(self) -> QColor:
+        return QColor(self._s.color_neutral_block)
+
+    def category_color(self, category: str) -> QColor:
+        """"input" / "output" / anything else -> neutral."""
+        if category == "input":
+            return self.input_color()
+        if category == "output":
+            return self.output_color()
+        return self.neutral_block_color()
+
     # ---- derived ---------------------------------------------------------
     def button_color(self) -> QColor:
         """Button fill. Same value as accent() today, kept as its own

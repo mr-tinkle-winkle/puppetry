@@ -74,6 +74,9 @@ session to take effect.
 - Config lives at `~/.config/macro-daemon/` (`state.json` + `profiles/*.json`)
   -- created automatically on first run.
 - Hitting **Save** in the editor restarts the service for you automatically.
+- Macros can be edited as snap-together **Blocks** or as **Text** -- the
+  toggle above the code flips any macro between them (same code
+  underneath). Which one macros open in is under **Settings > Behavior**.
 - Devices, profiles, the abort key and appearance live in the **Settings** tab.
 - **Input Visualizer** has a CPS tester that measures what an app actually
   receives (daemon -> kernel -> compositor -> app).
