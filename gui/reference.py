@@ -46,9 +46,9 @@ move_mouse(position, ...)   -- a saved getMousePosition() (absolute)
 wheel(amount)
   Scroll. Positive = up, negative = down.
 
-ignore(target)
+ignore(what)
   Blocks REAL input from reaching anything else while on (a toggle --
-  call again to turn it off). target: "keyboard" (everything except the
+  call again to turn it off). what: "keyboard" (everything except the
   abort key), "mouse_buttons", "mouse_movement", or "mouse" (both).
   Grabs the real device; the abort key always force-releases it.
 
@@ -280,3 +280,79 @@ PRIMITIVES_BY_NAME: dict = {p.name: p for p in PRIMITIVES}
 
 def primitive_names() -> list[str]:
     return [p.name for p in PRIMITIVES]
+
+
+# ---------------------------------------------------------------------------
+# Dictionary page data. The per-primitive prose above is parsed (rather than
+# duplicated) so the page, the palette tooltips and the plain-text blob can
+# never disagree.
+# ---------------------------------------------------------------------------
+import re as _re
+
+
+def parse_dictionary() -> tuple:
+    """-> (entries, notes). An entry is {name, signature, description,
+    category}; `notes` are the trailing paragraphs that describe no single
+    command (how other macros are called, native vs Python, the CLI)."""
+    entries, notes = [], []
+    for para in DICTIONARY_TEXT.strip().split("\n\n"):
+        lines = para.split("\n")
+        head = [l for l in lines if not l.startswith(" ")][:]
+        body = [l.strip() for l in lines if l.startswith(" ")]
+        first_head = next((i for i, l in enumerate(lines) if l.startswith(" ")), len(lines))
+        head = lines[:first_head]
+        if not body:
+            notes.append(" ".join(l.strip() for l in lines))
+            continue
+        names = _re.findall(r"\b([A-Za-z_]\w*)\(", head[0])
+        name = names[0] if names else head[0].split()[0]
+        cat = "neutral"
+        for n in names:
+            if n in PRIMITIVES_BY_NAME:
+                cat = PRIMITIVES_BY_NAME[n].category
+                break
+        entries.append({"name": name, "names": names or [name], "signature": "\n".join(head),
+                        "description": "\n".join(body), "category": cat})
+    return entries, notes
+
+
+# Block-only building blocks (control flow, variables, conditions) -- they
+# exist in both the palette and plain code.
+LANGUAGE_ENTRIES: tuple = (
+    ("repeat N times", "for _ in range(N):", "Run the blocks inside N times.", "neutral"),
+    ("for each", "for i in range(10):", "Run the blocks inside once per item (a number range or a list).", "neutral"),
+    ("while", "while condition:", "Keep running the blocks inside as long as the condition is true.", "neutral"),
+    ("if / else", "if condition: ... else: ...", "Run one set of blocks or the other, depending on the condition.", "neutral"),
+    ("x is [equal to / not equal to / greater than / less than / ...] y", "x == y   x != y   x > y   x < y   x >= y   x <= y",
+     "A true/false value. Green = true, red = false.", "neutral"),
+    ("key is held", "KEY_A in getButtonsHeld()", "True while that real key or button is down.", "input"),
+    ("set / change", "x = 0   x += 1", "Give a variable a value, or add to / subtract from it.", "neutral"),
+    ("create function", "def name(a, b): ...", "A block of steps you can run again by name -- only inside this macro. "
+                        "Use return to hand back a value.", "function"),
+    ("run macro", "Other_Macro(arg)", "Run another macro by name, optionally with arguments.", "neutral"),
+    ("true / false", "True   False", "The two yes/no values.", "neutral"),
+    ("note", "# text", "A comment. Notes can sit anywhere on the canvas and are saved with the macro.", "neutral"),
+    ("custom code", "(anything)", "Any code the blocks can't show; it stays exactly as written.", "custom"),
+    ("create a custom block", "(the button under My blocks)", "Make your own block from a code template with arguments; "
+                              "it shows up in every macro.", "custom"),
+)
+
+
+def signature_of(p: Primitive) -> str:
+    parts = []
+    for a in p.params:
+        if a.vararg:
+            parts.append(f"*{a.name}")
+        elif a.default is None:
+            parts.append(a.name)
+        else:
+            parts.append(f"{a.name}={a.default}")
+    return f"{p.name}({', '.join(parts)})"
+
+
+def key_alias_rows() -> list:
+    """[(shown names, real KEY_/BTN_ name)] from the daemon's own tables."""
+    grouped: dict = {}
+    for simple, real in cfg.name_tables().get("simplified", {}).items():
+        grouped.setdefault(real, []).append(simple)
+    return [(" / ".join(sorted(set(v), key=lambda x: (not x.isupper(), x))), real) for real, v in sorted(grouped.items())]

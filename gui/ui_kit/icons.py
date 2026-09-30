@@ -7,7 +7,7 @@ Drop files into  gui/ui_kit/resources/icons/  named exactly:
 
   Sidebar (shown left of the label):
     nav_macros.svg        nav_editor.svg        nav_visualizer.svg
-    nav_settings.svg
+    nav_settings.svg      nav_dictionary.svg
 
   Block palette section headers:
     block_output.svg      block_timing.svg      block_conditions.svg
@@ -35,7 +35,7 @@ from PySide6.QtGui import QColor, QPainter, QPixmap
 ICON_DIR = Path(__file__).resolve().parent / "resources" / "icons"
 
 EXPECTED = (
-    "nav_macros", "nav_editor", "nav_visualizer", "nav_settings",
+    "nav_macros", "nav_editor", "nav_visualizer", "nav_settings", "nav_dictionary",
     "block_output", "block_timing", "block_conditions", "block_input", "block_variables", "block_functions",
     "block_custom", "block_other",
 )

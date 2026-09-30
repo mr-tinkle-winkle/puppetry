@@ -86,7 +86,12 @@ session to take effect.
 - Click **Profile: …** at the top of the Macros page to switch profile.
 - Devices, profiles, the abort key and appearance live in the **Settings** tab.
 - **Input Visualizer** has a CPS tester that measures what an app actually
-  receives (daemon -> kernel -> compositor -> app).
+  receives (daemon -> kernel -> compositor -> app), a keyboard and mouse that
+  light up as they are used, and a **Macro equivalent** readout that shows
+  the code for what was just done (`tap(KEY_A)`, `combo(...)`, `wheel(2)`,
+  `move_mouse(...)`, with waits).
+- **Dictionary** lists every command, block, custom block and key name, with
+  search.
 
 ## Icon / logo
 

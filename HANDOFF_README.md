@@ -29,6 +29,79 @@ features. That document's content has been folded into this one
 (see "Prior session" below) rather than kept as a separate file, so
 this is now the single source of truth for project state.
 
+## Start here — current state (Session 16)
+
+**What it is.** A NixOS input-macro system: a C++17 daemon (evdev in,
+`uinput` out; control socket; embedded CPython *or* a built-in interpreter
+per macro) plus a PySide6 editor. Macros are written as blocks
+(puzzle-piece canvas) or text; both views share one source of truth, the
+macro's `code` string. Categories group and enable/disable macros
+separately from profiles.
+
+**Built and covered by tests.**
+- Daemon: primitives `tap kd ku combo type move_mouse wheel command wait
+  speed checkpoint ignore ignore_keys actAs waitForPress
+  waitForReactivation getMousePosition getButtonsHeld`; native interpreter
+  (variables, control flow, functions, lists) checked differentially
+  against embedded Python; custom blocks registered as combo-less macros.
+- GUI: macro list with categories and profile switcher; editor with
+  Blocks | Text views; custom-block dialog; batched autosave (first save
+  immediate, then one save + one daemon restart after 1 s of quiet);
+  wheel-proof dropdowns app-wide; color scheme (purple = neither input nor
+  output, orange = input, blue = output, green = enabled, red = disabled).
+- **Dictionary page (new).** Nav entry between Input Visualizer and
+  Settings. Sections: Commands (parsed from `reference.DICTIONARY_TEXT`, so
+  prose, palette tooltips and page share one source; signatures colored by
+  category), Blocks and code (`reference.LANGUAGE_ENTRIES`), Custom blocks
+  (read from `custom_blocks.json` each time the page is shown), Key and
+  button names (the daemon's `--dump-names` tables), Notes. One search box
+  filters every section by name and description. The editor's two
+  collapsible reference panels were replaced by an "Open the Dictionary"
+  button. `ignore(target)` in the prose was corrected to `ignore(what)`.
+- **Input Visualizer (extended).** The capture area now draws an ANSI
+  keyboard (main block, navigation cluster, arrows) and a mouse (L, R,
+  wheel, two side buttons); whatever is held lights up in input-orange, the
+  wheel flashes an arrow, the last movement delta is printed. Below it, a
+  "Macro equivalent" readout turns every keyboard/mouse event into code:
+  `tap(KEY_A)`, `combo(KEY_LEFTCTRL, KEY_C)`, `wheel(2)`,
+  `move_mouse(dx, dy, time_=..., easing="linear")`, `wait(...)` between
+  actions, exact `kd/ku` for anything that does not fit (key held during
+  mouse movement, out-of-order release, key still down). Toggles: combine
+  into tap/combo/wheel, include waits; Copy, Clear. Logic lives in
+  `gui/input_transcript.py` (pure Python, unit-tested); the hot path only
+  appends tuples, formatting runs on the page's 50 ms timer.
+  Key names come from the kernel scan code (`nativeScanCode() - 8`, which
+  separates left/right modifiers) with a Qt-key fallback.
+
+**Not verified on real hardware / display.** Everything above ran under
+`QT_QPA_PLATFORM=offscreen`. Unchecked: scan-code mapping on X11 vs
+Wayland (visualizer), drag feel in the block canvas, evdev grab/repress
+behaviour, `kdotool` mouse position, `nix build` of the flake/module.
+Visualizer mouse movement is measured in-window (pointer acceleration
+included), so `move_mouse` values reproduce what the window saw, not raw
+device counts.
+
+**Planned, in rough priority.**
+1. Next: real-desktop pass over the GUI and the daemon primitives added in
+   Sessions 12-16; icon art (drop SVGs into `gui/ui_kit/resources/icons/`;
+   expected names listed in `gui/ui_kit/icons.py`, now including
+   `nav_dictionary`); a real `nix build`.
+2. Later: click a Dictionary entry to insert its block / preview it;
+   keyboard + mouse graphic for editing simplified names and aliases;
+   `Play Sound`; `--arguments=` CLI form; whole-app Ctrl+scroll zoom.
+3. Someday: an "insert into macro" button on the visualizer readout;
+   absolute-position mode for recorded mouse movement.
+
+**Open questions.** Whether the Dictionary should also preview the matching
+block; which easing recorded movement should use (`linear` today); whether
+the visualizer readout should offer to append straight into an open macro.
+
+**Run the checks.** GUI: `cd gui && QT_QPA_PLATFORM=offscreen python3
+test_app.py` (265 checks) and `python3 ui_kit_test_kit.py`. Daemon: `cd
+native && mkdir build && cd build && cmake .. && cmake --build . -j &&
+ctest -LE timing`. The sections below are the per-session history; the
+newest facts are above.
+
 ## Prior session (folded in from the previous handoff)
 
 **Bug fixes:**
@@ -455,52 +528,20 @@ order, now targeting the C++ daemon (`native/`) and the Qt GUI
 
 ### Next
 
-- `puppetry --name="macro name" --arguments=(arg1, arg2, arg3, ...)`
-  — an explicit named-flag syntax for CLI arguments, as an
-  alternative/addition to the bare-trailing-args form already
-  shipped (`puppetry --name="macro name" arg1 arg2`). Needs a
-  decision on whether one replaces the other or both are supported.
-- `Wait for Macro Combo` — a macro-code function that pauses
-  mid-execution and waits for the macro's own trigger combo to be
-  pressed again before continuing.
-- `Play Sound` — a macro-code function taking an absolute file path
-  (e.g. `/home/mrtw/Desktop/customization/sounds/1.mp3`) and playing
-  it.
-- `Listen for Button Press` (working name `listenForNextInput()`) — a
-  macro-code function that stalls execution until the next keyboard
-  or mouse-button input (mouse movement excluded) and returns what
-  was pressed, for use in macro-local variables (e.g. `buttonChosen =
-  listenForNextInput()`).
-- `puppetry --name="macro name" --arguments=(arg1, arg2, arg3, ...)`
-  — an explicit named-flag syntax for CLI arguments, as an
-  alternative/addition to the bare-trailing-args form already
-  shipped (`puppetry --name="macro name" arg1 arg2`). Needs a
-  decision on whether one replaces the other or both are supported.
-- `Wait for Macro Combo` — a macro-code function that pauses
-  mid-execution and waits for the macro's own trigger combo to be
-  pressed again before continuing.
-- `Play Sound` — a macro-code function taking an absolute file path
-  (e.g. `/home/mrtw/Desktop/customization/sounds/1.mp3`) and playing
-  it.
-- `Listen for Button Press` (working name `listenForNextInput()`) — a
-  macro-code function that stalls execution until the next keyboard
-  or mouse-button input (mouse movement excluded) and returns what
-  was pressed, for use in macro-local variables (e.g. `buttonChosen =
-  listenForNextInput()`).
-- Replace "Function Reference" with a "Dictionary" button opening a
-  separate window: buttons per function, each opening its
-  definition, full signature with default arguments, and a call
-  example. "Simplified Name Reference" moves into that window's
-  bottom-right, changing from a text listing to a keyboard + mouse
-  graphic with names overlaid on each button; clicking a button opens
-  a popup with its default simplified name (editable) and an
-  expandable list of additional alias names. The default simplified
-  name is what's used during transcribing when "Simplified Variable
-  Names" is on. Now that the Qt port exists, this is ordinary GUI
-  work against `gui/app.py`, no longer gated on a toolkit decision.
-- Full Scratch-style block-based coding (blocks named after each
-  function, dynamically expanding to fit, full copy/paste) as an
-  alternative authoring mode alongside raw code editing.
+(See "Start here" at the top for the current list; this one is kept only
+for the items not yet re-homed there.)
+
+- `puppetry --name="macro name" --arguments=(arg1, arg2, ...)` — an explicit
+  named-flag syntax for CLI arguments, as an alternative/addition to the
+  bare-trailing-args form already shipped. Needs a decision: replace or add.
+- `Play Sound` — a macro-code function taking an absolute file path and
+  playing it.
+- DONE: `Wait for Macro Combo` (now `waitForReactivation`), `Listen for
+  Button Press` (now `waitForPress`), block coding (Sessions 12-13), the
+  Dictionary page (Session 16). Still open from the original Dictionary
+  idea: a keyboard + mouse graphic where clicking a key edits its
+  simplified name and aliases (the Input Visualizer's drawn keyboard,
+  Session 16, is the reusable widget for it).
 - Whole-app Ctrl+Scroll zoom (window, list, buttons — not just the
   code editor, which already has its own scoped zoom via
   `ZoomablePlainTextEdit` in `gui/editor_page.py`) and Ctrl+0 to reset it.
@@ -1153,10 +1194,10 @@ native side, calling the handler methods directly for the GUI side).
 
 ## Session 11 — planning handoff: color scheme + icons, Dictionary page, block coding
 
-**No feature code this session** — mrtw asked for a writeup + decisions
+**No feature code this session** — a writeup + decisions were requested
 before switching to a new chat to actually build. One small fix was made
 in passing (see below); everything else here is the plan for the next
-three sessions, in the order mrtw asked for: **(A) color scheme + icons
+three sessions, in the order requested: **(A) color scheme + icons
 first, (B) Dictionary page second, (C) block coding last.** Do them in
 that order — B and C both lean on data structures A/B introduce.
 
@@ -1169,7 +1210,7 @@ zero-arg primitives cluster. `gui/test_app.py` re-run clean (102/102)
 after the change (it's plain text, no test exercises it directly, but the
 run confirms nothing else broke). No native changes, no version bump.
 
-### Decisions locked in by mrtw (asked via AskUserQuestion this session)
+### Decisions locked in (asked via AskUserQuestion this session)
 
 1. **Block engine: a custom Qt canvas**, not embedded Blockly. Stays
    PySide6-native, matches the existing `ui_kit` widget/theme system, no
@@ -1181,7 +1222,7 @@ run confirms nothing else broke). No native changes, no version bump.
    code parses back up into blocks wherever it can, with an escape hatch
    (below) for whatever it can't. Both views stay switchable on the same
    macro, same as `simplified_names`/`python_on` toggles today.
-3. **Icons: mrtw is drawing them himself.** Don't invent placeholder
+3. **Icons: the owner is drawing them.** Don't invent placeholder
    icon *art* — build the *infrastructure* that expects icon files to
    show up later (a loader, a resources convention, a documented list of
    expected filenames/sizes) and degrade gracefully (text-only) wherever
@@ -1225,7 +1266,7 @@ of inventing an arbitrary two-color scheme:
 - Proposed starting hex (dark-theme-appropriate, sits on the existing
   `#1e1e1e`/`#161616` backgrounds without fighting them): input orange
   `#e0955a`, output blue `#5a9ee0`, neutral `#8a8a8a` (close to the
-  current `color_highlight`). These are a first pass for mrtw to look at
+  current `color_highlight`). These are a first pass to review
   on screen and adjust — don't treat them as final.
 - Wire these in as new `ThemeSettings` fields (`color_input`,
   `color_output`, `color_neutral_block` or similar — follow the existing
@@ -1235,7 +1276,7 @@ of inventing an arbitrary two-color scheme:
   the hex anywhere outside `theme_config.py`'s defaults, exactly like
   every other color role in that file already works.
 
-**Icon infrastructure (art comes from mrtw later):**
+**Icon infrastructure (art comes later):**
 - Add `gui/ui_kit/icons.py`: a small loader, e.g.
   `icon(name: str, color: QColor | None = None) -> QIcon | None`, that
   looks for `ui_kit/resources/icons/<name>.svg` (prefer SVG over the
@@ -1245,10 +1286,10 @@ of inventing an arbitrary two-color scheme:
   the theme's `text()`/`accent()`/input/output colors instead of being
   baked one color forever). Returns `None` (not a broken/blank icon)
   when the file doesn't exist yet, and every call site must handle that
-  by falling back to text-only — mrtw is going to be dropping icons in
+  by falling back to text-only — icons will be dropped in
   incrementally, and nothing should look broken in the gap.
 - Document the expected filenames up front (a comment block at the top
-  of `icons.py` is enough) so mrtw knows what to draw and name: one per
+  of `icons.py` is enough) so it is clear what to draw and name: one per
   nav entry (`nav_macros`, `nav_editor`, `nav_visualizer`,
   `nav_settings`, and `nav_dictionary` once B lands), plus — once C
   lands — one per block category (`block_input`, `block_output`,
@@ -1310,7 +1351,7 @@ must not re-derive it independently. Concretely:
 The biggest piece, and it depends on B's structured primitive table
 existing first.
 
-**Scope, from mrtw's request:** "basic python functions (loops, variable
+**Scope, from the request:** "basic python functions (loops, variable
 creation, etc)" + "all of the built in functions" + puzzle-piece-style
 snapping with visual top/bottom indicators. Concretely that means block
 shapes for:
@@ -1324,13 +1365,13 @@ shapes for:
   compile time — a block that lets you pick another macro from a
   dropdown, same list `alias_targets()`/the macro list already builds
   elsewhere).
-- Loops (`for _ in range(n):`, and probably `while <cond>:` — mrtw said
+- Loops (`for _ in range(n):`, and probably `while <cond>:` — the request said
   "loops" generally; confirm which shapes he actually wants once you're
   building rather than guessing both are required).
 - Variable creation/assignment (`x = <value>`) and variable-read blocks
   usable as an input socket anywhere a value is expected.
 - **Not explicitly requested but implied by "basic python functions"**:
-  `if`/`elif`/`else` conditionals. Flag this to mrtw rather than silently
+  `if`/`elif`/`else` conditionals. Flag this rather than silently
   building or silently skipping it — "loops, variable creation, etc" could
   mean he wants conditionals too, or could mean he's deliberately starting
   narrower.
@@ -1378,7 +1419,7 @@ and let the user flip it back only after removing them.
 
 **Visual/interaction notes:**
 - Puzzle-piece silhouette (not just a Scratch-style flat-topped tab) per
-  mrtw's wording — actual notch/tab geometry on a `QPainterPath`, not a
+  the requested wording — actual notch/tab geometry on a `QPainterPath`, not a
   plain rectangle, so blocks visually interlock rather than just abutting.
 - Snap feedback: highlight the target notch (or the whole receiving edge)
   when a dragged block gets close enough to snap, distinct from the
@@ -1411,9 +1452,9 @@ chat per phase (or at least checkpoint/re-zip between A and B, and
 definitely between B and C — C is the large one). Read this section plus
 the "Architecture / file map" section below before touching code.
 
-## Session 12 — block coding (Phase C, done first at mrtw's call)
+## Session 12 — block coding (Phase C, done first by choice)
 
-mrtw chose to **start with block coding** rather than Phase A/B, and added
+Block coding was chosen as the **first** piece rather than Phase A/B, and added
 one requirement on top of the Session 11 plan: **which view macros open
 in (Blocks or Text) is a global setting, and any macro can be flipped to
 the other view at any time.** Everything below is built; A and B are still
@@ -1427,14 +1468,14 @@ validate generated code with the real `puppetry-daemon --check`).
 real drag-and-drop pass before trusting the feel (snap distance, zoom,
 drag autoscroll, menus).
 
-### What mrtw sees
+### What is visible
 
 - Macro editor, above the code: a **Blocks | Text** segment toggle (where
   the "Macro code" title was). Same code underneath; switch whenever.
 - **Settings > Behavior > "Macro editor opens in" [Blocks | Text]** — the
   global default (`state.json` `editor_default_mode`, default `"blocks"`).
   Every macro opens in that view; the per-macro choice is NOT remembered
-  between opens (deliberate: the default stays predictable. If mrtw wants
+  between opens (deliberate: the default stays predictable. If wanted
   per-macro memory, store `{macro_id: mode}` via `model.set_pref` in
   `set_view_mode()` — don't put it in the macro dict, that would dirty the
   macro just from switching views).
@@ -1460,7 +1501,7 @@ drag autoscroll, menus).
 - Loose blocks (not under the hat) draw faded, the toolbar says they
   won't be saved, and Save's status line repeats it.
 
-### Decisions made while building (flag any mrtw disagrees with)
+### Decisions made while building (flag any that are disputed)
 
 - **Conditionals were built** (if / else if / else), plus `while`,
   `repeat N times` (`for _ in range(N)`) and `for each [i] in [iter]`.
@@ -1577,13 +1618,13 @@ re-read drops loose stacks and undo history — acceptable mid-recording.
 
 ## Session 13 — native interpreter, new primitives, block editor round 2, app-wide colors
 
-mrtw's list after trying Session 12, plus two mid-session additions. All
+The list after trying Session 12, plus two mid-session additions. All
 built. Verified: native ctest **8/8** incl. the new `test_native_interp`
 (67 checks, differential native-vs-Python), `gui/test_app.py` 161 ->
 **215**, `ui_kit_test_kit.py` green. Still **offscreen only** -- do a real
 display + real hardware pass (see "Needs a real-machine check" below).
 
-### 1. The native path is now a real interpreter (mrtw chose this)
+### 1. The native path is now a real interpreter (chosen)
 
 `native/src/native_vm.cpp` was rewritten: tokenizer (Python INDENT/DEDENT,
 triple-quoted/raw strings, line continuations) -> recursive-descent parser
@@ -1660,7 +1701,7 @@ either path. The GUI generates `code` = `arguments(<arg>=<default>, ...)`
 + the template with `{arg}` -> `arg`, and validates it with `--check`
 before saving. Saving/deleting a custom block restarts the daemon.
 
-### 4. Block editor changes (all of mrtw's list)
+### 4. Block editor changes (the full list)
 
 - **Growing list sockets**: every varargs socket (combo keys, ignore keys,
   act as, run command's values, arguments, run macro/function arguments,
@@ -1725,7 +1766,7 @@ before saving. Saving/deleting a custom block restarts the daemon.
   `widgets.mark_input()` / `mark_output()`. New theme roles (editable in
   Settings > Appearance): `color_custom` (purple), `color_function`
   (pink), `color_true` (green), `color_false` (red).
-- **Icons: waiting on mrtw's art.** `gui/ui_kit/icons.py` documents the
+- **Icons: waiting on the art.** `gui/ui_kit/icons.py` documents the
   exact filenames (nav_*, block_* per palette section, optional
   primitive_<name>) and loads `resources/icons/<name>.svg` (recolored via
   `currentColor`/black -> the theme color where it's shown) or `.png`.
@@ -1819,3 +1860,17 @@ what actually applies it. Logs: `journalctl --user -u macro-daemon`.
 - `CustomScrollBar` insets its track and handle by `INSET` (3px) on all sides so the gap is equal either side
   of a vertical bar / above and below a horizontal one; `SmoothScrollArea` now installs the custom bar on the
   horizontal axis too, so in-panel bars match.
+
+## Session 16 — Dictionary page + Input Visualizer keyboard/mouse
+
+- New: `gui/dictionary_page.py`, `reference.parse_dictionary()`,
+  `LANGUAGE_ENTRIES`, `signature_of()`, `key_alias_rows()`; `PAGE_DICTIONARY`
+  in `gui/app.py`; editor button replaces the two collapsibles.
+- New: `gui/input_transcript.py` (event log -> macro text), keyboard/mouse
+  drawing and event capture in `gui/visualizer_page.py` (`CpsArea`,
+  `KEY_ROWS`, `NAV_KEYS`, `key_name_of`).
+- Tests: `gui/test_app.py` 240 -> 265 checks (dictionary coverage against
+  the primitive table, search, empty state, editor button; transcript
+  rendering rules; live readout from simulated key/mouse/wheel events).
+- README cleanup: personal names removed, duplicated "Next" list collapsed,
+  "Start here" section added.

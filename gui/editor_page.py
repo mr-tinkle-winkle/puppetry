@@ -30,7 +30,7 @@ from block_editor import BlockEditor
 from custom_block_dialog import CustomBlockDialog
 from input_tools import ComboRecorder, DetectKey, HotkeyListener, MousePositionPoller, resolve_key_code
 from model import AppModel
-from reference import DICTIONARY_TEXT, alias_targets, simplified_names_reference_text
+from reference import alias_targets
 from transcription import TranscriptionController
 from ui_kit import theme_config
 from ui_kit.custom_button import CustomButton
@@ -109,6 +109,7 @@ class MacroEditorPage(QWidget):
         super().__init__(parent)
         self.model = model
         self.on_close = on_close
+        self.open_dictionary = lambda: None      # set by MainWindow (jumps to the Dictionary page)
         self.macro: dict = blank_macro()
         self._snapshot = ""
         self._recorder: ComboRecorder | None = None
@@ -390,16 +391,13 @@ class MacroEditorPage(QWidget):
                                 "interfere. The abort key always force-releases these if something gets stuck."))
 
         # ------------------------------------------------------------ references + aliases
-        ref = QLabel(DICTIONARY_TEXT)
-        ref.setWordWrap(True)
-        ref.setFont(QFont("monospace"))
-        ref.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        col.addWidget(Collapsible("Function reference", ref))
-        simple = QLabel(simplified_names_reference_text())
-        simple.setWordWrap(True)
-        simple.setFont(QFont("monospace"))
-        simple.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        col.addWidget(Collapsible("Simplified name reference", simple))
+        dict_btn = CustomButton("Open the Dictionary")
+        dict_btn.setToolTip("Every command, block and key name, searchable.")
+        dict_btn.clicked.connect(lambda: self.open_dictionary())
+        dict_row = QHBoxLayout()
+        dict_row.addWidget(dict_btn)
+        dict_row.addStretch(1)
+        col.addLayout(dict_row)
 
         col.addWidget(section_title("Custom button names"))
         col.addWidget(dim_label("App-wide extra names on top of the simplified names (saved with this macro)."))

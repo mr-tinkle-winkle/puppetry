@@ -24,7 +24,7 @@ from pathlib import Path
 from PySide6.QtCore import QPoint, QPointF, Qt
 from PySide6.QtGui import QColor, QCursor
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QLabel
 from ui_kit.custom_button import CustomButton
 
 import puppetry_config as cfg
@@ -1154,6 +1154,90 @@ def main() -> int:
     check("CPS tester computes a current rate", vp.clicks.current > 0)
     vp.reset()
     check("reset clears totals", vp.clicks.count == 0 and vp.keys.count == 0)
+
+    # macro-equivalent readout + drawn keyboard/mouse
+    import input_transcript as it
+    import visualizer_page as vz
+    vp.clear_macro()
+    QTest.keyClick(vp.area, Qt.Key_A)
+    QTest.mouseClick(vp.area, Qt.RightButton, Qt.NoModifier, QPoint(30, 30))
+    vp.area.wheelEvent(__import__("PySide6.QtGui", fromlist=["QWheelEvent"]).QWheelEvent(
+        QPointF(30, 30), QPointF(30, 30), QPoint(0, 0), QPoint(0, 120), Qt.NoButton, Qt.NoModifier,
+        Qt.NoScrollPhase, False))
+    vp._tick()
+    shown = vp.macro_text.toPlainText()
+    check("visualizer: a key press shows up as tap(KEY_A)", "tap(KEY_A" in shown)
+    check("visualizer: a mouse click shows up as tap(BTN_RIGHT)", "tap(BTN_RIGHT" in shown)
+    check("visualizer: scrolling shows up as wheel(1)", "wheel(1)" in shown)
+    vp.combine.setChecked(False)
+    vp._tick()
+    check("visualizer: combine off gives exact kd/ku lines",
+          "kd(KEY_A)" in vp.macro_text.toPlainText() and "ku(KEY_A)" in vp.macro_text.toPlainText())
+    vp.combine.setChecked(True)
+    QTest.keyPress(vp.area, Qt.Key_W)
+    check("visualizer: a held key lights up on the drawn keyboard", "KEY_W" in vp.area.held_names)
+    QTest.keyRelease(vp.area, Qt.Key_W)
+    check("visualizer: the keyboard layout covers every letter",
+          all(f"KEY_{c}" in vz.CODE_TO_NAME.values() for c in "ABCDEFGHIJKLMNOPQRSTUVWXYZ"))
+    vp.clear_macro()
+    check("visualizer: clear empties the readout", vp.macro_text.toPlainText() == "")
+
+    L = it.InputLog()
+    L.add(0.0, "kd", "KEY_LEFTCTRL"); L.add(0.05, "kd", "KEY_C"); L.add(0.15, "ku", "KEY_C"); L.add(0.2, "ku", "KEY_LEFTCTRL")
+    L.add(1.0, "kd", "KEY_A"); L.add(1.08, "ku", "KEY_A")
+    L.add(1.5, "wheel", 1); L.add(1.6, "wheel", 1)
+    for i in range(50):
+        L.add(2.0 + i * 0.001, "move", 2, -1)
+    L.add(3.0, "kd", "KEY_W")
+    out = L.render()
+    check("transcript: pressed-then-released-in-reverse keys become combo()",
+          "combo(KEY_LEFTCTRL, KEY_C)" in out)
+    check("transcript: a quick press/release becomes tap() with its hold time", "tap(KEY_A, time_=0.08)" in out)
+    check("transcript: a wheel run is summed", "wheel(2)" in out)
+    check("transcript: a movement burst is one move_mouse()", out.count("move_mouse(") == 1 and "move_mouse(100, -50" in out)
+    check("transcript: a key still down stays as kd()", out.rstrip().endswith("kd(KEY_W)"))
+    check("transcript: waits between actions", "wait(0.8)" in out)
+    check("transcript: no waits when turned off", "wait(" not in L.render(True, False))
+    check("transcript: releases of never-seen presses are dropped", it.InputLog().render() == "")
+    L2 = it.InputLog()
+    L2.add(0.0, "ku", "KEY_Q")
+    check("transcript: an orphan release is ignored", L2.render() == "")
+    L3 = it.InputLog()
+    for i in range(5000):
+        L3.add(i * 0.001, "move", 1, 1)
+    check("transcript: a 1000Hz burst stays tiny in memory", len(L3.events) < 10)
+
+    # ---- Dictionary page
+    import reference as ref
+    w.nav.button(app.PAGE_DICTIONARY).click()
+    pump(300)
+    dp = w.dictionary_page
+    ents, _notes = ref.parse_dictionary()
+    parsed = {n for e in ents for n in e["names"]}
+    check("dictionary: every primitive has an entry", set(ref.primitive_names()) <= parsed)
+    check("dictionary: page lists all commands", len(dp.commands.entries) == len(ents))
+    check("dictionary: ignore is documented with 'what' (matches the daemon)",
+          "ignore(what)" in ref.DICTIONARY_TEXT and "ignore(target)" not in ref.DICTIONARY_TEXT)
+    dp.search.setText("wheel")
+    pump(50)
+    vis = [e.signature for e in dp.commands.entries if not e.isHidden()]
+    check("dictionary: search filters commands", vis and all("wheel" in (e.haystack) for e in dp.commands.entries if not e.isHidden())
+          and len(vis) < len(ents))
+    dp.search.setText("zzzznothingzzzz")
+    pump(50)
+    check("dictionary: no match shows the empty message and hides sections",
+          not dp.empty.isHidden() and dp.commands.isHidden())
+    dp.search.setText("")
+    pump(50)
+    check("dictionary: clearing search shows everything again", dp.empty.isHidden() and not dp.commands.isHidden())
+    check("dictionary: colors follow the category scheme",
+          ref.PRIMITIVES_BY_NAME["tap"].category == "output" and next(e for e in dp.commands.entries if e.signature.startswith("tap(")).category == "output"
+          and next(e for e in dp.commands.entries if e.signature.startswith("waitForPress")).category == "input")
+    ed_btn = [b for b in ed.findChildren(CustomButton) if b.text() == "Open the Dictionary"]
+    check("dictionary: the editor has a button in place of the old collapsible panels",
+          len(ed_btn) == 1 and not [c for c in ed.findChildren(QLabel) if c.text().startswith("tap(key, time_=0.1)")])
+    w.nav.button(app.PAGE_MACROS).click()
+    pump(200)
 
     # ------------------------------------------------------------ styling guardrail
     unscoped = []

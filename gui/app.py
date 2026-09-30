@@ -27,10 +27,11 @@ from ui_kit.icons import icon_pixmap
 from ui_kit.scale_reveal import crossfade_to_index
 from ui_kit.segment_button import SegmentButton
 from ui_kit.theme import Theme
+from dictionary_page import DictionaryPage
 from visualizer_page import VisualizerPage
 from widgets import ask, install_wheel_guard
 
-PAGE_MACROS, PAGE_VISUALIZER, PAGE_SETTINGS, PAGE_EDITOR = range(4)
+PAGE_MACROS, PAGE_VISUALIZER, PAGE_SETTINGS, PAGE_EDITOR, PAGE_DICTIONARY = range(5)
 
 
 def install_theme_provider() -> None:
@@ -79,15 +80,17 @@ class MainWindow(QMainWindow):
         self.visualizer_page = VisualizerPage()
         self.settings_page = SettingsPage(self.model)
         self.editor_page = MacroEditorPage(self.model, self.close_editor)
-        for page in (self.macro_page, self.visualizer_page, self.settings_page, self.editor_page):
+        self.dictionary_page = DictionaryPage()
+        for page in (self.macro_page, self.visualizer_page, self.settings_page, self.editor_page, self.dictionary_page):
             self.stack.addWidget(page)
 
         self.nav = QButtonGroup(self)
         self.nav.setExclusive(True)
         nav_icons = {PAGE_MACROS: "nav_macros", PAGE_EDITOR: "nav_editor", PAGE_VISUALIZER: "nav_visualizer",
-                     PAGE_SETTINGS: "nav_settings"}
+                     PAGE_SETTINGS: "nav_settings", PAGE_DICTIONARY: "nav_dictionary"}
         for idx, label in ((PAGE_MACROS, "Macros"), (PAGE_EDITOR, "Macro Editor"),
-                           (PAGE_VISUALIZER, "Input Visualizer"), (PAGE_SETTINGS, "Settings")):
+                           (PAGE_VISUALIZER, "Input Visualizer"), (PAGE_DICTIONARY, "Dictionary"),
+                           (PAGE_SETTINGS, "Settings")):
             # icon beside the label once mrtw's art exists (ui_kit/icons.py
             # lists the file names); text-only until then. The visualizer
             # reads real input, so its icon is tinted input-orange.
@@ -100,6 +103,7 @@ class MainWindow(QMainWindow):
         side.addStretch(1)
         self.nav.button(PAGE_MACROS).setChecked(True)
         self.nav.idClicked.connect(self._nav_clicked)
+        self.editor_page.open_dictionary = lambda: self.nav.button(PAGE_DICTIONARY).click()
 
         root.addWidget(sidebar)
         root.addWidget(self.stack, stretch=1)
