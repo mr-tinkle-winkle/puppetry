@@ -22,18 +22,21 @@ def px(w, x, y):
 
 # 1. no provider -> placeholder monochrome
 b = ui_kit.CustomButton("OK"); b.resize(120, 40); b.show(); pump(0.05)
-check(px(b, 22, 20) == "#4a4a4a", f"placeholder accent on CustomButton ({px(b,22,20)})")
+# Puppetry: default buttons + nav/segment buttons use color_general (purple,
+# "neither input nor output") instead of accent/highlight.
+check(px(b, 22, 20) == ThemeSettings().color_general, f"placeholder general color on CustomButton ({px(b,22,20)})")
 
 # 2. per-app palette through provider (Conduit-ish example)
 conduit = ThemeSettings(color_accent="#7a3cff", color_surface="#241a3a", color_app_background="#140f22",
-                        color_page_background="#0d0a17", color_highlight="#c04cff", color_text="#f0e6ff")
+                        color_page_background="#0d0a17", color_highlight="#c04cff", color_text="#f0e6ff",
+                        color_general="#7a3cff")
 theme_config.set_settings_provider(lambda: conduit)
 b2 = ui_kit.CustomButton("OK"); b2.resize(120, 40); b2.show(); pump(0.05)
 check(px(b2, 22, 20) == "#7a3cff", "provider palette reaches CustomButton")
 seg = ui_kit.SegmentButton(text="Page", position="left"); seg.setChecked(True); seg.resize(120, 40); seg.show(); pump(0.05)
-check(px(seg, 60, 5) == "#c04cff", f"SegmentButton checked uses highlight ({px(seg,60,5)})")
+check(px(seg, 60, 5) == "#7a3cff", f"SegmentButton checked uses the general color ({px(seg,60,5)})")
 img = seg.grab().toImage()
-fill = "#c04cff"
+fill = "#7a3cff"
 corners = {k: img.pixelColor(x, y).name() for k, (x, y) in
            {"TL": (0, 0), "TR": (119, 0), "BL": (0, 39), "BR": (119, 39)}.items()}
 check(corners["TR"] == fill and corners["BR"] == fill and corners["TL"] != fill and corners["BL"] != fill,
@@ -98,7 +101,7 @@ check(img.pixelColor(0, 0).name() != tall_fill and img.pixelColor(50, 0).name() 
 seg2 = ui_kit.SegmentButton(text="L", position="left"); seg2.setChecked(True); seg2.resize(80, 40); seg2.show()
 seg2._pulse._overshoot_scale = 1.04; seg2._pulse.scale = 1.0; pump(0.05)
 img = seg2.grab().toImage()
-check(img.pixelColor(79, 20).name() == "#c04cff" and img.pixelColor(0, 20).name() != "#c04cff",
+check(img.pixelColor(79, 20).name() == "#7a3cff" and img.pixelColor(0, 20).name() != "#7a3cff",
       "overshoot > 1.0: touching edge stays flush at rest, rounded edge insets")
 
 # 6. theme editor: apply + revert, invalid color rejected

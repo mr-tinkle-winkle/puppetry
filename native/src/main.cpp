@@ -18,6 +18,7 @@
 #include "keycodes.hpp"
 #include "macro.hpp"
 #include "native_vm.hpp"
+#include <unordered_map>
 #include "pointer_accel.hpp"
 #include "python_embed.hpp"
 #include "runtime.hpp"
@@ -256,6 +257,16 @@ int main(int argc, char** argv) {
     json macros_doc = load_macros();
     json macro_defs = (macros_doc.contains("macros") && macros_doc["macros"].is_array()) ? macros_doc["macros"] : json::array();
 
+    // Macro categories (macros.json "categories": [{"name", "enabled"}]):
+    // a category switched off disables every macro in it, whatever the
+    // profile says. Global, not per profile.
+    std::unordered_map<std::string, bool> category_enabled;
+    if (macros_doc.contains("categories") && macros_doc["categories"].is_array()) {
+        for (const auto& c : macros_doc["categories"]) {
+            if (c.is_object()) category_enabled[json_str(c, "name", "")] = json_bool(c, "enabled", true);
+        }
+    }
+
     std::vector<std::string> all_macro_names;
     for (const auto& macro_def : macro_defs) {
         all_macro_names.push_back(sanitize_macro_name(json_str(macro_def, "name", "")));
@@ -276,6 +287,10 @@ int main(int argc, char** argv) {
             m->id = json_str(macro_def, "id", "");
             m->name = json_str(macro_def, "name", m->id);
             m->enabled = json_bool(enabled_map, m->id.c_str(), false);
+            {
+                auto cat = category_enabled.find(json_str(macro_def, "category", ""));
+                if (cat != category_enabled.end() && !cat->second) m->enabled = false;
+            }
             m->repeat_mode = parse_repeat_mode(json_str(macro_def, "repeat_mode", "none"));
             m->trigger_edge = parse_trigger_edge(json_str(macro_def, "trigger_edge", "down"));
             if (macro_def.contains("combo") && macro_def["combo"].is_array()) {

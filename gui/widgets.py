@@ -6,10 +6,11 @@ clickable.
 """
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, QRectF, QSize, QVariantAnimation, QEasingCurve, Signal, QPointF
+from PySide6.QtCore import Qt, QEvent, QObject, QRectF, QSize, QVariantAnimation, QEasingCurve, Signal, QPointF
 from PySide6.QtGui import QPainter, QColor, QFontMetrics, QPen
 from PySide6.QtWidgets import (
-    QAbstractButton, QDialog, QHBoxLayout, QLabel, QStackedWidget, QVBoxLayout, QWidget,
+    QAbstractButton, QAbstractScrollArea, QAbstractSlider, QAbstractSpinBox, QApplication, QComboBox, QDialog,
+    QHBoxLayout, QLabel, QScrollBar, QStackedWidget, QVBoxLayout, QWidget,
 )
 
 from ui_kit.collapse_toggle_button import CollapseToggleButton
@@ -65,7 +66,8 @@ class ToggleSwitch(QAbstractButton):
         p.setRenderHint(QPainter.Antialiasing)
         self._pulse.apply(p)
         r = QRectF(self.rect()).adjusted(1, 1, -1, -1)
-        track_off, track_on = theme.surface(), theme.accent()
+        # on = enabled = green, off = disabled = (dimmed) red
+        track_off, track_on = theme.disabled_color().darker(165), theme.enabled_color()
         t = self._pos
         track = QColor(
             round(track_off.red() + (track_on.red() - track_off.red()) * t),
@@ -76,7 +78,7 @@ class ToggleSwitch(QAbstractButton):
             track = track.darker(140)
         p.fillPath(rounded_rect_path(r, r.height() / 2), track)
         # outline so the OFF state (surface on page background) stays visible
-        p.setPen(QPen(theme.accent(), 1.2))
+        p.setPen(QPen(track.darker(135), 1.2))
         p.drawPath(rounded_rect_path(r, r.height() / 2))
         d = r.height() - 6
         x = r.left() + 3 + (r.width() - d - 6) * t
@@ -189,6 +191,8 @@ class LockToggle(CustomButton):
 
     def _sync(self, *_a) -> None:
         self.setText("\U0001F512" if self.isChecked() else "\U0001F513")
+        # locked = editing disabled = red
+        self.set_fill_color(Theme().disabled_color() if self.isChecked() else None)
 
 
 # ---------------------------------------------------------------------------
@@ -224,6 +228,8 @@ class ThemedDialog(QDialog):
         row.addStretch(1)
         for i, label in enumerate(buttons):
             b = CustomButton(label)
+            if label in DISABLE_WORDS:
+                b.set_fill_color(self._theme.disabled_color())
             b.clicked.connect(lambda _=False, i=i: self._pick(i))
             row.addWidget(b)
         lay.addLayout(row)
@@ -237,6 +243,9 @@ class ThemedDialog(QDialog):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
         p.fillPath(rounded_rect_path(QRectF(self.rect()), self._theme.corner_radius(16)), self._theme.page_background())
+
+
+DISABLE_WORDS = {"Delete", "Discard", "Quit", "Remove", "Disable"}
 
 
 def ask(parent, title: str, text: str, buttons: list[str], default: int = 0) -> int:
@@ -349,3 +358,56 @@ def _mark(widget, color: QColor) -> None:
         if "font-weight: bold" in sheet:
             extra = "font-size: 15px; font-weight: bold;"
         widget.setStyleSheet(label_style(color, extra))
+
+
+def mark_enable(widget) -> None:
+    _mark(widget, Theme().enabled_color())
+
+
+def mark_disable(widget) -> None:
+    """Delete / remove / clear / turn off -> red."""
+    _mark(widget, Theme().disabled_color())
+
+
+class WheelGuard(QObject):
+    """App-wide: the mouse wheel never changes a dropdown, spin box or
+    slider (it's too easy to change a setting by accident while scrolling
+    the page). The wheel scrolls whatever page the widget sits on instead."""
+
+    def eventFilter(self, obj, event) -> bool:
+        if event.type() == QEvent.Wheel and isinstance(obj, (QComboBox, QAbstractSpinBox, QAbstractSlider)) \
+                and not isinstance(obj, QScrollBar):
+            w = obj.parentWidget()
+            while w is not None and not isinstance(w, QAbstractScrollArea):
+                w = w.parentWidget()
+            if w is not None:
+                QApplication.sendEvent(w.viewport(), event)
+            return True
+        return False
+
+
+def install_wheel_guard(app) -> "WheelGuard":
+    guard = getattr(app, "_puppetry_wheel_guard", None)
+    if guard is None:
+        guard = WheelGuard(app)
+        app.installEventFilter(guard)
+        app._puppetry_wheel_guard = guard
+    return guard
+
+
+def switch_profile_interactive(parent, model, pid: str) -> bool:
+    """Switch profile, first asking what to do with unsaved changes."""
+    import puppetry_config as cfg
+    if pid == model.profile_id:
+        return False
+    model.flush_pending_save()
+    if model.dirty:
+        choice = ask(parent, "You have unsaved changes.", "", ["Cancel", "Discard", "Save"], default=2)
+        if choice == 2:
+            model.save()
+        elif choice != 1:
+            return False
+        else:
+            model.macros_data = cfg.load_macros()
+    model.switch_profile(pid)
+    return True

@@ -41,7 +41,7 @@ from ui_kit.custom_spinbox import CustomDoubleSpinBox
 from ui_kit.segment_button import SegmentButton
 from ui_kit.smooth_scroll_area import SmoothScrollArea
 from ui_kit.theme import Theme
-from widgets import Collapsible, ask, dim_label, label_style, mark_input, mark_output, section_title
+from widgets import Collapsible, ask, dim_label, label_style, mark_disable, mark_input, mark_output, section_title
 
 REPEAT_MODES = ["none", "hold", "toggle"]
 REPEAT_LABELS = ["No Repeat", "Hold", "Toggle"]
@@ -159,6 +159,17 @@ class MacroEditorPage(QWidget):
         self.desc_edit = CustomLineEdit()
         col.addWidget(self.desc_edit)
 
+        cat_row = QHBoxLayout()
+        cat_row.addWidget(QLabel("Category"))
+        self.category = QComboBox()
+        self.category.setEditable(True)
+        self.category.setStyleSheet(css)
+        self.category.setToolTip("Group this macro on the Macros page. Type a new name to make a new category; "
+                                 "leave it empty for Uncategorized.")
+        self.category.lineEdit().setPlaceholderText("Uncategorized")
+        cat_row.addWidget(self.category, stretch=1)
+        col.addLayout(cat_row)
+
         row = QHBoxLayout()
         row.addWidget(QLabel("Repeat mode"))
         self.repeat = QComboBox()
@@ -183,6 +194,7 @@ class MacroEditorPage(QWidget):
         combo_row.addWidget(self.record_btn)
         self.clear_combo_btn = CustomButton("✕")
         self.clear_combo_btn.setToolTip("Remove the combo")
+        mark_disable(self.clear_combo_btn)
         self.clear_combo_btn.clicked.connect(self._clear_combo)
         combo_row.addWidget(self.clear_combo_btn)
         col.addLayout(combo_row)
@@ -311,6 +323,7 @@ class MacroEditorPage(QWidget):
             row.addWidget(test)
             clear = CustomButton("✕")
             clear.setToolTip("No sound")
+            mark_disable(clear)
             clear.clicked.connect(lambda _=False, k=key: self._set_sound(k, ""))
             row.addWidget(clear)
             col.addLayout(row)
@@ -492,6 +505,11 @@ class MacroEditorPage(QWidget):
         m = self.macro
         self.name_edit.setText(m.get("name", ""))
         self.desc_edit.setText(m.get("description", ""))
+        self.category.blockSignals(True)
+        self.category.clear()
+        self.category.addItems([""] + self.model.category_names())
+        self.category.setCurrentText(m.get("category") or "")
+        self.category.blockSignals(False)
         mode = m.get("repeat_mode", "none")
         self.repeat.setCurrentIndex(REPEAT_MODES.index(mode) if mode in REPEAT_MODES else 0)
         self.edge.setCurrentIndex(1 if m.get("trigger_edge") == "up" else 0)
@@ -526,6 +544,11 @@ class MacroEditorPage(QWidget):
         m = dict(self.macro)
         m["name"] = self.name_edit.text().strip() or "Unnamed Macro"
         m["description"] = self.desc_edit.text().strip()
+        cat = self.category.currentText().strip()
+        if cat:
+            m["category"] = cat
+        else:
+            m.pop("category", None)
         m["repeat_mode"] = REPEAT_MODES[self.repeat.currentIndex()]
         m["trigger_edge"] = EDGES[self.edge.currentIndex()]
         m["code"] = self.code_text()
@@ -559,6 +582,8 @@ class MacroEditorPage(QWidget):
             self.error.setText(f"Code error, not saved: {msg}")
             return False
         cfg.save_aliases({"aliases": self._collect_aliases()})
+        if macro.get("category") and self.model.category(macro["category"]) is None:
+            self.model.categories().append({"name": macro["category"], "enabled": True})
         self.model.commit_macro(macro)
         self.macro = copy.deepcopy(self.model.find(macro.get("id")) or macro)
         self.model.save()
@@ -1072,6 +1097,7 @@ class MacroEditorPage(QWidget):
             combo.setCurrentText(target)
         lay.addWidget(combo)
         remove = CustomButton("Remove")
+        mark_disable(remove)
         lay.addWidget(remove)
         entry = (edit, combo, w)
         remove.clicked.connect(lambda: self._remove_alias_row(entry))

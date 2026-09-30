@@ -52,6 +52,7 @@ class _ArgRow(QWidget):
         self.options.setToolTip("Custom list: the dropdown's choices, comma-separated (as code, e.g. \"fast\", 3).")
         remove = CustomButton("✕")
         remove.setToolTip("Remove this argument")
+        remove.set_fill_color(Theme().disabled_color())
         remove.clicked.connect(lambda: dialog.remove_arg(self))
         lay.addWidget(self.name, 2)
         lay.addWidget(self.default, 2)

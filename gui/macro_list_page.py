@@ -3,20 +3,26 @@ Macros page. Each row:
   [name box] ........ [combo] [x] [On Press/Release] [Repeat] [enabled] [Edit] [Delete] [lock]
 - click the name box to rename inline;
 - click the combo to record a new one (click again to cancel), x clears it;
-- the enabled switch is per-profile (Settings -> Profiles picks which).
+- the enabled switch is per-profile (click "Profile: ..." top-left to switch);
+- rows are grouped by category; a category's own switch turns every macro
+  in it off (global, not per profile). Right-click a row to move it.
 """
 from __future__ import annotations
 
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtWidgets import QComboBox, QHBoxLayout, QLabel, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QComboBox, QGraphicsOpacityEffect, QHBoxLayout, QLabel, QMenu, QVBoxLayout, QWidget
 
 from input_tools import ComboRecorder
 from model import AppModel
 from ui_kit import theme_config
 from ui_kit.custom_button import CustomButton
+from ui_kit.collapse_toggle_button import CollapseToggleButton
 from ui_kit.custom_combo_style import combo_box_stylesheet
 from ui_kit.theme import Theme
-from widgets import LockToggle, NameBox, PageBase, ToggleSwitch, ask, label_style, mark_input
+from widgets import (
+    LockToggle, NameBox, PageBase, ToggleSwitch, ask, label_style, mark_disable, mark_input, prompt_text,
+    switch_profile_interactive,
+)
 
 REPEAT_MODES = ["none", "hold", "toggle"]
 REPEAT_LABELS = ["No Repeat", "Hold", "Toggle"]
@@ -54,6 +60,7 @@ class MacroRow(QWidget):
 
         self.clear_btn = CustomButton("✕")
         self.clear_btn.setToolTip("Remove this macro's combo")
+        mark_disable(self.clear_btn)
         self.clear_btn.clicked.connect(self._clear_combo)
         lay.addWidget(self.clear_btn)
 
@@ -84,6 +91,7 @@ class MacroRow(QWidget):
         lay.addWidget(self.edit_btn)
 
         self.delete_btn = CustomButton("Delete")
+        mark_disable(self.delete_btn)
         self.delete_btn.clicked.connect(self._delete)
         lay.addWidget(self.delete_btn)
 
@@ -91,6 +99,39 @@ class MacroRow(QWidget):
         self.lock.toggled.connect(self._lock_toggled)
         lay.addWidget(self.lock)
         self._apply_lock(self.lock.isChecked())
+        self.sync_category_state()
+
+    def sync_category_state(self) -> None:
+        """Dim the row while its category is switched off."""
+        cat = (self.model.find(self.macro_id) or {}).get("category") or ""
+        on = self.model.category_enabled(cat)
+        if on:
+            self.setGraphicsEffect(None)
+            self.enabled.setToolTip("Enabled in the current profile")
+        else:
+            eff = QGraphicsOpacityEffect(self)
+            eff.setOpacity(0.45)
+            self.setGraphicsEffect(eff)
+            self.enabled.setToolTip(f"The \"{cat}\" category is switched off, so this macro is off too "
+                                    "(this switch is remembered for when it's back on).")
+
+    def contextMenuEvent(self, event) -> None:
+        menu = QMenu(self)
+        cur = (self.model.find(self.macro_id) or {}).get("category") or ""
+        sub = menu.addMenu("Move to category")
+        for name in [""] + self.model.category_names():
+            act = sub.addAction(name or "Uncategorized", lambda n=name: self.model.set_macro_category(self.macro_id, n))
+            act.setCheckable(True)
+            act.setChecked(name == cur)
+        sub.addSeparator()
+        sub.addAction("New category…", self._move_to_new_category)
+        menu.exec(event.globalPos())
+
+    def _move_to_new_category(self) -> None:
+        name = prompt_text(self, "New category", "")
+        if name and name.strip():
+            name = self.model.add_category(name)
+            self.model.set_macro_category(self.macro_id, name)
 
     # -- lock
     def _apply_lock(self, locked: bool) -> None:
@@ -155,6 +196,66 @@ class MacroRow(QWidget):
             self._recorder.wait(1000)
 
 
+class CategoryHeader(QWidget):
+    """[v] Name (n)  ........  [on/off] [^][v] [x]  -- one per category."""
+
+    def __init__(self, page: "MacroListPage", name: str, count: int):
+        super().__init__()
+        self.page = page
+        self.model: AppModel = page.model
+        self.name = name
+        theme = Theme()
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(0, theme.padding // 2, 0, 0)
+        self.toggle = CollapseToggleButton(expanded=not self.model.is_collapsed(name))
+        self.toggle.setToolTip("Show / hide this category's macros")
+        self.toggle.toggled.connect(self._collapse_toggled)
+        lay.addWidget(self.toggle)
+        if name:
+            self.title = NameBox(name)
+            self.title.setToolTip("Click to rename the category")
+            self.title.renamed.connect(lambda n: self.model.rename_category(self.name, n))
+        else:
+            self.title = QLabel("Uncategorized")
+            self.title.setStyleSheet(label_style(theme.text(), "font-size: 15px; font-weight: bold;"))
+        lay.addWidget(self.title)
+        count_lbl = QLabel(f"{count} macro{'s' if count != 1 else ''}")
+        count_lbl.setStyleSheet(label_style(theme.text().darker(140)))
+        lay.addWidget(count_lbl)
+        lay.addStretch(1)
+        self.enabled = None
+        if name:
+            self.enabled = ToggleSwitch(self.model.category_enabled(name))
+            self.enabled.setToolTip("Switch every macro in this category on/off (in every profile -- each "
+                                    "macro's own switch is kept for when the category is back on)")
+            self.enabled.toggled.connect(lambda on: self.model.set_category_enabled(self.name, on))
+            lay.addWidget(self.enabled)
+            up = CustomButton("▲")
+            up.setToolTip("Move category up")
+            up.clicked.connect(lambda: self.model.move_category(self.name, -1))
+            down = CustomButton("▼")
+            down.setToolTip("Move category down")
+            down.clicked.connect(lambda: self.model.move_category(self.name, 1))
+            names = self.model.category_names()
+            up.setEnabled(names.index(name) > 0)
+            down.setEnabled(names.index(name) < len(names) - 1)
+            remove = CustomButton("✕")
+            remove.setToolTip("Delete this category (its macros move to Uncategorized)")
+            mark_disable(remove)
+            remove.clicked.connect(self._delete)
+            for w in (up, down, remove):
+                lay.addWidget(w)
+
+    def _collapse_toggled(self, expanded: bool) -> None:
+        self.model.set_collapsed(self.name, not expanded)
+        self.page.apply_collapse(self.name, expanded)
+
+    def _delete(self) -> None:
+        if ask(self, f"Delete the category '{self.name}'?", "Its macros aren't deleted -- they move to Uncategorized.",
+               ["Cancel", "Delete"]) == 1:
+            self.model.delete_category(self.name)
+
+
 class MacroListPage(PageBase):
     def __init__(self, model: AppModel, open_editor, parent=None):
         super().__init__(parent)
@@ -163,8 +264,9 @@ class MacroListPage(PageBase):
         theme = Theme()
 
         top = QHBoxLayout()
-        self.profile_label = QLabel()
-        self.profile_label.setStyleSheet(label_style(theme.text(), "font-weight: bold;"))
+        self.profile_label = CustomButton("")
+        self.profile_label.setToolTip("Click to switch profile")
+        self.profile_label.clicked.connect(self._profile_menu)
         top.addWidget(self.profile_label)
         self.status = QLabel("")
         self.status.setStyleSheet(label_style(theme.text().darker(130)))
@@ -189,6 +291,9 @@ class MacroListPage(PageBase):
         self.toast.setStyleSheet(label_style(theme.text()))
         bottom.addWidget(self.toast)
         bottom.addStretch(1)
+        self.new_cat_btn = CustomButton("+ New Category")
+        self.new_cat_btn.clicked.connect(self._new_category)
+        bottom.addWidget(self.new_cat_btn)
         self.new_btn = CustomButton("+ New Macro")
         self.new_btn.clicked.connect(lambda: open_editor(None))
         bottom.addWidget(self.new_btn)
@@ -198,6 +303,7 @@ class MacroListPage(PageBase):
         self._toast_timer.timeout.connect(lambda: self.toast.setText(""))
 
         model.macros_changed.connect(self.refresh)
+        model.categories_toggled.connect(self._category_toggled)
         model.profiles_changed.connect(self._update_profile_label)
         model.dirty_changed.connect(self._dirty)
         model.status.connect(self.status.setText)
@@ -216,7 +322,29 @@ class MacroListPage(PageBase):
         self.save_btn.setVisible(dirty and not self.model.state.get("autosave"))
 
     def _update_profile_label(self) -> None:
-        self.profile_label.setText(f"Profile: {self.model.profile.get('name', self.model.profile_id)}")
+        self.profile_label.setText(f"Profile: {self.model.profile.get('name', self.model.profile_id)}  ▾")
+
+    def _profile_menu(self) -> None:
+        menu = QMenu(self)
+        for pid, name in self.model.ordered_profiles():
+            act = menu.addAction(name, lambda p=pid: switch_profile_interactive(self, self.model, p))
+            act.setCheckable(True)
+            act.setChecked(pid == self.model.profile_id)
+        menu.exec(self.profile_label.mapToGlobal(self.profile_label.rect().bottomLeft()))
+
+    def _new_category(self) -> None:
+        name = prompt_text(self, "New category", "")
+        if name is not None and name.strip():
+            self.model.add_category(name)
+
+    def _category_toggled(self, _name: str) -> None:
+        for row in self.rows:
+            row.sync_category_state()
+
+    def apply_collapse(self, name: str, expanded: bool) -> None:
+        for row in self.rows:
+            if ((self.model.find(row.macro_id) or {}).get("category") or "") == name:
+                row.setVisible(expanded)
 
     def refresh(self) -> None:
         # Rows are rebuilt only when the list's structure changes (add,
@@ -225,11 +353,30 @@ class MacroListPage(PageBase):
         # rebuilds on click).
         for row in self.rows:
             row.stop_threads()
-            row.setParent(None)
-            row.deleteLater()
+        while self.rows_box.count():
+            w = self.rows_box.takeAt(0).widget()
+            if w is not None:
+                w.setParent(None)
+                w.deleteLater()
         self.rows = []
+        self.headers: dict[str, CategoryHeader] = {}
+        groups: dict[str, list] = {"": []}
+        for name in self.model.category_names():
+            groups[name] = []
         for macro in self.model.macros():
-            row = MacroRow(self, macro)
-            self.rows_box.addWidget(row)
-            self.rows.append(row)
+            groups.setdefault(macro.get("category") or "", []).append(macro)
+        show_headers = len(groups) > 1
+        for name, macros in groups.items():
+            if name == "" and not macros and show_headers:
+                continue
+            if show_headers:
+                header = CategoryHeader(self, name, len(macros))
+                self.headers[name] = header
+                self.rows_box.addWidget(header)
+            expanded = not self.model.is_collapsed(name) or not show_headers
+            for macro in macros:
+                row = MacroRow(self, macro)
+                row.setVisible(expanded)
+                self.rows_box.addWidget(row)
+                self.rows.append(row)
         self._update_profile_label()

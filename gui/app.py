@@ -28,7 +28,7 @@ from ui_kit.scale_reveal import crossfade_to_index
 from ui_kit.segment_button import SegmentButton
 from ui_kit.theme import Theme
 from visualizer_page import VisualizerPage
-from widgets import ask
+from widgets import ask, install_wheel_guard
 
 PAGE_MACROS, PAGE_VISUALIZER, PAGE_SETTINGS, PAGE_EDITOR = range(4)
 
@@ -58,6 +58,7 @@ class MainWindow(QMainWindow):
         self.setWindowIcon(QIcon.fromTheme("puppetry"))
         theme = Theme()
         apply_window_palette(self, theme)
+        install_wheel_guard(QApplication.instance())
         self.model = AppModel()
 
         central = QWidget()
@@ -165,6 +166,7 @@ class MainWindow(QMainWindow):
         crossfade_to_index(self.stack, PAGE_MACROS)
 
     def closeEvent(self, event) -> None:
+        self.model.flush_pending_save()   # a batched autosave still waiting
         if self.stack.currentIndex() == PAGE_EDITOR and self.editor_page.has_unsaved_changes():
             if ask(self, "Unsaved changes", "Quit without saving this macro?", ["Cancel", "Quit"]) != 1:
                 event.ignore()

@@ -1743,6 +1743,47 @@ before saving. Saving/deleting a custom block restarts the daemon.
 - Custom block Save restarts the daemon (same `systemctl --user restart`
   as macro Save).
 
+## Session 14 — no-scroll dropdowns, batched autosave, macro categories, colors everywhere
+
+Verified: `gui/test_app.py` 215 -> **239**, `ui_kit_test_kit.py` green
+(its purple expectations updated), native ctest unchanged/green. Offscreen
+only, as always.
+
+- **Mouse wheel never changes a dropdown, spin box or slider** anywhere in
+  the app. `widgets.WheelGuard` (installed app-wide by `MainWindow`) eats
+  wheel events on QComboBox / QAbstractSpinBox / QAbstractSlider (not
+  scroll bars) and forwards them to the nearest scroll area, so the page
+  scrolls instead. An OPEN dropdown list still scrolls normally.
+- **Batched autosave** (`AppModel.request_save`, used by autosave's
+  `mark_dirty`): the first save after a quiet second is immediate; a save
+  requested within a second of the last one starts a 1 s timer that every
+  further request restarts; when it fires, ONE save writes everything and
+  restarts the daemon once. Explicit Save buttons still save immediately
+  (and cancel a pending batch). Quitting flushes a pending batch.
+- **Macro categories** (separate from profiles): macros.json gets
+  `"categories": [{"name", "enabled"}]` (ordered) and each macro an
+  optional `"category"`. The daemon (`main.cpp`) turns a macro off when its
+  category is off, whatever the profile says; each macro's own switch is
+  kept. Macros page: one header per category (collapse arrow -- collapsed
+  state is a state.json pref -- click-to-rename name, count, on/off switch,
+  move up/down, delete = macros move to Uncategorized); rows in a
+  switched-off category are dimmed. "+ New Category" at the bottom;
+  right-click a row -> "Move to category" (or "New category…"); the
+  editor has an editable Category dropdown. With no categories the page
+  looks exactly like before (no headers).
+- **Profile switch from the Macros page**: "Profile: X ▾" top-left is a
+  button with a menu of profiles (same unsaved-changes prompt as Settings;
+  shared via `widgets.switch_profile_interactive`).
+- **Colors, broader**: new theme role `color_general` (purple) = anything
+  that's neither input nor output: default button fill
+  (`Theme.button_color()`), sidebar + Blocks/Text segment buttons. Green
+  (`color_true` = enabled) for ON switches and ticked checkboxes; red
+  (`color_false` = disabled) for OFF switches, Delete/Remove/✕ clear
+  buttons (`widgets.mark_disable`), a locked macro's lock, and
+  Delete/Discard/Quit/Remove in confirm dialogs. Orange/blue as before.
+  (Checkbox/switch/button painting changed in the ui_kit copy -- noted
+  inline as "Puppetry:" so a kit sync doesn't silently undo it.)
+
 ## Build/run/environment
 
 **Daemon:** `cd native && mkdir build && cd build && cmake .. && cmake

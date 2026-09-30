@@ -97,6 +97,16 @@ class Theme:
     def neutral_block_color(self) -> QColor:
         return QColor(self._s.color_neutral_block)
 
+    def general_color(self) -> QColor:
+        """Purple: UI that's neither input nor output (default buttons, nav)."""
+        return QColor(self._s.color_general)
+
+    def enabled_color(self) -> QColor:
+        return self.true_color()
+
+    def disabled_color(self) -> QColor:
+        return self.false_color()
+
     def custom_color(self) -> QColor:
         return QColor(self._s.color_custom)
 
@@ -126,7 +136,9 @@ class Theme:
         """Button fill. Same value as accent() today, kept as its own
         accessor because a button fill and an outline accent are
         different roles that may diverge."""
-        return self.accent()
+        # Puppetry: default buttons are "neither input nor output" -> purple
+        # (input/output/enable/disable buttons override their own fill).
+        return self.general_color() if self._s.app_theme_enabled else self.accent()
 
     def button_text_color(self) -> QColor:
         return contrast_text(self.button_color())

@@ -64,10 +64,11 @@ class ThemeSettings:
     color_input: str = "#e0955a"           # orange: reads/receives (arguments, variable reads, conditions)
     color_output: str = "#5a9ee0"          # blue: synthesizes/acts (kd/ku/tap/combo/type/move_mouse/wheel/command)
     color_neutral_block: str = "#8a8a8a"   # neither: control flow, timing, markers
+    color_general: str = "#7b5fc4"         # purple: everything that's neither input nor output (buttons, nav)
     color_custom: str = "#9b6ad6"          # purple: custom code / custom blocks
     color_function: str = "#c9609c"        # pink: per-macro functions (create/run function, return)
-    color_true: str = "#4caf62"            # green: True
-    color_false: str = "#e05757"           # red: False
+    color_true: str = "#4caf62"            # green: True / enabled / enable
+    color_false: str = "#e05757"           # red: False / disabled / disable / delete
     text_outline_width: float = 1.0        # OutlinedLabel stroke width, px
 
 

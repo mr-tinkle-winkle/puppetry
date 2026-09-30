@@ -14,20 +14,23 @@ Save semantics (same as the old GTK app):
 """
 from __future__ import annotations
 
+import time
 import uuid
 from typing import Any
 
-from PySide6.QtCore import QObject, Signal
+from PySide6.QtCore import QObject, QTimer, Signal
 
 import puppetry_config as cfg
 
 
 class AppModel(QObject):
+    SAVE_COOLDOWN_S = 1.0
     macros_changed = Signal()      # list contents/structure changed -> rebuild rows
     dirty_changed = Signal(bool)
     status = Signal(str)
     profiles_changed = Signal()
     devices_changed = Signal()
+    categories_toggled = Signal(str)
 
     def __init__(self):
         super().__init__()
@@ -37,6 +40,15 @@ class AppModel(QObject):
         self.profile_id: str = self.state.get("active_profile") or "profile_1"
         self.profile: dict[str, Any] = cfg.load_profile(self.profile_id)
         self.dirty = False
+        # Save throttling (autosave): the first save after a quiet second
+        # happens at once; any save requested within a second of the last
+        # one waits until the requests stop for a full second, then ONE
+        # save writes everything and restarts the daemon once.
+        self._last_save = 0.0
+        self._save_timer = QTimer(self)
+        self._save_timer.setSingleShot(True)
+        self._save_timer.setInterval(int(self.SAVE_COOLDOWN_S * 1000))
+        self._save_timer.timeout.connect(self.save)
 
     # ------------------------------------------------------------------ macros
 
@@ -84,18 +96,143 @@ class AppModel(QObject):
         self.macros_changed.emit()
         self.mark_dirty()
 
+    # ------------------------------------------------------------------ categories
+    #
+    # macros.json: "categories": [{"name": str, "enabled": bool}] (ordered)
+    # and each macro's "category" (absent/"" = Uncategorized). A category
+    # switched off disables every macro in it regardless of the profile
+    # (the daemon applies it at startup). Global -- not per profile.
+    # Collapsed/expanded is a UI pref in state.json.
+
+    def categories(self) -> list[dict[str, Any]]:
+        cats = self.macros_data.setdefault("categories", [])
+        known = {c.get("name") for c in cats}
+        for m in self.macros():   # a macro naming an unknown category gets one
+            name = m.get("category") or ""
+            if name and name not in known:
+                cats.append({"name": name, "enabled": True})
+                known.add(name)
+        return cats
+
+    def category(self, name: str) -> dict[str, Any] | None:
+        return next((c for c in self.categories() if c.get("name") == name), None)
+
+    def category_names(self) -> list[str]:
+        return [c.get("name", "") for c in self.categories()]
+
+    def category_enabled(self, name: str) -> bool:
+        c = self.category(name) if name else None
+        return True if c is None else bool(c.get("enabled", True))
+
+    def is_effectively_enabled(self, macro_id: str) -> bool:
+        m = self.find(macro_id)
+        return self.is_enabled(macro_id) and self.category_enabled((m or {}).get("category") or "")
+
+    def add_category(self, name: str) -> str:
+        base = name.strip() or "New Category"
+        name, n = base, 2
+        while self.category(name) is not None:
+            name, n = f"{base} {n}", n + 1
+        self.categories().append({"name": name, "enabled": True})
+        self.macros_changed.emit()
+        self.mark_dirty()
+        return name
+
+    def rename_category(self, old: str, new: str) -> None:
+        new = new.strip()
+        c = self.category(old)
+        if c is None or not new or new == old or self.category(new) is not None:
+            return
+        c["name"] = new
+        for m in self.macros():
+            if m.get("category") == old:
+                m["category"] = new
+        collapsed = self.state.get("collapsed_categories") or []
+        if old in collapsed:
+            self.set_pref("collapsed_categories", [new if x == old else x for x in collapsed])
+        self.macros_changed.emit()
+        self.mark_dirty()
+
+    def delete_category(self, name: str) -> None:
+        """Its macros move to Uncategorized (nothing is deleted)."""
+        self.macros_data["categories"] = [c for c in self.categories() if c.get("name") != name]
+        for m in self.macros():
+            if m.get("category") == name:
+                m.pop("category", None)
+        self.macros_changed.emit()
+        self.mark_dirty()
+
+    def move_category(self, name: str, direction: int) -> None:
+        cats = self.categories()
+        i = next((k for k, c in enumerate(cats) if c.get("name") == name), None)
+        if i is None or not 0 <= i + direction < len(cats):
+            return
+        cats[i], cats[i + direction] = cats[i + direction], cats[i]
+        self.macros_changed.emit()
+        self.mark_dirty()
+
+    def set_category_enabled(self, name: str, enabled: bool) -> None:
+        c = self.category(name)
+        if c is None or bool(c.get("enabled", True)) == enabled:
+            return
+        c["enabled"] = enabled
+        self.categories_toggled.emit(name)
+        self.mark_dirty()
+
+    def set_macro_category(self, macro_id: str, name: str) -> None:
+        m = self.find(macro_id)
+        if m is None or (m.get("category") or "") == (name or ""):
+            return
+        if name:
+            if self.category(name) is None:
+                self.categories().append({"name": name, "enabled": True})
+            m["category"] = name
+        else:
+            m.pop("category", None)
+        self.macros_changed.emit()
+        self.mark_dirty()
+
+    def is_collapsed(self, name: str) -> bool:
+        return name in (self.state.get("collapsed_categories") or [])
+
+    def set_collapsed(self, name: str, collapsed: bool) -> None:
+        cur = [x for x in (self.state.get("collapsed_categories") or []) if x != name]
+        if collapsed:
+            cur.append(name)
+        self.set_pref("collapsed_categories", cur)
+
     # ------------------------------------------------------------------ saving
 
     def mark_dirty(self) -> None:
         if self.state.get("autosave"):
-            self.save()
+            self.request_save()
             return
         if not self.dirty:
             self.dirty = True
             self.dirty_changed.emit(True)
         self.status.emit("Unsaved changes")
 
+    def request_save(self) -> None:
+        """Throttled save (see __init__): immediate unless a save happened
+        within the last second, in which case it's batched."""
+        if self._save_timer.isActive() or time.monotonic() - self._last_save < self.SAVE_COOLDOWN_S:
+            if not self.dirty:
+                self.dirty = True
+                self.dirty_changed.emit(True)
+            self._save_timer.start()   # (re)start: waits for a quiet second
+            self.status.emit("Saving in a moment…")
+            return
+        self.save()
+
+    def save_pending(self) -> bool:
+        return self._save_timer.isActive()
+
+    def flush_pending_save(self) -> None:
+        if self._save_timer.isActive():
+            self.save()
+
     def save(self) -> bool:
+        self._save_timer.stop()
         self.state["active_profile"] = self.profile_id
         try:
             cfg.save_macros(self.macros_data)
@@ -105,6 +242,7 @@ class AppModel(QObject):
             self.status.emit(f"Save failed, config unchanged on disk: {exc}")
             return False
         ok, msg = cfg.restart_daemon_service()
+        self._last_save = time.monotonic()
         self.dirty = False
         self.dirty_changed.emit(False)
         self.status.emit(msg)

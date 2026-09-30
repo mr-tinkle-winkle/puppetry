@@ -22,7 +22,7 @@ from ui_kit.custom_message_dialog import show_message
 from ui_kit.custom_spinbox import CustomDoubleSpinBox
 from ui_kit.theme_editor import ThemeEditorGroup
 from ui_kit.theme import Theme
-from widgets import Collapsible, PageBase, ask, dim_label, label_style, mark_input, mark_output, prompt_text
+from widgets import Collapsible, PageBase, ask, dim_label, label_style, mark_disable, mark_input, mark_output, prompt_text, switch_profile_interactive
 
 
 class SettingsPage(PageBase):
@@ -209,8 +209,8 @@ class SettingsPage(PageBase):
             down.clicked.connect(lambda _=False, p=pid: self.model.move_profile(p, 1))
             active = pid == self.model.profile_id
             select = CustomButton(("✓ " if active else "") + name)
-            if active:
-                select.set_fill_color(Theme().highlight())
+            if not active:
+                select.set_fill_color(Theme().general_color().darker(140))
             select.clicked.connect(lambda _=False, p=pid: self._select_profile(p))
             select.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
             rename = CustomButton("✎")
@@ -218,6 +218,7 @@ class SettingsPage(PageBase):
             rename.clicked.connect(lambda _=False, p=pid, n=name: self._rename_profile(p, n))
             delete = CustomButton("−")
             delete.setToolTip("Delete")
+            mark_disable(delete)
             delete.clicked.connect(lambda _=False, p=pid, n=name: self._delete_profile(p, n))
             for b in (up, down):
                 r.addWidget(b)
@@ -227,18 +228,7 @@ class SettingsPage(PageBase):
             self.profile_rows.addWidget(w)
 
     def _select_profile(self, pid: str) -> None:
-        if pid == self.model.profile_id:
-            return
-        if self.model.dirty:
-            choice = ask(self, "You have unsaved changes.", "", ["Cancel", "Discard", "Save"], default=2)
-            if choice == 2:
-                self.model.save()
-            elif choice != 1:
-                return
-            else:
-                # Discard: drop in-memory edits by reloading from disk.
-                self.model.macros_data = cfg.load_macros()
-        self.model.switch_profile(pid)
+        switch_profile_interactive(self, self.model, pid)
 
     def _new_profile(self) -> None:
         name = prompt_text(self, "New profile", "")

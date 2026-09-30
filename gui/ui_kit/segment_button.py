@@ -93,7 +93,8 @@ class SegmentButton(QAbstractButton):
         painter.setRenderHint(QPainter.Antialiasing)
         painter.setRenderHint(QPainter.SmoothPixmapTransform)
 
-        bg = self._theme.highlight()
+        # Puppetry: nav/segment buttons are "neither" -> the general purple
+        bg = self._theme.general_color() if self._theme.app_theme_enabled else self._theme.highlight()
         if not self.isChecked():
             bg = bg.darker(140)
         if self.isDown():

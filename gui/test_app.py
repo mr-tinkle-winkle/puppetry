@@ -25,6 +25,7 @@ from PySide6.QtCore import QPoint, QPointF, Qt
 from PySide6.QtGui import QColor, QCursor
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
+from ui_kit.custom_button import CustomButton
 
 import puppetry_config as cfg
 from ui_kit.theme import Theme
@@ -972,9 +973,37 @@ def main() -> int:
     check("device eye toggle shows the raw path", sp.dev_labels["keyboard"].text() == "/dev/input/event-does-not-exist")
     sp.record_time.setValue(1.5)
     check("record time persists immediately", cfg.load_state()["record_time_seconds"] == 1.5)
+    # autosave + throttling: the first save after a quiet second is
+    # immediate; rapid follow-ups are batched into ONE save + daemon
+    # restart a second after the last one.
+    import model as model_mod
+    restarts = []
+    real_restart = cfg.restart_daemon_service
+    cfg.restart_daemon_service = lambda: (restarts.append(1), (True, "Saved. Daemon restarted."))[1]
     sp.autosave.setChecked(True)
+    model._last_save = 0.0
+    model._save_timer.stop()
+    restarts.clear()
     w.macro_page.rows[0].repeat.setCurrentIndex(2)
-    check("autosave: row edits hit disk immediately", cfg.load_macros()["macros"][0]["repeat_mode"] == "toggle" and not model.dirty)
+    check("autosave: the first edit hits disk immediately",
+          cfg.load_macros()["macros"][0]["repeat_mode"] == "toggle" and not model.dirty and restarts == [1])
+    w.macro_page.rows[0].repeat.setCurrentIndex(1)
+    pump(300)
+    w.macro_page.rows[0].repeat.setCurrentIndex(0)
+    pump(300)
+    w.macro_page.rows[0].enabled.setChecked(not w.macro_page.rows[0].enabled.isChecked())
+    check("autosave: quick follow-up edits wait (nothing saved or restarted yet)",
+          restarts == [1] and cfg.load_macros()["macros"][0]["repeat_mode"] == "toggle" and model.dirty)
+    pump(700)
+    check("...each new edit restarts the one-second wait", restarts == [1])
+    pump(600)
+    check("...then ONE save writes them all and restarts the daemon once",
+          restarts == [1, 1] and cfg.load_macros()["macros"][0]["repeat_mode"] == "none" and not model.dirty)
+    w.macro_page.rows[0].repeat.setCurrentIndex(1)
+    model.flush_pending_save()
+    check("a pending batched save is flushed (e.g. on quit)", cfg.load_macros()["macros"][0]["repeat_mode"] == "hold"
+          and not model.save_pending())
+    cfg.restart_daemon_service = real_restart
     sp.autosave.setChecked(False)
 
     # Pointer acceleration: on by default (the daemon writes kcminputrc for
@@ -998,6 +1027,109 @@ def main() -> int:
     sp.realtime.setChecked(True)
     check("real-time priority opt-in persists", cfg.load_state().get("realtime_priority") is True)
     sp.realtime.setChecked(False)
+
+    # ------------------------------------------------------------ wheel never changes dropdowns / spin boxes
+    from PySide6.QtGui import QWheelEvent
+    from PySide6.QtCore import QPointF as _QPF
+    w.nav.button(app.PAGE_MACROS).click()
+    pump(200)
+    combo = w.macro_page.rows[0].repeat
+    before_idx = combo.currentIndex()
+
+    def wheel(widget, dy):
+        ev = QWheelEvent(_QPF(5, 5), _QPF(widget.mapToGlobal(QPoint(5, 5))), QPoint(0, 0), QPoint(0, dy),
+                         Qt.NoButton, Qt.NoModifier, Qt.ScrollUpdate, False)
+        QApplication.sendEvent(widget, ev)
+
+    wheel(combo, -120)
+    wheel(combo, 120)
+    wheel(combo, -240)
+    check("scrolling over a dropdown doesn't change it", combo.currentIndex() == before_idx)
+    spin = sp.record_time
+    v0 = spin.value()
+    wheel(spin, 120)
+    wheel(spin.lineEdit(), 120)
+    check("scrolling over a spin box doesn't change it", spin.value() == v0)
+
+    # ------------------------------------------------------------ categories
+    mp = w.macro_page
+    n_rows = len(mp.rows)
+    check("no categories yet -> no headers (plain list)", not mp.headers)
+    cname = model.add_category("Gaming")
+    first_id = mp.rows[0].macro_id
+    model.set_macro_category(first_id, cname)
+    check("a category groups its macros under a header", "Gaming" in mp.headers and "" in mp.headers
+          and len(mp.rows) == n_rows)
+    order = [mp.rows_box.itemAt(i).widget() for i in range(mp.rows_box.count())]
+    gaming_idx = order.index(mp.headers["Gaming"])
+    check("...with its macro right under it", any(r.macro_id == first_id for r in order[gaming_idx + 1:]
+                                                     if isinstance(r, macro_list_page.MacroRow)))
+    model.set_enabled(first_id, True)
+    mp.headers["Gaming"].enabled.setChecked(False)
+    check("switching a category off turns its macros off (switch remembered)",
+          not model.is_effectively_enabled(first_id) and model.is_enabled(first_id)
+          and next(r for r in mp.rows if r.macro_id == first_id).graphicsEffect() is not None)
+    model.save()
+    check("category on/off is saved in macros.json", cfg.load_macros()["categories"] == [{"name": "Gaming", "enabled": False}]
+          and next(m for m in cfg.load_macros()["macros"] if m["id"] == first_id)["category"] == "Gaming")
+    check("categories are separate from profiles", "categories" not in cfg.load_profile(model.profile_id))
+    mp.headers["Gaming"].toggle.setChecked(False)
+    check("collapsing a category hides its rows", not next(r for r in mp.rows if r.macro_id == first_id).isVisibleTo(mp))
+    model.rename_category("Gaming", "Games")
+    check("renaming a category keeps its macros", (model.find(first_id) or {}).get("category") == "Games"
+          and model.is_collapsed("Games"))
+    model.set_collapsed("Games", False)
+    model.delete_category("Games")
+    check("deleting a category moves its macros to Uncategorized", "category" not in (model.find(first_id) or {})
+          and not mp.headers)
+    model.save()
+
+    # ------------------------------------------------------------ profile switch from the Macros page
+    import widgets as widgets_mod
+    menus = []
+    orig_menu = macro_list_page.QMenu
+
+    class _FakeMenu(orig_menu):
+        def exec(self, *a):
+            menus.append([(act.text(), act.isChecked()) for act in self.actions()])
+            target = next((act for act in self.actions() if not act.isChecked()), None)
+            if target is not None:
+                target.trigger()
+    macro_list_page.QMenu = _FakeMenu
+    before = model.profile_id
+    mp.profile_label.click()
+    pump(100)
+    macro_list_page.QMenu = orig_menu
+    check("clicking \"Profile: ...\" lists the profiles with the current one ticked",
+          menus and any(checked for _t, checked in menus[0]) and len(menus[0]) == len(model.ordered_profiles()))
+    check("...and picking one switches profile", model.profile_id != before
+          and mp.profile_label.text().startswith("Profile: "))
+    widgets_mod.switch_profile_interactive(mp, model, before)
+
+    # ------------------------------------------------------------ colors: purple / green / red
+    t = Theme()
+    row = mp.rows[0]
+    check("default buttons are the general purple", t.button_color() == t.general_color() and row.edit_btn._fill_override is None)
+    check("delete / clear buttons are red", row.delete_btn._fill_override == t.disabled_color()
+          and row.clear_btn._fill_override == t.disabled_color())
+    lock = widgets_mod.LockToggle(True)
+    check("a locked macro's lock is red", lock._fill_override == t.disabled_color())
+    img_on = widgets_mod.ToggleSwitch(True)
+    img_on.resize(46, 26)
+    img_on._pos = 1.0
+    pic = img_on.grab().toImage()
+    c = pic.pixelColor(8, 13)
+    check("an ON switch is green", c.green() > c.red() + 30)
+    img_off = widgets_mod.ToggleSwitch(False)
+    img_off.resize(46, 26)
+    pic = img_off.grab().toImage()
+    c = pic.pixelColor(38, 13)
+    check("an OFF switch is red", c.red() > c.green() + 20)
+    d = widgets_mod.ThemedDialog("x", "", ["Cancel", "Delete"])
+    btns = d.findChildren(CustomButton)
+    check("Delete in a confirm dialog is red, Cancel isn't",
+          any(b.text() == "Delete" and b._fill_override == t.disabled_color() for b in btns)
+          and any(b.text() == "Cancel" and b._fill_override is None for b in btns))
 
     # ------------------------------------------------------------ visualizer
     w.nav.button(app.PAGE_VISUALIZER).click()

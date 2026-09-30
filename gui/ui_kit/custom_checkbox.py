@@ -74,8 +74,11 @@ class CustomCheckBox(QAbstractButton):
         radius = self._appearance.rounded_corner_radius if self._appearance.rounded_corners_enabled else 0
         radius = min(radius, _BOX_SIZE / 2) if radius else 0
 
-        bg = self._theme.surface()
-        if self.underMouse():
+        # Puppetry: checked = enabled = green
+        bg = self._theme.enabled_color() if self.isChecked() else self._theme.surface()
+        if not self.isEnabled():
+            bg = bg.darker(160)
+        elif self.underMouse():
             bg = bg.lighter(115)
         path = rounded_rect_path(box_rect, radius) if radius else None
         if path:
@@ -84,7 +87,7 @@ class CustomCheckBox(QAbstractButton):
             painter.fillRect(box_rect, bg)
 
         pen = painter.pen()
-        pen.setColor(self._theme.accent())
+        pen.setColor(self._theme.enabled_color().darker(140) if self.isChecked() else self._theme.accent())
         pen.setWidthF(1.5)
         painter.setPen(pen)
         painter.setBrush(Qt.NoBrush)

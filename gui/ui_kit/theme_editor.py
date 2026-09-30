@@ -60,8 +60,9 @@ _DEFAULT_LABELS = {
     "color_neutral_block": "Neutral (control flow, timing):",
     "color_custom": "Custom code / custom blocks:",
     "color_function": "Functions:",
-    "color_true": "True:",
-    "color_false": "False:",
+    "color_general": "General (neither input nor output):",
+    "color_true": "True / enabled:",
+    "color_false": "False / disabled / delete:",
     "text_outline_width": "Text Outline Width (px)",
 }
 
