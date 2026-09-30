@@ -77,6 +77,7 @@ set(CORE_SOURCES
     src/config.cpp
     src/control_socket.cpp
     src/dispatch.cpp
+    src/event_stream.cpp
     src/evdev_device.cpp
     src/macro.cpp
     src/native_vm.cpp
@@ -129,6 +130,7 @@ puppetry_test(test_timing tests/test_timing.cpp)
 # deschedule it. Labelled so packaged builds can skip it (ctest -LE timing).
 set_tests_properties(test_timing PROPERTIES LABELS timing)
 puppetry_test(test_transcriber tests/test_transcriber.cpp)
+puppetry_test(test_event_stream tests/test_event_stream.cpp)
 
 # Timing benchmark -- built, but NOT a ctest test (numbers depend on the
 # machine). ./bench_cps [iterations]

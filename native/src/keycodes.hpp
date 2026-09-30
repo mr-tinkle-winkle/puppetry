@@ -77,4 +77,10 @@ inline bool is_mouse_button(int code) {
     return code >= 0 && code < KEY_CNT && detail::code_tables().is_mouse[code];
 }
 
+// Controller (gamepad) buttons: BTN_SOUTH..BTN_THUMBR and BTN_DPAD_*.
+// Synthetic presses of these go to the virtual controller.
+inline bool is_gamepad_button(int code) {
+    return (code >= 0x130 && code <= 0x13e) || (code >= 0x220 && code <= 0x223);
+}
+
 } // namespace puppetry

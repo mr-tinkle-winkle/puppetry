@@ -57,6 +57,12 @@
                 --set PYTHONPATH $out/share/puppetry \
                 --set PUPPETRY_BIN_DIR ${self.packages.${system}.puppetry-daemon}/bin \
                 --add-flags $out/share/puppetry/app.py
+              # overlay helper + renderer (OBS pages, layered replay buffer, clip overlays)
+              makeWrapper ${guiPython}/bin/python3 $out/bin/puppetry-overlay \
+                --set PYTHONPATH $out/share/puppetry \
+                --set PUPPETRY_BIN_DIR ${self.packages.${system}.puppetry-daemon}/bin \
+                --prefix PATH : ${pkgs.ffmpeg}/bin \
+                --add-flags $out/share/puppetry/overlay_cli.py
 
               ${pkgs.lib.concatMapStringsSep "\n" (sz: ''
                 mkdir -p $out/share/icons/hicolor/${toString sz}x${toString sz}/apps

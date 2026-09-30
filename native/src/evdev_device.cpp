@@ -20,6 +20,7 @@ namespace puppetry {
 static const std::set<std::string> kOurVirtualDeviceNames = {
     kVirtualKeyboardName,
     kVirtualMouseName,
+    kVirtualGamepadName,
 };
 
 bool is_our_virtual_device_name(const std::string& name) {
@@ -82,6 +83,30 @@ bool device_has_rel(const std::string& path, int code) {
     bool ok = ioctl(fd, EVIOCGBIT(EV_REL, sizeof(relbits)), relbits) >= 0;
     ::close(fd);
     return ok && has_bit(relbits, code);
+}
+
+bool device_has_abs(const std::string& path, int code) {
+    int fd = ::open(path.c_str(), O_RDONLY | O_NONBLOCK);
+    if (fd < 0) return false;
+    unsigned char absbits[(ABS_MAX / 8) + 1] = {0};
+    bool ok = ioctl(fd, EVIOCGBIT(EV_ABS, sizeof(absbits)), absbits) >= 0;
+    ::close(fd);
+    return ok && has_bit(absbits, code);
+}
+
+std::optional<DeviceInfo> find_best_controller(const std::optional<std::string>& preferred_name) {
+    std::vector<DeviceInfo> candidates;
+    for (const auto& dev : list_input_devices()) {
+        if (is_our_virtual_device_name(dev.name)) continue;
+        // a gamepad: face buttons + a stick (motion sensors / touchpads of
+        // the same controller show up as separate nodes without BTN_SOUTH)
+        if (device_has_key(dev.path, BTN_SOUTH) && device_has_abs(dev.path, ABS_X)) candidates.push_back(dev);
+    }
+    if (candidates.empty()) return std::nullopt;
+    if (preferred_name) {
+        for (auto& c : candidates) if (c.name == *preferred_name) return c;
+    }
+    return candidates.front();
 }
 
 std::optional<DeviceInfo> find_best_keyboard(const std::optional<std::string>& preferred_name) {
@@ -161,7 +186,8 @@ ResolvedDevice resolve_device(const std::string& kind,
         }
     }
 
-    auto found = (kind == "keyboard") ? find_best_keyboard(saved_name) : find_best_mouse(saved_name);
+    auto found = (kind == "keyboard") ? find_best_keyboard(saved_name)
+               : (kind == "controller") ? find_best_controller(saved_name) : find_best_mouse(saved_name);
     if (!found) return {"", "", ResolveHow::NotFound};
 
     ResolveHow how = (saved_name && found->name == *saved_name) ? ResolveHow::Renumbered
@@ -175,7 +201,32 @@ bool InputDevice::open(const std::string& path) {
     fd_ = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
     if (fd_ < 0) return false;
     path_ = path;
+    for (int c = 0; c < ABS_CNT; ++c) { abs_min_[c] = 0; abs_max_[c] = 0; }
+    unsigned char absbits[(ABS_MAX / 8) + 1] = {0};
+    if (ioctl(fd_, EVIOCGBIT(EV_ABS, sizeof(absbits)), absbits) >= 0) {
+        for (int c = 0; c < ABS_CNT; ++c) {
+            if (!has_bit(absbits, c)) continue;
+            struct input_absinfo ai;
+            if (ioctl(fd_, EVIOCGABS(c), &ai) >= 0) { abs_min_[c] = ai.minimum; abs_max_[c] = ai.maximum; }
+        }
+    }
     return true;
+}
+
+double InputDevice::normalize_abs(int code, int value) const {
+    if (code < 0 || code >= ABS_CNT) return 0.0;
+    return normalize_abs_range(abs_min_[code], abs_max_[code], value);
+}
+
+double normalize_abs_range(int mn, int mx, int value) {
+    if (mx <= mn) return 0.0;
+    if (mn == -1 && mx == 1) return (double)value;                 // d-pad hat
+    if (mn < 0) {                                                   // centered stick: -1..1
+        double v = (2.0 * (value - mn) / (double)(mx - mn)) - 1.0;
+        return v < -1 ? -1 : (v > 1 ? 1 : v);
+    }
+    double v = (value - mn) / (double)(mx - mn);                    // trigger (or unsigned stick): 0..1
+    return v < 0 ? 0 : (v > 1 ? 1 : v);
 }
 
 void InputDevice::close() {

@@ -56,7 +56,7 @@ _ids = itertools.count(1)
 
 @dataclass
 class Rep:
-    kind: str            # var | bool | compare | held | mouse | buttons
+    kind: str            # var | bool | compare | held | mouse | buttons | press | axis
     name: str = ""       # var: its name; bool: "True"/"False"; compare: op; mouse: "" | "x" | "y"
     fields: dict = field(default_factory=dict)   # compare: left/right; held: key  (str | Rep)
 
@@ -103,6 +103,8 @@ def expr_text(v) -> str:
         return "getMousePosition" + (f".{v.name}" if v.name in ("x", "y") else "()")
     if k == "buttons":
         return "getButtonsHeld()"
+    if k == "axis":
+        return f'getAxis("{v.name or "LX"}")'
     if k == "press":
         parts = []
         btn = expr_text(v.fields.get("button"))
@@ -122,6 +124,11 @@ def _operand(v, fallback: str = "None") -> str:
     return t
 
 
+# controller axes (getAxis / axis): name -> plain-English label
+AXIS_LABELS = {"LX": "left stick x", "LY": "left stick y", "RX": "right stick x", "RY": "right stick y",
+               "LT": "left trigger", "RT": "right trigger", "DPAD_X": "d-pad x", "DPAD_Y": "d-pad y"}
+
+
 def rep_label(r: Rep) -> str:
     if r.kind == "var":
         return r.name
@@ -131,6 +138,8 @@ def rep_label(r: Rep) -> str:
         return {"x": "mouse x", "y": "mouse y"}.get(r.name, "mouse position")
     if r.kind == "buttons":
         return "buttons held"
+    if r.kind == "axis":
+        return f"controller {AXIS_LABELS.get(r.name, r.name)}"
     if r.kind == "press":
         return "key pressed"
     return r.kind
@@ -149,6 +158,8 @@ def new_rep(kind: str, **kw) -> Rep:
         return Rep("mouse", kw.get("part", ""))
     if kind == "buttons":
         return Rep("buttons")
+    if kind == "axis":
+        return Rep("axis", kw.get("axis", "LX"))
     if kind == "press":
         return Rep("press", "", {"button": "", "repress": Rep("bool", "False")})
     raise ValueError(kind)
@@ -352,7 +363,7 @@ def prim_param(prim_name: str, param_name: str):
 
 _STARTERS = {"key": "KEY_A", "keys": ["KEY_LEFTCTRL", "KEY_C"], "acting": ["KEY_B"], "text": '"hello"',
              "cmd": '"notify-send hi"', "x_pixels": "100", "y_pixels": "0", "amount": "1", "time_": "0.1",
-             "multiplier": "1", "what": '"keyboard"', "button": "KEY_F8"}
+             "multiplier": "1", "what": '"keyboard"', "button": "KEY_F8", "axis": '"LX"', "value": "1"}
 
 
 def new_call(name: str) -> Block:
@@ -667,6 +678,12 @@ class _Parser:
                 return Rep("mouse", "")
             if node.func.id == "getButtonsHeld":
                 return Rep("buttons")
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "getAxis"
+                and len(node.args) == 1 and not node.keywords and isinstance(node.args[0], ast.Constant)
+                and node.args[0].value in AXIS_LABELS):
+            src = self._seg(node)
+            if src == f'getAxis("{node.args[0].value}")':          # only the canonical spelling round-trips
+                return Rep("axis", node.args[0].value)
         if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "waitForPress"
                 and len(node.args) <= 1 and not any(isinstance(a, ast.Starred) for a in node.args)
                 and all(k.arg in ("button", "repress") for k in node.keywords)):

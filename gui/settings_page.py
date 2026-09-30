@@ -64,9 +64,10 @@ class SettingsPage(PageBase):
         dl = dev.make_layout(QVBoxLayout)
         self.dev_labels = {}
         self.show_paths = {}
-        for kind, detect_text in (("keyboard", "Detect (press a key)"), ("mouse", "Detect (move or click)")):
+        for kind, detect_text in (("keyboard", "Detect (press a key)"), ("mouse", "Detect (move or click)"),
+                                  ("controller", "Detect (press a button)")):
             r = QHBoxLayout()
-            r.addWidget(QLabel("Keyboard" if kind == "keyboard" else "Mouse"))
+            r.addWidget(QLabel({"keyboard": "Keyboard", "mouse": "Mouse", "controller": "Controller"}[kind]))
             lbl = QLabel()
             self.dev_labels[kind] = lbl
             r.addWidget(lbl, stretch=1)
@@ -81,6 +82,22 @@ class SettingsPage(PageBase):
             det.clicked.connect(lambda _=False, k=kind, b=det, t=detect_text: self._detect(k, b, t))
             r.addWidget(det)
             dl.addLayout(r)
+        self.watch_controller = CustomCheckBox("Watch a game controller (optional; found automatically, plug in any time)")
+        self.watch_controller.setChecked(bool(model.state.get("watch_controller", True)))
+        self.watch_controller.setToolTip("Controller buttons (BTN_SOUTH, BTN_TL, ...) then work in key combos,\n"
+                                         "waitForPress() and getButtonsHeld(); sticks and triggers in getAxis()\n"
+                                         "and the input overlay. It's only read, never grabbed.")
+        self.watch_controller.toggled.connect(lambda on: (model.set_pref("watch_controller", on), model.mark_dirty()))
+        mark_input(self.watch_controller)
+        dl.addWidget(self.watch_controller)
+        self.virtual_controller = CustomCheckBox("Virtual controller (macros can press controller buttons and move sticks)")
+        self.virtual_controller.setChecked(bool(model.state.get("virtual_controller", False)))
+        self.virtual_controller.setToolTip("Creates an extra controller for macros to drive: tap(BTN_SOUTH),\n"
+                                           "axis(\"LX\", 1.0, time_=0.2). Off by default -- games see it as\n"
+                                           "another plugged-in controller, which can change player numbers.")
+        self.virtual_controller.toggled.connect(lambda on: (model.set_pref("virtual_controller", on), model.mark_dirty()))
+        mark_output(self.virtual_controller)
+        dl.addWidget(self.virtual_controller)
         self.all_devices = QVBoxLayout()
         all_box = QWidget()
         all_box.setLayout(self.all_devices)
@@ -293,7 +310,8 @@ class SettingsPage(PageBase):
     def _detect(self, kind: str, button: CustomButton, text: str) -> None:
         button.setEnabled(False)
         button.setText("Listening…")
-        self.status.setText("Move or click your mouse now…" if kind == "mouse" else "Press a key now…")
+        self.status.setText({"mouse": "Move or click your mouse now…", "controller": "Press a button on your controller now…"}
+                            .get(kind, "Press a key now…"))
         t = DetectDevice(kind, parent=self)
 
         def done(path, name):

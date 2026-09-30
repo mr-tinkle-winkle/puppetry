@@ -25,10 +25,13 @@ try:
 except ImportError:  # the GUI still opens; recording/detection just report failure
     HAVE_EVDEV = False
 
-OUR_VIRTUAL_DEVICE_NAMES = frozenset({"macro-daemon-virtual-keyboard", "macro-daemon-virtual-mouse"})
+OUR_VIRTUAL_DEVICE_NAMES = frozenset({"macro-daemon-virtual-keyboard", "macro-daemon-virtual-mouse",
+                                      "macro-daemon-virtual-gamepad"})
 
 
 def key_name(code: int) -> str:
+    if code in GAMEPAD_NAMES:
+        return GAMEPAD_NAMES[code]
     if not HAVE_EVDEV:
         return str(code)
     name = e.keys.get(code, str(code))
@@ -44,6 +47,39 @@ def _names(code):
 
 def is_key_name(code: int) -> bool:
     return HAVE_EVDEV and any(n.startswith("KEY_") for n in _names(code))
+
+
+def is_gamepad_code(code: int) -> bool:
+    """Controller buttons: BTN_SOUTH..BTN_THUMBR, BTN_DPAD_*."""
+    return 0x130 <= code <= 0x13E or 0x220 <= code <= 0x223
+
+
+# canonical names for controller buttons (evdev lists several aliases per code)
+GAMEPAD_NAMES = {0x130: "BTN_SOUTH", 0x131: "BTN_EAST", 0x132: "BTN_C", 0x133: "BTN_NORTH", 0x134: "BTN_WEST",
+                 0x135: "BTN_Z", 0x136: "BTN_TL", 0x137: "BTN_TR", 0x138: "BTN_TL2", 0x139: "BTN_TR2",
+                 0x13A: "BTN_SELECT", 0x13B: "BTN_START", 0x13C: "BTN_MODE", 0x13D: "BTN_THUMBL",
+                 0x13E: "BTN_THUMBR", 0x220: "BTN_DPAD_UP", 0x221: "BTN_DPAD_DOWN", 0x222: "BTN_DPAD_LEFT",
+                 0x223: "BTN_DPAD_RIGHT"}
+
+
+def controller_paths() -> list:
+    """Every connected game controller (face buttons + a stick)."""
+    if not HAVE_EVDEV:
+        return []
+    out = []
+    for path in list_devices():
+        try:
+            d = InputDevice(path)
+            caps = d.capabilities()
+            if d.name in OUR_VIRTUAL_DEVICE_NAMES:
+                continue
+            if 0x130 in caps.get(e.EV_KEY, []) and any(
+                    (a[0] if isinstance(a, tuple) else a) == e.ABS_X for a in caps.get(e.EV_ABS, [])):
+                out.append(path)
+            d.close()
+        except Exception:
+            pass
+    return out
 
 
 def is_button_name(code: int) -> bool:
@@ -96,7 +132,8 @@ class ComboRecorder(QThread):
 
     def __init__(self, keyboard_path, mouse_path, stable_seconds: float, parent=None):
         super().__init__(parent)
-        self.paths = (keyboard_path, mouse_path)
+        # controllers too, so a combo can be a controller button (or mixed)
+        self.paths = tuple(p for p in (keyboard_path, mouse_path) if p) + tuple(controller_paths())
         self.stable_seconds = max(0.5, float(stable_seconds))
         self._cancel = False
 
@@ -186,7 +223,11 @@ class DetectDevice(QThread):
                             if self.kind == "keyboard" and ev.type == e.EV_KEY and ev.value == 1 and is_key_name(ev.code):
                                 result = (dev.path, dev.name)
                             elif self.kind == "mouse" and (ev.type == e.EV_REL or (
-                                    ev.type == e.EV_KEY and ev.value == 1 and is_button_name(ev.code))):
+                                    ev.type == e.EV_KEY and ev.value == 1 and is_button_name(ev.code)
+                                    and not is_gamepad_code(ev.code))):
+                                result = (dev.path, dev.name)
+                            elif self.kind == "controller" and ev.type == e.EV_KEY and ev.value == 1 \
+                                    and is_gamepad_code(ev.code):
                                 result = (dev.path, dev.name)
                             if result[0]:
                                 break

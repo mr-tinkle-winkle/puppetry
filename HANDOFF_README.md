@@ -29,7 +29,7 @@ features. That document's content has been folded into this one
 (see "Prior session" below) rather than kept as a separate file, so
 this is now the single source of truth for project state.
 
-## Start here — current state (Session 16)
+## Start here — current state (Session 18)
 
 **What it is.** A NixOS input-macro system: a C++17 daemon (evdev in,
 `uinput` out; control socket; embedded CPython *or* a built-in interpreter
@@ -73,33 +73,141 @@ separately from profiles.
   Key names come from the kernel scan code (`nativeScanCode() - 8`, which
   separates left/right modifiers) with a Qt-key fallback.
 
+- **Dictionary (Session 17).** Text is 3x the app's size
+  (`dictionary_page.TEXT_SCALE`). Every entry is collapsed to its colored
+  signature and expands on click; Expand all / Collapse all; a search that
+  matches only a description opens that entry, and clearing the search
+  closes what it opened. "Key and button names" is now the visualizer's own
+  keyboard + mouse (`KeyNameMap`, a `KbmView`) with the short name drawn big
+  and the `KEY_`/`BTN_` name small, hover tooltips listing every alias, and
+  search lighting matching keys up. Keys not on the picture are listed under
+  "Other key names".
+- **Visualizer (Session 17).** Held keys show a hold timer
+  (`seconds.milliseconds`, `m:ss.mmm` past a minute) in place of their
+  label. A curved arrow under the mouse shows the last movement burst (a
+  burst ends after 150 ms of stillness): a cubic Bezier through the
+  positions at 1/3 and 2/3 of the burst's *duration*, so left-then-up
+  bends the end up and up-then-left bends the start up; length grows with
+  the square root of the distance.
+- **OBS & replay overlay (new, Session 17).** Section at the bottom of the
+  Input Visualizer page (`gui/overlay_settings.py`). Data flow:
+
+      daemon (event_stream.cpp) --$XDG_RUNTIME_DIR/puppetry/events.sock-->
+        puppetry-overlay serve (overlay_server.py, stdlib only)
+          +-- HTTP + Server-Sent Events pages: full :17380, simple :17381, mouse :17382
+          +-- input_buffer.jsonl (layered replay buffer, tmpfs) + overlay_status.json
+      puppetry-overlay render/apply/composite (overlay_render.py, Qt offscreen -> ffmpeg)
+
+  - The daemon always runs the event stream (one relaxed atomic load per
+    event when nobody listens). Real events carry the kernel's evdev
+    timestamp (CLOCK_REALTIME); macro output is marked `m` via a hook in
+    `UinputDevice::key_frame/rel_frame/wheel_frame`. It starts the helper
+    (`PUPPETRY_OVERLAY_CMD`, set by module.nix; else `puppetry-overlay` on
+    PATH) only when `overlay.json` enables a page or the replay buffer,
+    restarts it if it crashes, and stops respawning on exit 0.
+  - One drawing model everywhere: `kbm_layout.py` (geometry in key units,
+    `KbmState`, arrow math, timers; no Qt), `kbm_paint.py` (QPainter: app,
+    Dictionary, previews, renderer), `overlay_web/kbm.js` + `common.js`
+    (browser twin). A test runs the JS arrow/timer math under node and
+    compares it with Python exactly.
+  - Style: `overlay_config.STYLE_SCHEMA` / `SIMPLE_SCHEMA` / `MOUSE_SCHEMA`
+    drive defaults, the Customize forms and what pages receive; the helper
+    re-reads `overlay.json` on change, so style edits reach OBS live. Pages
+    or ports toggled -> the GUI restarts the daemon after 1 s of quiet.
+  - OBS: `obs_client.py` (stdlib obs-websocket v5 client with auth). Replay
+    length = the `replay_buffer`-kind output's `max_time_sec`, else profile
+    `RecRBTime`; polled every 30 s; fallback setting otherwise. "Add to OBS"
+    creates or updates Browser Sources in the current program scene, sized to
+    each page.
+  - Replay file format, CLI contract and timing model: see the afterglow
+    prep package (`FORMAT.md`, copied to `docs/overlay_interface.md`), mirrored in `gui/overlay_render.py` and
+    `gui/overlay_server.py` docstrings.
+
+- **Session 18: controllers, pieces, source colors.**
+  - *Controllers* (daemon): a third, optional, hot-pluggable device
+    (`find_best_controller`: BTN_SOUTH + ABS_X; re-scanned every 3 s,
+    re-found after unplugging; state.json `controller_path/name`,
+    `watch_controller`). Its buttons go through `handle_key_event`, so they
+    work in combos, `waitForPress`, `getButtonsHeld`; it's read, never
+    grabbed. Axes are normalized per device (`normalize_abs_range`: sticks
+    -1..1, triggers 0..1, hat -1/0/1) into `Runtime::axes` and streamed as
+    `a` lines (only changes >= 0.004). New primitives on both paths:
+    `getAxis(axis)` and `axis(axis, value, time_=0)` (names LX LY RX RY LT
+    RT DPAD_X DPAD_Y). Output goes to an opt-in virtual controller
+    (`virtual_controller` in state.json, Settings > Devices;
+    `UinputDevice::create_gamepad`, Xbox-style layout), and controller
+    buttons in tap/kd/ku route there. Without it they raise a clear error.
+    Abort releases its buttons and recenters its axes.
+  - *GUI*: Settings > Devices gets a Controller row (Detect), "Watch a game
+    controller" and "Virtual controller". The combo recorder listens to
+    controllers too. Blocks: "move controller axis" (output) and a
+    "controller axis" reporter (dropdown), round-tripping
+    `getAxis("LX")`. Dictionary entries for both plus controller button
+    names.
+  - *Pieces*: `kbm_layout.build_piece("full"|"keyboard"|"mouse"|"controller")`;
+    the gamepad is drawn by the same painter (Qt + JS): triggers fill with
+    their axis, sticks' knobs follow theirs, face labels Xbox / PlayStation
+    / Nintendo. OBS pages: `full` (or `keyboard` + `mouse` with "separate
+    pieces"), `controller`, `simple`, `movement` (the arrow-only page,
+    formerly `mouse`; `mouse_style` migrates to `movement_style`). Default
+    ports 17380 / 17383 / 17384 / 17385 / 17381 / 17382.
+  - *Source colors*: `KbmState` tracks the source of keys, motion bursts,
+    wheel and axes. Real input is drawn in `pressed_color` (input orange),
+    macro output in `macro_color` (output blue), on by default
+    (`show_macro_output`). The simple list colors each part; the in-app
+    visualizer now reads the daemon's stream when it's there (with a
+    window-events fallback) and shows the controller when one is used.
+  - *afterglow flow*: `render` per piece, then `align` (stream-copy cut to
+    the clip), `layer` (burn several pieces at fractional placements).
+    Pieces are transparent qtrle; VP9 alpha needs the libvpx decoder
+    (documented). The prep package (v2) describes the sidecar design:
+    nothing burned in until export; previewer/editor toggle, move and
+    resize via mpv `lavfi-complex`.
+
 **Not verified on real hardware / display.** Everything above ran under
-`QT_QPA_PLATFORM=offscreen`. Unchecked: scan-code mapping on X11 vs
-Wayland (visualizer), drag feel in the block canvas, evdev grab/repress
-behaviour, `kdotool` mouse position, `nix build` of the flake/module.
-Visualizer mouse movement is measured in-window (pointer acceleration
-included), so `move_mouse` values reproduce what the window saw, not raw
-device counts.
+`QT_QPA_PLATFORM=offscreen`; OBS pages were rendered in headless Chromium
+(the engine behind OBS's browser source). Unchecked: a real OBS (tested
+against a protocol-faithful fake server; the replay-output lookup by kind is
+the least certain part), the daemon spawning the helper under systemd,
+scan-code mapping on X11 vs Wayland (visualizer), drag feel in the block
+canvas, evdev grab/repress behaviour, `kdotool` mouse position, `nix build`
+of the flake/module, real controllers (axis ranges and trigger axes vary
+by model; GAS/BRAKE are mapped to RT/LT) and games' reaction to the virtual
+controller (it identifies as vendor 0x1234, not as an Xbox pad, so games
+that only accept known pads may ignore it). Visualizer mouse movement is measured in-window
+(pointer acceleration included); the overlay helper uses raw device counts.
 
 **Planned, in rough priority.**
-1. Next: real-desktop pass over the GUI and the daemon primitives added in
-   Sessions 12-16; icon art (drop SVGs into `gui/ui_kit/resources/icons/`;
-   expected names listed in `gui/ui_kit/icons.py`, now including
-   `nav_dictionary`); a real `nix build`.
+1. Next: real-desktop pass (OBS Browser Source + "Add to OBS" + replay
+   length; the helper starting with the daemon; timing offset calibration
+   against a real replay clip); icon art (drop SVGs into
+   `gui/ui_kit/resources/icons/`; names in `gui/ui_kit/icons.py`, including
+   `nav_dictionary`); a real `nix build`. The afterglow side of the clip
+   overlay (per-clip-type toggle + pipeline hook) is specified in the prep
+   package and not built here.
 2. Later: click a Dictionary entry to insert its block / preview it;
-   keyboard + mouse graphic for editing simplified names and aliases;
-   `Play Sound`; `--arguments=` CLI form; whole-app Ctrl+scroll zoom.
+   clicking a key in the Dictionary map to edit its simplified names;
+   renderer speed (render at 30 fps and duplicate, or skip unchanged
+   regions); a numpad section for the keyboard; `Play Sound`;
+   `--arguments=` CLI form; whole-app Ctrl+scroll zoom.
 3. Someday: an "insert into macro" button on the visualizer readout;
-   absolute-position mode for recorded mouse movement.
+   absolute-position mode for recorded mouse movement; per-key custom
+   colors in the overlay.
 
 **Open questions.** Whether the Dictionary should also preview the matching
 block; which easing recorded movement should use (`linear` today); whether
-the visualizer readout should offer to append straight into an open macro.
+the afterglow overlay should be burned into the saved clip or kept as a
+side file for the editor; whether the OBS password should move from
+`overlay.json` (mode 0600) to a keyring.
 
 **Run the checks.** GUI: `cd gui && QT_QPA_PLATFORM=offscreen python3
-test_app.py` (265 checks) and `python3 ui_kit_test_kit.py`. Daemon: `cd
-native && mkdir build && cd build && cmake .. && cmake --build . -j &&
-ctest -LE timing`. The sections below are the per-session history; the
+test_app.py` (289 checks), `python3 test_overlay.py` (82 checks: layout and
+arrow math, replay file, helper over HTTP/SSE with a fake daemon, fake OBS
+server, renderer + CLI, pieces/controller/source colors, transparency per
+format, align/layer, JS parity; needs ffmpeg, node optional) and
+`python3 ui_kit_test_kit.py`. Daemon: `cd native && mkdir build && cd build
+&& cmake .. && cmake --build . -j && ctest -LE timing` (8 tests, incl.
+`test_event_stream`). The sections below are the per-session history; the
 newest facts are above.
 
 ## Prior session (folded in from the previous handoff)
@@ -1874,3 +1982,50 @@ what actually applies it. Logs: `journalctl --user -u macro-daemon`.
   rendering rules; live readout from simulated key/mouse/wheel events).
 - README cleanup: personal names removed, duplicated "Next" list collapsed,
   "Start here" section added.
+
+## Session 17 — OBS overlay, layered replay buffer, hold timers, curved arrow, Dictionary rework
+
+- Daemon: `native/src/event_stream.{hpp,cpp}` (Unix-socket broadcast of
+  real + macro input), hooks in `dispatch.cpp` (per-frame motion/wheel sums)
+  and `uinput_device.cpp`, `runtime_dir()` / `event_socket_path()` /
+  `overlay_config_file()` / `load_overlay_config()` in `config.*`, helper
+  spawn/respawn in `main.cpp`, `--dump-names` now includes `codes`
+  (name -> code). New test `tests/test_event_stream.cpp`.
+- GUI, new files: `kbm_layout.py`, `kbm_paint.py`, `overlay_config.py`,
+  `overlay_server.py`, `overlay_render.py`, `overlay_cli.py` (the
+  `puppetry-overlay` entry point), `obs_client.py`, `overlay_settings.py`,
+  `overlay_web/{common.js,kbm.js,full.html,simple.html,mouse.html}`,
+  `test_overlay.py`.
+- GUI, changed: `visualizer_page.py` (shared painter, timers, arrow,
+  overlay section), `dictionary_page.py` (3x text, collapsible entries,
+  key-name map), `reference.py` (descriptions reflowed into paragraphs),
+  `app.py` (flush overlay settings on close).
+- Nix: `puppetry-overlay` wrapper (ffmpeg on its PATH) in both `flake.nix`
+  and `module.nix`; the service gets `PUPPETRY_OVERLAY_CMD`.
+- Bugs found while testing: a status-file write race between the helper's
+  threads (fixed with per-thread temp names + a lock);
+  `HTTPServer.shutdown()` hanging while a Server-Sent Events handler was
+  streaming (replaced `serve_forever` with a `handle_request` loop that stops
+  on a flag); a float rounding that showed 1.099 for 1.100 s in timers.
+
+## Session 18 — controller support, separate pieces, input/output colors, afterglow sidecar design
+
+- Daemon: `evdev_device.*` (`device_has_abs`, `find_best_controller`,
+  `normalize_abs_range`, per-device abs ranges), `uinput_device.*`
+  (`create_gamepad`, `abs_frame`), `primitives.*` (`axis_code`, `axis_fn`,
+  `get_axis_fn`, gamepad routing, abort recenters), `dispatch.cpp`
+  (controller EV_ABS, never grabbed), `main.cpp` (controller thread with
+  hotplug, virtual controller, overlay helper also for `controller`),
+  `python_embed.cpp` / `native_vm.cpp` (`axis`, `getAxis`),
+  `event_stream.*` (`a` lines, axes in the hello). Tests: `test_core`
+  (normalization), `test_native_interp` (getAxis parity, axis() needing the
+  virtual controller, output frames).
+- GUI: `kbm_layout.py` (controller layout, pieces, sources, axes),
+  `kbm_paint.py` (controller drawing, source colors), `overlay_web/*`
+  (same in JS; `mouse.html` -> `movement.html`), `overlay_config.py`
+  (split/controller/movement, migration), `overlay_server.py` (pages,
+  axes, macro motion), `overlay_render.py` (all modes, colored simple
+  parts, `align`, `layer`), `overlay_cli.py`, `overlay_settings.py`,
+  `visualizer_page.py` (`StreamClient`), `settings_page.py`,
+  `input_tools.py`, `reference.py`, `block_model.py`, `block_editor.py`,
+  `block_render.py`.

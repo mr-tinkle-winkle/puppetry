@@ -1,7 +1,9 @@
 #include "dispatch.hpp"
+#include "event_stream.hpp"
 #include "keycodes.hpp"
 #include "primitives.hpp"
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <linux/input.h>
 
@@ -143,7 +145,7 @@ static bool should_forward(Runtime& rt, const std::string& kind, int code, bool 
 
 void watch_device(Runtime& rt, MacroRegistry& registry, std::vector<std::unique_ptr<Macro>>& macros,
                    InputDevice& dev, const std::string& kind, int abort_code) {
-    {
+    if (kind != "controller") {
         std::lock_guard<std::mutex> lock(rt.grab_mutex);
         (kind == "keyboard" ? rt.watched_keyboard : rt.watched_mouse) = &dev;
     }
@@ -167,18 +169,26 @@ void watch_device(Runtime& rt, MacroRegistry& registry, std::vector<std::unique_
     };
 
     RawEvent evs[64];
+    int frame_dx = 0, frame_dy = 0, frame_wheel = 0, frame_hwheel = 0; // for the event stream
+    long long frame_t = 0;
     while (true) {
         int n = dev.read_events(evs, 64);
         if (n < 0) break;
         for (int i = 0; i < n; ++i) {
             const RawEvent& ev = evs[i];
             if (ev.type == EV_KEY) {
+                if (ev.value != 2) {
+                    EventStream* es = g_event_stream.load(std::memory_order_relaxed);
+                    if (es && es->active()) es->publish('r', ev.time_us, 'k', ev.code, ev.value);
+                }
                 bool original_wants_forward = apply_act_as(rt, ev.code, ev.value);
                 // Decide forwarding BEFORE handling the event: handling it
                 // can wake a waitForPress()/waitForReactivation(repress)
                 // thread that immediately drops its repress codes, and the
                 // press it was waiting for must still be swallowed.
-                bool grabbed = (kind == "keyboard") ? rt.keyboard_grabbed.load() : rt.mouse_grabbed.load();
+                // (a controller is never grabbed: its presses aren't forwarded, just seen)
+                bool grabbed = (kind == "keyboard") ? rt.keyboard_grabbed.load()
+                             : (kind == "mouse") ? rt.mouse_grabbed.load() : false;
                 // A real key-UP is ALWAYS forwarded (stuck-key safety
                 // net), a key-DOWN only if nothing suppresses it.
                 bool forward = grabbed &&
@@ -191,6 +201,14 @@ void watch_device(Runtime& rt, MacroRegistry& registry, std::vector<std::unique_
                 // relaxed atomic store; safe to do even when the motion
                 // is being suppressed below (it only costs a later query).
                 if (ev.code == REL_X || ev.code == REL_Y) rt.cursor.invalidate();
+                switch (ev.code) {                    // summed per hardware frame for the stream
+                    case REL_X: frame_dx += ev.value; break;
+                    case REL_Y: frame_dy += ev.value; break;
+                    case REL_WHEEL: frame_wheel += ev.value; break;
+                    case REL_HWHEEL: frame_hwheel += ev.value; break;
+                    default: break;
+                }
+                frame_t = ev.time_us;
                 if (rt.mouse_grabbed.load()) {
                     bool movement_ignored;
                     {
@@ -200,7 +218,28 @@ void watch_device(Runtime& rt, MacroRegistry& registry, std::vector<std::unique_
                     bool is_motion = ev.code == REL_X || ev.code == REL_Y;
                     if (!(is_motion && movement_ignored)) push(out_mouse, EV_REL, ev.code, ev.value);
                 }
+            } else if (ev.type == EV_ABS && kind == "controller") {
+                double v = dev.normalize_abs(ev.code, ev.value);
+                double prev;
+                {
+                    std::lock_guard<std::mutex> lock(rt.axes_mutex);
+                    prev = rt.axes.count(ev.code) ? rt.axes[ev.code] : 0.0;
+                    rt.axes[ev.code] = v;
+                }
+                // sticks jitter at ~1 kHz: only stream visible changes
+                if (v != prev && (std::abs(v - prev) >= 0.004 || v == 0.0 || v == 1.0 || v == -1.0)) {
+                    EventStream* es = g_event_stream.load(std::memory_order_relaxed);
+                    if (es && es->active()) es->publish('r', ev.time_us, 'a', ev.code, (int)std::lround(v * 10000));
+                }
             } else if (ev.type == EV_SYN && ev.code == SYN_REPORT) {
+                if (frame_dx | frame_dy | frame_wheel | frame_hwheel) {
+                    EventStream* es = g_event_stream.load(std::memory_order_relaxed);
+                    if (es && es->active()) {
+                        if (frame_dx | frame_dy) es->publish('r', frame_t, 'm', frame_dx, frame_dy);
+                        if (frame_wheel | frame_hwheel) es->publish('r', frame_t, 'w', frame_wheel, frame_hwheel);
+                    }
+                    frame_dx = frame_dy = frame_wheel = frame_hwheel = 0;
+                }
                 if (!out_kb.empty()) { rt.ui_keyboard.frame(out_kb.data(), out_kb.size(), true); out_kb.clear(); }
                 if (!out_mouse.empty()) { rt.ui_mouse.frame(out_mouse.data(), out_mouse.size(), true); out_mouse.clear(); }
             }

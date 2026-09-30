@@ -1,0 +1,44 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Puppetry mouse movement</title>
+<style>
+  html, body { margin: 0; padding: 0; background: transparent; overflow: hidden; }
+  canvas { display: block; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script src="/common.js"></script>
+<script>
+"use strict";
+const canvas = document.getElementById("c");
+const ctx = canvas.getContext("2d");
+let side = 0;
+
+function resize() {
+  side = P.style.size || 240;
+  const dpr = window.devicePixelRatio || 1;
+  canvas.width = side * dpr; canvas.height = side * dpr;
+  canvas.style.width = side + "px"; canvas.style.height = side + "px";
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+P.onconfig = resize;
+
+function frame() {
+  const now = nowS();
+  if (side && (P.dirty || arrowAnimating(P.style, now))) {
+    P.dirty = false;
+    ctx.clearRect(0, 0, side, side);
+    const bg = cssColor(P.style.background);
+    if (bg !== "rgba(0,0,0,0)") { ctx.fillStyle = bg; ctx.fillRect(0, 0, side, side); }
+    drawArrow(ctx, 0, 0, side, side, P.style, now);
+  }
+  requestAnimationFrame(frame);
+}
+connect();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

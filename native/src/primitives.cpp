@@ -17,6 +17,7 @@
 #include <sys/wait.h>
 #include <thread>
 #include <unistd.h>
+#include <unordered_map>
 #include "keycodes.hpp"
 
 extern char** environ;
@@ -25,8 +26,61 @@ namespace puppetry {
 
 using Clock = std::chrono::steady_clock;
 
+static UinputDevice& gamepad_device(Runtime& rt) {
+    if (!rt.gamepad_enabled.load(std::memory_order_relaxed))
+        throw std::runtime_error("controller output needs the virtual controller -- turn on "
+                                 "\"Virtual controller\" in Settings > Devices");
+    return rt.ui_gamepad;
+}
+
 static inline UinputDevice& device_for_code(Runtime& rt, int code) {
+    if (is_gamepad_button(code)) return gamepad_device(rt);
     return is_mouse_button(code) ? rt.ui_mouse : rt.ui_keyboard;
+}
+
+int axis_code(const std::string& name) {
+    static const std::unordered_map<std::string, int> t = {
+        {"LX", ABS_X}, {"LY", ABS_Y}, {"RX", ABS_RX}, {"RY", ABS_RY}, {"LT", ABS_Z}, {"RT", ABS_RZ},
+        {"DPAD_X", ABS_HAT0X}, {"DPAD_Y", ABS_HAT0Y},
+        {"ABS_X", ABS_X}, {"ABS_Y", ABS_Y}, {"ABS_RX", ABS_RX}, {"ABS_RY", ABS_RY}, {"ABS_Z", ABS_Z},
+        {"ABS_RZ", ABS_RZ}, {"ABS_HAT0X", ABS_HAT0X}, {"ABS_HAT0Y", ABS_HAT0Y},
+        {"ABS_GAS", ABS_GAS}, {"ABS_BRAKE", ABS_BRAKE}};
+    std::string up;
+    for (char ch : name) up += (char)std::toupper((unsigned char)ch);
+    auto it = t.find(up);
+    if (it == t.end())
+        throw std::invalid_argument("unknown axis \"" + name + "\" (LX, LY, RX, RY, LT, RT, DPAD_X, DPAD_Y)");
+    return it->second;
+}
+
+void axis_fn(Runtime& rt, int code, double value, double time_) {
+    UinputDevice& dev = gamepad_device(rt);
+    double from;
+    {
+        std::lock_guard<std::mutex> lock(rt.axes_mutex);
+        from = rt.out_axes.count(code) ? rt.out_axes[code] : 0.0;
+        rt.out_axes[code] = value;
+    }
+    double scaled = time_ * Runtime::speed_multiplier();
+    if (scaled <= 0) {
+        dev.abs_frame(code, value);
+        return;
+    }
+    int steps = std::max(1, (int)(scaled * 250));                 // 4 ms steps
+    auto start = Clock::now();
+    auto total = std::chrono::duration_cast<Clock::duration>(std::chrono::duration<double>(scaled));
+    for (int i = 1; i <= steps; ++i) {
+        rt.check_abort();
+        dev.abs_frame(code, from + (value - from) * i / steps);
+        wait_until(rt, start + total * i / steps, false);
+    }
+    Runtime::wait_anchor() = start + total;
+}
+
+double get_axis_fn(Runtime& rt, int code) {
+    std::lock_guard<std::mutex> lock(rt.axes_mutex);
+    auto it = rt.axes.find(code);
+    return it == rt.axes.end() ? 0.0 : it->second;
 }
 
 void kd(Runtime& rt, int code) {
@@ -776,7 +830,18 @@ void abort_all(Runtime& rt) {
 
     std::thread([&rt] {
         std::this_thread::sleep_for(std::chrono::milliseconds(300));
-        for (int code : rt.synth_held.take_all()) device_for_code(rt, code).key_frame(code, 0);
+        for (int code : rt.synth_held.take_all()) {
+            try { device_for_code(rt, code).key_frame(code, 0); } catch (...) {}
+        }
+        if (rt.gamepad_enabled) {                  // sticks/triggers back to rest
+            std::vector<int> moved;
+            {
+                std::lock_guard<std::mutex> lock(rt.axes_mutex);
+                for (auto& [c, v] : rt.out_axes) if (v != 0.0) moved.push_back(c);
+                rt.out_axes.clear();
+            }
+            for (int c : moved) rt.ui_gamepad.abs_frame(c, 0.0);
+        }
         rt.abort_flag.store(false);
     }).detach();
 }

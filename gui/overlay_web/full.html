@@ -1,0 +1,48 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Puppetry input overlay</title>
+<style>
+  html, body { margin: 0; padding: 0; background: transparent; overflow: hidden; }
+  canvas { display: block; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script src="/common.js"></script>
+<script src="/kbm.js"></script>
+<script>
+"use strict";
+const canvas = document.getElementById("c");
+const ctx = canvas.getContext("2d");
+let size = [0, 0];
+
+function resize() {
+  if (!P.layout) return;
+  const st = P.style, u = st.unit || 48, pad = st.padding || 0;
+  const w = Math.ceil(P.layout.w * u + 2 * pad), h = Math.ceil(P.layout.h * u + 2 * pad);
+  const dpr = window.devicePixelRatio || 1;
+  canvas.width = w * dpr; canvas.height = h * dpr;
+  canvas.style.width = w + "px"; canvas.style.height = h + "px";
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  size = [w, h];
+}
+P.onconfig = resize;
+
+function frame() {
+  const now = nowS();
+  if (P.layout && (P.dirty || kbmAnimating(P.style, now))) {
+    P.dirty = false;
+    ctx.clearRect(0, 0, size[0], size[1]);
+    const bg = cssColor(P.style.background);
+    if (bg !== "rgba(0,0,0,0)") { ctx.fillStyle = bg; ctx.fillRect(0, 0, size[0], size[1]); }
+    drawKbm(ctx, P.layout, P.style, now, P.style.unit, 0, 0);
+  }
+  requestAnimationFrame(frame);
+}
+connect();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

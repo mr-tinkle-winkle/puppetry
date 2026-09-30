@@ -13,6 +13,9 @@
 #include <vector>
 #include "config.hpp"
 #include "control_socket.hpp"
+#include "event_stream.hpp"
+#include <csignal>
+#include <sys/wait.h>
 #include "dispatch.hpp"
 #include "evdev_device.hpp"
 #include "keycodes.hpp"
@@ -101,6 +104,41 @@ static int check_mode() {
     return rc;
 }
 
+// ---------------------------------------------------------------------
+// Overlay helper (puppetry-overlay): OBS pages + the layered replay
+// buffer file. Started only when overlay.json turns one of them on;
+// restarted if it crashes; dies with the daemon (PDEATHSIG, and systemd
+// stops the whole cgroup anyway).
+// ---------------------------------------------------------------------
+static bool overlay_wanted(const json& o) {
+    for (const char* k : {"full", "controller", "simple", "replay"}) {
+        if (o.contains(k) && o[k].is_object() && json_bool(o[k], "enabled", false)) return true;
+    }
+    return false;
+}
+
+static void run_overlay_helper() {
+    const char* env = std::getenv("PUPPETRY_OVERLAY_CMD");
+    std::string cmd = (env && *env) ? env : "puppetry-overlay";
+    int failures = 0;
+    while (failures < 20) {
+        pid_t pid = fork();
+        if (pid < 0) return;
+        if (pid == 0) {
+            prctl(PR_SET_PDEATHSIG, SIGTERM);
+            execlp(cmd.c_str(), cmd.c_str(), "serve", (char*)nullptr);
+            std::fprintf(stderr, "Couldn't start the overlay helper (%s): %s\n", cmd.c_str(), strerror(errno));
+            _exit(127);
+        }
+        int status = 0;
+        waitpid(pid, &status, 0);
+        if (WIFEXITED(status) && (WEXITSTATUS(status) == 0 || WEXITSTATUS(status) == 127)) return;
+        ++failures;
+        std::fprintf(stderr, "Overlay helper exited (status %d); restarting in 3s\n", status);
+        std::this_thread::sleep_for(std::chrono::seconds(3));
+    }
+}
+
 int main(int argc, char** argv) {
     if (argc > 1 && std::string(argv[1]) == "--list") {
         list_devices_mode();
@@ -117,7 +155,11 @@ int main(int argc, char** argv) {
         out["simplified"] = json::object();
         for (const auto& [simple, real] : simplified_names_table()) out["simplified"][simple] = real;
         out["keys"] = json::array();
-        for (const auto& [name, code] : key_name_to_code()) out["keys"].push_back(name);
+        out["codes"] = json::object();  // name -> code (the overlay helper maps stream codes back)
+        for (const auto& [name, code] : key_name_to_code()) {
+            out["keys"].push_back(name);
+            out["codes"][name] = code;
+        }
         std::printf("%s\n", out.dump().c_str());
         return 0;
     }
@@ -325,6 +367,67 @@ int main(int argc, char** argv) {
     } catch (const std::exception& exc) {
         std::fprintf(stderr, "Failed to start control socket: %s\n", exc.what());
         return 1;
+    }
+
+    // Live event stream for the overlay helper (inert with no clients).
+    static EventStream event_stream;
+    if (event_stream.start(event_socket_path().string(), &rt)) g_event_stream.store(&event_stream);
+    if (overlay_wanted(load_overlay_config())) {
+        std::thread(run_overlay_helper).detach();
+        std::printf("Overlay helper: starting (overlay.json)\n");
+    }
+
+    // Virtual controller (opt-in: an extra controller can shift player
+    // numbers in games), for controller buttons and axis() in macros.
+    if (json_bool(state, "virtual_controller", false)) {
+        try {
+            rt.ui_gamepad.create_gamepad(kVirtualGamepadName);
+            rt.gamepad_enabled = true;
+            std::printf("Virtual controller: on\n");
+        } catch (const std::exception& exc) {
+            std::fprintf(stderr, "Virtual controller: %s\n", exc.what());
+        }
+    }
+
+    // Real controller: optional, and hot-pluggable -- looked for every few
+    // seconds until one appears, watched until it's unplugged, then looked
+    // for again. Its buttons work in combos, waitForPress(), getButtonsHeld();
+    // its sticks/triggers in getAxis() and the overlay.
+    {
+        auto c_path = state.contains("controller_path") && state["controller_path"].is_string()
+                          ? std::optional<std::string>(state["controller_path"].get<std::string>()) : std::nullopt;
+        auto c_name = state.contains("controller_name") && state["controller_name"].is_string()
+                          ? std::optional<std::string>(state["controller_name"].get<std::string>()) : std::nullopt;
+        if (json_bool(state, "watch_controller", true)) {
+            std::thread([&rt, &registry, &macros, c_path, c_name, abort_code] {
+                bool announced_missing = false;
+                while (true) {
+                    ResolvedDevice c = resolve_device("controller", c_path, c_name);
+                    if (c.how == ResolveHow::NotFound) {
+                        if (!announced_missing) { std::printf("Controller: none found (will keep looking)\n"); announced_missing = true; }
+                        std::this_thread::sleep_for(std::chrono::seconds(3));
+                        continue;
+                    }
+                    InputDevice dev;
+                    if (!dev.open(c.path)) { std::this_thread::sleep_for(std::chrono::seconds(3)); continue; }
+                    std::printf("Controller: %s (%s)\n", c.path.c_str(), c.name.c_str());
+                    announced_missing = false;
+                    watch_device(rt, registry, macros, dev, "controller", abort_code);
+                    // unplugged: release its held buttons and axes, then look again
+                    {
+                        std::lock_guard<std::mutex> lock(rt.held_mutex);
+                        for (int code = 0x130; code <= 0x13e; ++code) rt.held.erase(code);
+                        for (int code = 0x220; code <= 0x223; ++code) rt.held.erase(code);
+                    }
+                    {
+                        std::lock_guard<std::mutex> lock(rt.axes_mutex);
+                        rt.axes.clear();
+                    }
+                    std::printf("Controller disconnected\n");
+                    std::this_thread::sleep_for(std::chrono::seconds(1));
+                }
+            }).detach();
+        }
     }
 
     InputDevice keyboard_dev, mouse_dev;

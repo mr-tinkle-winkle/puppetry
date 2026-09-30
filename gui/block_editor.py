@@ -81,6 +81,8 @@ REP_TIPS = {
     "mouse": "The mouse position (x, y) -- or just its x or y (click to choose). Move mouse accepts a saved "
              "position.",
     "buttons": "Every real key/button held right now (a list).",
+    "axis": "Where a real controller stick or trigger is right now: sticks -1 to 1 (right/down is +), "
+            "triggers 0 to 1. Click to choose which.",
     "press": "Waits until you press a key/button, then is that key -- e.g. set [button] to [key pressed], "
              "then tap [button].",
 }
@@ -127,7 +129,7 @@ def palette_sections(ed: "BlockEditor") -> list:
         customs_by_cat.setdefault(d.category, []).append(
             ("block", {"kind": "custom", "func": d.func}, d.description or f"Custom block: {d.name}"))
 
-    output = [call(n) for n in ("tap", "kd", "ku", "combo", "type", "move_mouse", "wheel", "command")]
+    output = [call(n) for n in ("tap", "kd", "ku", "combo", "type", "move_mouse", "wheel", "axis", "command")]
     if ed.macro_names:
         output.append(_block_entry({"kind": "macro_call"}, BLOCK_TIPS["macro_call"]))
     sections = [
@@ -149,7 +151,8 @@ def palette_sections(ed: "BlockEditor") -> list:
          [call("waitForPress"), call("waitForReactivation"), call("ignore"), call("ignore_keys"), call("actAs"),
           _rep_entry(bm.new_rep("press"), REP_TIPS["press"]),
           _rep_entry(bm.new_rep("mouse"), REP_TIPS["mouse"]),
-          _rep_entry(bm.new_rep("buttons"), REP_TIPS["buttons"])], "Real input"),
+          _rep_entry(bm.new_rep("buttons"), REP_TIPS["buttons"]),
+          _rep_entry(bm.new_rep("axis"), REP_TIPS["axis"])], "Real input"),
         ("Variables", "input",
          [_block_entry({"kind": "arguments"}, BLOCK_TIPS["arguments"]),
           _block_entry({"kind": "assign"}, BLOCK_TIPS["assign"]),
@@ -1686,6 +1689,9 @@ class BlockEditor(QWidget):
             elif rep.kind == "mouse":
                 self._menu(gpos, [(lbl, (lambda part=part: self.set_socket(b, fh.ref, Rep("mouse", part))))
                                   for part, lbl in (("", "mouse position (x, y)"), ("x", "mouse x"), ("y", "mouse y"))])
+            elif rep.kind == "axis":
+                self._menu(gpos, [(f"controller {lbl}", (lambda a=a: self.set_socket(b, fh.ref, Rep("axis", a))))
+                                  for a, lbl in bm.AXIS_LABELS.items()])
             elif rep.kind == "var":
                 items = [(v, (lambda v=v: self.set_socket(b, fh.ref, Rep("var", v)))) for v in self.variables if v != rep.name]
                 items.append(("Type a value instead…", lambda: self._open_line_editor(b, fh.ref, view_rect, "")))

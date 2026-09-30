@@ -118,6 +118,16 @@ int wait_for_press_fn(Runtime& rt, int code, bool repress);
 // "any"/"all"/""/None -> -1 (any key); otherwise the key code (names ok).
 bool is_any_key_word(const std::string& s);
 
+// Controller axes. Names: LX LY RX RY (sticks, -1..1; down/right +),
+// LT RT (triggers, 0..1), DPAD_X DPAD_Y (-1, 0, 1), or ABS_* names.
+// Throws std::invalid_argument for anything else.
+int axis_code(const std::string& name);
+// axis(name, value, time_=0): set a virtual-controller axis, ramping over
+// time_ seconds (scaled by speed()). Needs the virtual controller.
+void axis_fn(Runtime& rt, int code, double value, double time_ = 0.0);
+// getAxis(name): the REAL controller's axis right now (0 if none).
+double get_axis_fn(Runtime& rt, int code);
+
 // Panic button -- mirrors abort_all(): stops every running macro
 // (cooperative, via check_abort()), releases every key/button our own
 // virtual devices currently have held down, force-releases any active

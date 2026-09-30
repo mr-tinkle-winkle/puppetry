@@ -16,6 +16,7 @@
 #include "keycodes.hpp"
 #include "macro.hpp"
 #include "native_vm.hpp"
+#include "evdev_device.hpp"
 #include "primitives.hpp"
 #include "python_embed.hpp"
 
@@ -277,6 +278,48 @@ int main() {
         CHECK(probe->log.size() == 2 && probe->log[0] == probe->log[1] && probe->log[0].find("True|False") != std::string::npos,
               "getButtonsHeld: " + (probe->log.empty() ? std::string() : probe->log[0]));
         { std::lock_guard<std::mutex> l(rt.held_mutex); rt.held.clear(); }
+    }
+
+    // Controller: getAxis reads the real controller's normalized axes;
+    // axis() drives the virtual controller (and refuses when it's off);
+    // controller buttons go to the virtual controller too.
+    {
+        { std::lock_guard<std::mutex> l(rt.axes_mutex); rt.axes = {{ABS_X, -0.5}, {ABS_RZ, 0.25}}; }
+        json def = {{"id", "x"}, {"name", "X"}, {"code",
+            "Probe(getAxis(\"LX\"), getAxis(\"rt\"), getAxis(\"RY\"))\n"}};
+        probe->log.clear();
+        compile_native_macro(def, registry)->run(rt, registry, {});
+        compile_python_macro(def, registry, {"Probe"})->run(rt, registry, {});
+        CHECK(probe->log.size() == 2 && probe->log[0] == probe->log[1] && probe->log[0] == "-0.5|0.25|0.0",
+              "getAxis: " + (probe->log.empty() ? std::string() : probe->log[0]));
+        json out = {{"id", "o"}, {"name", "O"}, {"code", "axis(\"LX\", 1.0)\n"}};
+        std::string msg_n, msg_p;
+        try { compile_native_macro(out, registry)->run(rt, registry, {}); } catch (const std::exception& e) { msg_n = e.what(); }
+        try { compile_python_macro(out, registry, {"Probe"})->run(rt, registry, {}); } catch (const std::exception& e) { msg_p = e.what(); }
+        // (the Python path reports macro errors to the log instead of throwing)
+        CHECK(msg_n.find("virtual controller") != std::string::npos,
+              "axis() without the virtual controller explains why: " + msg_n);
+        rt.ui_gamepad.open_sink("/dev/null");
+        rt.gamepad_enabled = true;
+        json drive = {{"id", "d"}, {"name", "D"}, {"code",
+            "axis(\"LX\", 0.75)\naxis(\"LT\", 1, time_=0.02)\ntap(BTN_SOUTH, time_=0)\n"}};
+        for (int path = 0; path < 2; ++path) {
+            unsigned long long before = rt.ui_gamepad.frames_written();
+            auto m = path == 0 ? compile_native_macro(drive, registry) : compile_python_macro(drive, registry, {"Probe"});
+            m->run(rt, registry, {});
+            unsigned long long wrote = rt.ui_gamepad.frames_written() - before;
+            CHECK(wrote >= 1 + 5 + 2, std::string(path ? "python" : "native") + " axis()/controller tap wrote " +
+                  std::to_string(wrote) + " frames to the virtual controller");
+        }
+        double lx;
+        { std::lock_guard<std::mutex> l(rt.axes_mutex); lx = rt.out_axes[ABS_X]; }
+        CHECK(lx == 0.75, "axis() remembers what it set");
+        json bad_axis = {{"id", "b"}, {"name", "B"}, {"code", "axis(\"Q\", 1)\n"}};
+        std::string msg;
+        try { compile_native_macro(bad_axis, registry)->run(rt, registry, {}); } catch (const std::exception& e) { msg = e.what(); }
+        CHECK(msg.find("unknown axis") != std::string::npos, "unknown axis name: " + msg);
+        rt.gamepad_enabled = false;
+        { std::lock_guard<std::mutex> l(rt.axes_mutex); rt.axes.clear(); rt.out_axes.clear(); }
     }
 
     // MousePosition: a tuple with .x/.y; getMousePosition.x works without the

@@ -91,7 +91,30 @@ session to take effect.
   the code for what was just done (`tap(KEY_A)`, `combo(...)`, `wheel(2)`,
   `move_mouse(...)`, with waits).
 - **Dictionary** lists every command, block, custom block and key name, with
-  search.
+  search. Click a command to see what it does; key names are drawn on a
+  keyboard (hover for every alias).
+- Held keys in the Input Visualizer show how long they've been held (to the
+  millisecond), and a curved arrow under the mouse shows your last movement.
+- **Game controllers** are picked up automatically (Settings > Devices):
+  their buttons work in key combos (`BTN_SOUTH`, `BTN_TL`, ...), `getAxis("LX")`
+  reads a stick or trigger, and with *Virtual controller* on, macros can
+  press controller buttons and move sticks (`axis("LX", 1, time_=0.2)`).
+- **OBS & replay overlay** (bottom of the Input Visualizer page):
+  - *Expose Input Visualizer to OBS* serves the keyboard + mouse at
+    `http://127.0.0.1:17380/`. Add it to OBS as a Browser Source, or press
+    **Add to OBS** (needs OBS's WebSocket server: Tools > WebSocket Server
+    Settings).
+  - *Keyboard and mouse as separate pieces* splits that page in two
+    (`:17383`, `:17384`); *Controller* is its own page (`:17385`).
+  - *Simple input visualizer* (`:17381`) is a one-line list of what's held;
+    its *Mouse movement* toggle adds an arrow-only page (`:17382`).
+  - Your own input shows in orange, what macros press or move in blue.
+  - **Customize…** changes colors, sizes, fonts, timers, the arrow and what's
+    shown, with a live preview. Changes reach OBS immediately.
+  - *Layered Replay Buffer* keeps your input in memory for as long as OBS's
+    replay buffer, so afterglow can put the overlay on saved clips. The same
+    look can be rendered by hand with `puppetry-overlay composite --clip
+    clip.mp4 --clip-end <unix time> out.mp4`.
 
 ## Icon / logo
 

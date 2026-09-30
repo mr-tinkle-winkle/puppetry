@@ -171,6 +171,7 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:
         self.model.flush_pending_save()   # a batched autosave still waiting
+        self.visualizer_page.overlay.flush()
         if self.stack.currentIndex() == PAGE_EDITOR and self.editor_page.has_unsaved_changes():
             if ask(self, "Unsaved changes", "Quit without saving this macro?", ["Cancel", "Quit"]) != 1:
                 event.ignore()

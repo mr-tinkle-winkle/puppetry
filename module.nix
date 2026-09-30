@@ -77,6 +77,12 @@ let
         --set PYTHONPATH $out/share/puppetry \
         --set PUPPETRY_BIN_DIR ${puppetryDaemon}/bin \
         --add-flags $out/share/puppetry/app.py
+      # overlay helper + renderer (OBS pages, layered replay buffer, clip overlays)
+      makeWrapper ${guiPython}/bin/python3 $out/bin/puppetry-overlay \
+        --set PYTHONPATH $out/share/puppetry \
+        --set PUPPETRY_BIN_DIR ${puppetryDaemon}/bin \
+        --prefix PATH : ${pkgs.ffmpeg}/bin \
+        --add-flags $out/share/puppetry/overlay_cli.py
 
       ${lib.concatMapStringsSep "\n" (sz: ''
         mkdir -p $out/share/icons/hicolor/${toString sz}x${toString sz}/apps
@@ -136,6 +142,9 @@ in
       description = "Puppetry macro daemon";
       wantedBy = [ "default.target" ];
       path = [ pkgs.kdotool ];
+      # the daemon starts this when overlay.json turns an OBS page or the
+      # layered replay buffer on
+      environment.PUPPETRY_OVERLAY_CMD = "${puppetryGui}/bin/puppetry-overlay";
       serviceConfig = {
         ExecStart = "${puppetryDaemon}/bin/puppetry-daemon";
         Restart = "on-failure";

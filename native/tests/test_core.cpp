@@ -9,7 +9,10 @@
 #include <cstdio>
 #include <memory>
 #include <thread>
+#include <cmath>
 #include "dispatch.hpp"
+#include "evdev_device.hpp"
+#include "keycodes.hpp"
 #include "macro.hpp"
 #include "pointer_accel.hpp"
 #include "primitives.hpp"
@@ -300,6 +303,17 @@ int main() {
     test_act_as_held_key_transition();
     test_act_as_abort_clears_everything();
     test_arguments_extraction();
+    // controller axis normalization (sticks, triggers, d-pad)
+    CHECK(normalize_abs_range(-32768, 32767, -32768) == -1.0);
+    CHECK(normalize_abs_range(-32768, 32767, 32767) == 1.0);
+    CHECK(std::abs(normalize_abs_range(-32768, 32767, 0)) < 0.0001);
+    CHECK(normalize_abs_range(0, 255, 255) == 1.0 && normalize_abs_range(0, 255, 0) == 0.0);
+    CHECK(normalize_abs_range(0, 1023, 512) > 0.49 && normalize_abs_range(0, 1023, 512) < 0.51);
+    CHECK(normalize_abs_range(-1, 1, -1) == -1.0 && normalize_abs_range(-1, 1, 1) == 1.0);
+    CHECK(is_gamepad_button(BTN_SOUTH) && is_gamepad_button(BTN_THUMBR) && is_gamepad_button(BTN_DPAD_UP));
+    CHECK(!is_gamepad_button(BTN_LEFT) && !is_gamepad_button(KEY_A));
+    CHECK(is_our_virtual_device_name("macro-daemon-virtual-gamepad"));
+
     std::printf("All %d checks passed.\n", test_count);
     return 0;
 }

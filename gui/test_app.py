@@ -14,6 +14,7 @@ import json
 import os
 import sys
 import tempfile
+import time
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 os.environ["HOME"] = tempfile.mkdtemp(prefix="puppetry_gui_test_")
@@ -1182,6 +1183,89 @@ def main() -> int:
     vp.clear_macro()
     check("visualizer: clear empties the readout", vp.macro_text.toPlainText() == "")
 
+    import kbm_layout as kl
+    QTest.keyPress(vp.area, Qt.Key_W)
+    pump(120)
+    held_for = time.perf_counter() - vp.area.kbm.held.get("KEY_W", time.perf_counter())
+    check("visualizer: a held key runs a timer (label replaced by seconds.milliseconds)",
+          held_for > 0.05 and vp.area.wants_repaint(time.perf_counter())
+          and kl.format_hold(held_for).count(".") == 1)
+    QTest.keyRelease(vp.area, Qt.Key_W)
+    for i in range(12):
+        QTest.mouseMove(vp.area, QPoint(400 - i * 12, 200))
+        pump(5)
+    for i in range(6):
+        QTest.mouseMove(vp.area, QPoint(256, 200 - i * 10))
+        pump(5)
+    curve = kl.arrow_curve(vp.area.kbm.burst)
+    check("visualizer: mouse movement gives a curved arrow (left, then up at the end)",
+          curve is not None and curve["p3"][0] < 0 and curve["p3"][1] < 0
+          and kl.arrow_head_dir([curve["p0"], curve["c1"], curve["c2"], curve["p3"]])[1] < 0)
+    vp.area.repaint()
+
+    # ---- OBS & replay overlay section
+    import overlay_config as oc
+    ov = vp.overlay
+    ov.full_toggle.setChecked(True)
+    ov.simple_toggle.setChecked(True)
+    ov.mouse_toggle.setChecked(True)
+    ov.replay_toggle.setChecked(True)
+    ov.flush()
+    saved = oc.load()
+    check("overlay: toggles are saved to overlay.json", saved["full"]["enabled"] and saved["simple"]["enabled"]
+          and saved["simple"]["mouse_movement"] and saved["replay"]["enabled"])
+    check("overlay: URLs shown for enabled pages", ov.full_url.text() == "http://127.0.0.1:17380/"
+          and ov.mouse_url.isEnabled())
+    from overlay_settings import CustomizeDialog
+    dlg = CustomizeDialog(ov, "full")
+    dlg.form.widgets["unit"].setValue(33)
+    dlg.form.widgets["show_timers"].setChecked(False)
+    ov.flush()
+    saved = oc.load()
+    check("overlay: Customize edits the style live (no restart needed)", saved["style"]["unit"] == 33
+          and saved["style"]["show_timers"] is False)
+    check("overlay: every schema option has a control", set(dlg.form.widgets) == set(oc.DEFAULTS["style"]))
+    dlg.preview.repaint()
+    dlg._reset()
+    ov.flush()
+    check("overlay: reset to defaults", oc.load()["style"]["unit"] == oc.DEFAULTS["style"]["unit"])
+    for k in ("simple", "movement"):
+        d2 = CustomizeDialog(ov, k)
+        d2.preview.repaint()
+        d2.close()
+    ov.split_toggle.setChecked(True)
+    ov.controller_toggle.setChecked(True)
+    ov.flush()
+    check("overlay: split pieces + controller get their own pages",
+          set(oc.pages(oc.load())) == {"keyboard", "mouse", "controller", "simple", "movement"}
+          and ov.keyboard_url.isEnabled() and not ov.full_url.isEnabled())
+    ov.split_toggle.setChecked(False)
+    ov.full_toggle.setChecked(False)
+    ov.controller_toggle.setChecked(False)
+    ov.simple_toggle.setChecked(False)
+    ov.replay_toggle.setChecked(False)
+    ov.flush()
+    check("overlay: everything off again", not oc.helper_wanted(oc.load()))
+
+    # in-app picture from the daemon's stream: real = input color, macro = output color, controller
+    vp._stream_live(True)
+    now = time.perf_counter()
+    vp._stream_event("r", "k", "KEY_Q", 1, 0)
+    vp._stream_event("m", "k", "KEY_E", 1, 0)
+    vp._stream_event("r", "k", "BTN_SOUTH", 1, 0)
+    vp._stream_event("m", "a", "RT", 0.8, 0)
+    kbm = vp.area.kbm
+    check("visualizer: stream input is split into yours vs macros'",
+          "KEY_Q" in kbm.held and "KEY_E" in kbm.out_held and kbm.axis_value("RT") == (0.8, "m"))
+    check("visualizer: a controller button shows the controller", vp.show_pad.isChecked()
+          and any(i["kind"] == "stick" for i in vp.area.layout_["items"]))
+    QTest.keyClick(vp.area, Qt.Key_Z)
+    check("visualizer: with the stream live, window events don't double-draw keys", "KEY_Z" not in kbm.held
+          and "KEY_Z" not in kbm.released)
+    vp.area.repaint()
+    vp._stream_live(False)
+    check("visualizer: falls back to window input when the daemon's gone", not vp.area.stream_live)
+
     L = it.InputLog()
     L.add(0.0, "kd", "KEY_LEFTCTRL"); L.add(0.05, "kd", "KEY_C"); L.add(0.15, "ku", "KEY_C"); L.add(0.2, "ku", "KEY_LEFTCTRL")
     L.add(1.0, "kd", "KEY_A"); L.add(1.08, "ku", "KEY_A")
@@ -1233,6 +1317,43 @@ def main() -> int:
     check("dictionary: colors follow the category scheme",
           ref.PRIMITIVES_BY_NAME["tap"].category == "output" and next(e for e in dp.commands.entries if e.signature.startswith("tap(")).category == "output"
           and next(e for e in dp.commands.entries if e.signature.startswith("waitForPress")).category == "input")
+    import dictionary_page as dpm
+    first = dp.commands.entries[0]
+    check("dictionary: entries start collapsed", first.desc is not None and first.desc.isHidden())
+    QTest.mouseClick(first.header, Qt.LeftButton)
+    pump(50)
+    check("dictionary: clicking a signature expands it", not first.desc.isHidden())
+    QTest.mouseClick(first.header, Qt.LeftButton)
+    pump(50)
+    check("dictionary: clicking again collapses it", first.desc.isHidden())
+    check("dictionary: text is 3x the app's size",
+          first.header.sig.font().pixelSize() == round(dpm.base_px() * 3) and dpm.TEXT_SCALE == 3)
+    dp.search.setText("kernel")                  # only in wait()'s description
+    pump(50)
+    waite = next(e for e in dp.commands.entries if e.signature.startswith("wait("))
+    check("dictionary: a search that matches a description opens that entry",
+          not waite.isHidden() and not waite.desc.isHidden())
+    dp.search.setText("")
+    pump(50)
+    check("dictionary: clearing the search closes what it opened", waite.desc.isHidden())
+    dp.expand_all(True)
+    check("dictionary: expand all", all(not e.desc.isHidden() for e in dp.all_entries() if e.header and e.desc))
+    dp.expand_all(False)
+    km = dp.keymap
+    check("dictionary: key names are drawn on the visualizer's keyboard",
+          km.names.get("KEY_A", ("", ""))[1] == "KEY_A" and km.names.get("BTN_LEFT") is not None)
+    if km.aliases:
+        check("dictionary: the short name is the big label", km.names["KEY_A"][0] == "A"
+              and "also:" in km.tooltip_for({"name": "KEY_LEFTCTRL"}))
+    dp.search.setText("ctrl")
+    pump(50)
+    check("dictionary: searching lights matching keys up", "KEY_LEFTCTRL" in km.highlight
+          and "KEY_A" not in km.highlight and not dp.keys_title.isHidden())
+    dp.search.setText("")
+    pump(50)
+    check("dictionary: controller commands are documented",
+          any(e.signature.startswith("getAxis(") for e in dp.commands.entries)
+          and any(e.signature.startswith("axis(") for e in dp.commands.entries))
     ed_btn = [b for b in ed.findChildren(CustomButton) if b.text() == "Open the Dictionary"]
     check("dictionary: the editor has a button in place of the old collapsible panels",
           len(ed_btn) == 1 and not [c for c in ed.findChildren(QLabel) if c.text().startswith("tap(key, time_=0.1)")])

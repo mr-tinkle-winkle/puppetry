@@ -1,0 +1,100 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Puppetry input list</title>
+<style>
+  html, body { margin: 0; padding: 0; background: transparent; overflow: hidden; }
+  #list { white-space: pre; padding: 4px 8px; }
+</style>
+</head>
+<body>
+<div id="list"></div>
+<script src="/common.js"></script>
+<script>
+"use strict";
+const el = document.getElementById("list");
+const MOUSE = { BTN_LEFT: "LMB", BTN_RIGHT: "RMB", BTN_MIDDLE: "MMB", BTN_SIDE: "MB4", BTN_EXTRA: "MB5" };
+let lastText = null;
+
+function applyStyle() {
+  const s = P.style;
+  document.body.style.background = cssColor(s.background);
+  el.style.fontFamily = s.font_family || "sans-serif";
+  el.style.fontSize = (s.font_px || 36) + "px";
+  el.style.fontWeight = s.bold ? "bold" : "normal";
+  el.style.color = cssColor(s.text_color);
+  el.style.textAlign = s.align || "left";
+  // outline via stacked shadows (works in every OBS browser-source version)
+  const o = s.outline_px || 0, c = cssColor(s.outline_color), sh = [];
+  for (let a = 0; a < 16 && o; a++) {
+    const r = (a / 16) * 2 * Math.PI;
+    sh.push(`${(Math.cos(r) * o).toFixed(2)}px ${(Math.sin(r) * o).toFixed(2)}px 0 ${c}`);
+  }
+  el.style.textShadow = sh.join(", ");
+  lastText = null;
+}
+P.onconfig = applyStyle;
+
+function nameOf(k) {
+  if (k in MOUSE) return MOUSE[k];
+  if ((P.style.names || "label") === "name") return k;
+  if (k in P.padLabels) return P.padLabels[k];
+  const l = P.labels[k];
+  if (l === "") return k === "KEY_SPACE" ? "Space" : k.replace(/^KEY_/, "");
+  return l || k.replace(/^(KEY_|BTN_)/, "");
+}
+
+function isPad(k) { return /^BTN_(SOUTH|EAST|WEST|NORTH|TL|TR|TL2|TR2|SELECT|START|MODE|THUMBL|THUMBR|DPAD_)/.test(k); }
+
+// [(text, src)] -- same rules as overlay_render.simple_parts
+function parts(now) {
+  const s = P.style, out = [];
+  let items = Object.entries(P.held).map(([k, t]) => [k, t, "r"]);
+  if (s.show_macro_output !== false)
+    items = items.concat(Object.entries(P.out).filter(([k]) => !(k in P.held)).map(([k, t]) => [k, t, "m"]));
+  items.sort((a, b) => a[1] - b[1]);
+  for (const [k, t, src] of items) {
+    if (!s.show_mouse_buttons && k in MOUSE) continue;
+    if (s.show_controller === false && isPad(k)) continue;
+    let txt = nameOf(k);
+    if (s.show_timers) txt += " " + formatHold(now - t);
+    out.push([txt, src]);
+  }
+  if (s.history) {
+    for (const [k, t] of Object.entries(P.released).sort((a, b) => a[1] - b[1])) {
+      if ((now - t) * 1000 <= s.history && !(k in P.held)) {
+        if (!s.show_mouse_buttons && k in MOUSE) continue;
+        out.push([nameOf(k), "r"]);
+      }
+    }
+  }
+  if (s.show_wheel !== false && P.wheelDir && (now - P.wheelT) < 0.4 && (P.wheelSrc === "r" || s.show_macro_output !== false))
+    out.push([P.wheelDir > 0 ? "Wheel \u25b2" : "Wheel \u25bc", P.wheelSrc]);
+  return out;
+}
+
+function render() {
+  const s = P.style, now = nowS();
+  const ps = parts(now);
+  const bySrc = s.color_by_source !== false;
+  const key = JSON.stringify(ps) + bySrc;
+  if (key !== lastText) {
+    lastText = key;
+    el.textContent = "";
+    if (!ps.length) el.textContent = s.empty_text || "";
+    ps.forEach(([txt, src], i) => {
+      if (i) el.appendChild(document.createTextNode(s.separator ?? " + "));
+      const span = document.createElement("span");
+      span.textContent = txt;
+      if (bySrc) span.style.color = cssColor(src === "r" ? s.real_color : s.macro_color);
+      el.appendChild(span);
+    });
+  }
+  requestAnimationFrame(render);
+}
+connect();
+requestAnimationFrame(render);
+</script>
+</body>
+</html>

@@ -19,6 +19,15 @@ fs::path macros_file() { return config_dir() / "macros.json"; }
 fs::path aliases_file() { return config_dir() / "aliases.json"; }
 fs::path profiles_dir() { return config_dir() / "profiles"; }
 fs::path control_socket_path() { return config_dir() / "control.sock"; }
+fs::path runtime_dir() {
+    const char* x = std::getenv("XDG_RUNTIME_DIR");
+    fs::path d = (x && *x) ? fs::path(x) / "puppetry" : config_dir();
+    std::error_code ec;
+    fs::create_directories(d, ec);
+    return d;
+}
+fs::path event_socket_path() { return runtime_dir() / "events.sock"; }
+fs::path overlay_config_file() { return config_dir() / "overlay.json"; }
 
 static json default_state() {
     return json{
@@ -78,6 +87,15 @@ json load_macros() {
 void save_macros(const json& data) { write_json(macros_file(), data); }
 
 fs::path custom_blocks_file() { return config_dir() / "custom_blocks.json"; }
+
+json load_overlay_config() {
+    if (!fs::exists(overlay_config_file())) return json::object();
+    try {
+        return read_json(overlay_config_file());
+    } catch (const std::exception&) {
+        return json::object();
+    }
+}
 
 json load_custom_blocks() {
     if (!fs::exists(custom_blocks_file())) return json{{"blocks", json::array()}};

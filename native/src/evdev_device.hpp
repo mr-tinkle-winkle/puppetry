@@ -5,6 +5,7 @@
 // rather than linking libevdev, so the build has no dependency beyond
 // kernel headers (linux/input.h, linux/uinput.h) that every Linux
 // devel environment already has.
+#include <linux/input.h>
 #include <optional>
 #include <string>
 #include <vector>
@@ -23,6 +24,8 @@ std::vector<DeviceInfo> list_input_devices();
 bool device_has_key(const std::string& path, int code);
 // True if this device declares EV_REL for `code`.
 bool device_has_rel(const std::string& path, int code);
+// True if this device declares EV_ABS for `code`.
+bool device_has_abs(const std::string& path, int code);
 
 std::string device_name(const std::string& path);
 
@@ -45,6 +48,13 @@ std::optional<DeviceInfo> find_best_keyboard(const std::optional<std::string>& p
 // touchpad nodes). Same preferred_name "sticky" behavior.
 std::optional<DeviceInfo> find_best_mouse(const std::optional<std::string>& preferred_name);
 
+// Picks a game controller: BTN_SOUTH + ABS_X (not our own virtual one).
+std::optional<DeviceInfo> find_best_controller(const std::optional<std::string>& preferred_name);
+
+// Absolute-axis value -> -1..1 (centered range: sticks), 0..1 (range
+// starting at 0+: triggers), or -1/0/1 (a -1..1 d-pad hat).
+double normalize_abs_range(int mn, int mx, int value);
+
 enum class ResolveHow { Remembered, Renumbered, AutoDetected, NotFound };
 
 struct ResolvedDevice {
@@ -59,7 +69,7 @@ struct ResolvedDevice {
 // exists somewhere else (renumbered), (3) fresh capability-based
 // auto-detect. Never returns one of our own virtual output devices,
 // even if state.json has one saved from a stale/bad detection.
-ResolvedDevice resolve_device(const std::string& kind, // "keyboard" or "mouse"
+ResolvedDevice resolve_device(const std::string& kind, // "keyboard", "mouse" or "controller"
                                const std::optional<std::string>& saved_path,
                                const std::optional<std::string>& saved_name);
 
@@ -113,10 +123,14 @@ public:
 
     int fd() const { return fd_; }
     const std::string& path() const { return path_; }
+    // Axis value normalized with this device's own range (read at open()).
+    double normalize_abs(int code, int value) const;
 
 private:
     int fd_ = -1;
     std::string path_;
+    int abs_min_[ABS_CNT] = {};
+    int abs_max_[ABS_CNT] = {};
 };
 
 } // namespace puppetry

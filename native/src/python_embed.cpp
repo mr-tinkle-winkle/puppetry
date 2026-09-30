@@ -364,6 +364,40 @@ FASTCALL_SIG(py_get_buttons_held) {
     return list;
 }
 
+// axis name (str) or ABS_* code (int) -> code; sets a Python error on failure
+static bool axis_arg(PyObject* o, const char* fn, int& code) {
+    if (!o) { PyErr_Format(PyExc_TypeError, "%s() needs an axis (LX, LY, RX, RY, LT, RT, DPAD_X, DPAD_Y)", fn); return false; }
+    if (PyLong_Check(o)) { code = (int)PyLong_AsLong(o); return true; }
+    if (!PyUnicode_Check(o)) { PyErr_Format(PyExc_TypeError, "%s(): the axis must be a name like \"LX\"", fn); return false; }
+    try {
+        code = axis_code(PyUnicode_AsUTF8(o));
+    } catch (const std::exception& e) {
+        PyErr_SetString(PyExc_ValueError, e.what());
+        return false;
+    }
+    return true;
+}
+
+FASTCALL_SIG(py_axis) {
+    ARGS;
+    if (!a.check_kwargs("axis", {"axis", "value", "time_"})) return nullptr;
+    int code;
+    double v, t;
+    if (!axis_arg(a.get(0, "axis"), "axis", code)) return nullptr;
+    PyObject* vo = a.get(1, "value");
+    if (!vo) { PyErr_SetString(PyExc_TypeError, "axis() needs a value"); return nullptr; }
+    if (!double_arg(vo, 0, v) || !double_arg(a.get(2, "time_"), 0.0, t)) return nullptr;
+    return run_native(t > 0, [&] { axis_fn(*g_runtime, code, v, t); });
+}
+
+FASTCALL_SIG(py_get_axis) {
+    ARGS;
+    if (!a.check_kwargs("getAxis", {"axis"})) return nullptr;
+    int code;
+    if (!axis_arg(a.get(0, "axis"), "getAxis", code)) return nullptr;
+    return PyFloat_FromDouble(get_axis_fn(*g_runtime, code));
+}
+
 FASTCALL_SIG(py_wait_for_reactivation) {
     ARGS;
     if (!a.check_kwargs("waitForReactivation", {"repress"})) return nullptr;
@@ -439,6 +473,7 @@ static PyMethodDef kMethods[] = {
     FC("ignore_keys", py_ignore_keys), FC("actAs", py_act_as), FC("command", py_command),
     FC("getMousePosition", py_get_mouse_position), FC("getButtonsHeld", py_get_buttons_held),
     FC("waitForReactivation", py_wait_for_reactivation), FC("waitForPress", py_wait_for_press),
+    FC("axis", py_axis), FC("getAxis", py_get_axis),
     {nullptr, nullptr, 0, nullptr},
 };
 #undef FC

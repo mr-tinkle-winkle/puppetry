@@ -1578,6 +1578,27 @@ private:
             if (!c.pos.empty()) throw err_at(c.line, "getMousePosition() takes no arguments");
             return EvalFn([](Frame& f) { return mouse_point(*f.rt); });
         }
+        if (n == "axis") {
+            c.allow({"axis", "value", "time_"});
+            c.max_pos(3);
+            Arg ax = c.at(0, "axis"), val = c.at(1, "value"), t = c.at(2, "time_", Value::of_float(0.0));
+            return EvalFn([ax, val, t](Frame& f) {
+                Value av = ax.get(f);
+                int code = av.kind == Value::Kind::Str ? axis_code(av.s) : (int)av.inum();
+                axis_fn(*f.rt, code, val.dbl(f), t.dbl(f));
+                return Value::none();
+            });
+        }
+        if (n == "getAxis") {
+            c.allow({"axis"});
+            c.max_pos(1);
+            Arg ax = c.at(0, "axis");
+            return EvalFn([ax](Frame& f) {
+                Value av = ax.get(f);
+                int code = av.kind == Value::Kind::Str ? axis_code(av.s) : (int)av.inum();
+                return Value::of_float(get_axis_fn(*f.rt, code));
+            });
+        }
         if (n == "getButtonsHeld") {
             c.allow({});
             if (!c.pos.empty()) throw err_at(c.line, "getButtonsHeld() takes no arguments");

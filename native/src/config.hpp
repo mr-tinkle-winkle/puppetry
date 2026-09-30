@@ -20,6 +20,10 @@ fs::path macros_file();
 fs::path aliases_file();
 fs::path profiles_dir();
 fs::path control_socket_path();
+// $XDG_RUNTIME_DIR/puppetry (tmpfs, per user); config_dir() if unset.
+fs::path runtime_dir();
+fs::path event_socket_path();
+fs::path overlay_config_file();
 
 // Creates config dir + shared macros.json + 3 default empty profiles if
 // nothing exists yet. Safe to call every startup -- never overwrites
@@ -38,6 +42,7 @@ void save_macros(const json& data);
 // from any macro), never triggered by a combo.
 fs::path custom_blocks_file();
 json load_custom_blocks();
+json load_overlay_config(); // overlay.json (written by the GUI; read by puppetry-overlay)
 
 json load_aliases();      // {"aliases": {...}}
 void save_aliases(const json& data);

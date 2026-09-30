@@ -24,6 +24,7 @@ namespace puppetry {
 // so don't, casually.
 inline constexpr const char* kVirtualKeyboardName = "macro-daemon-virtual-keyboard";
 inline constexpr const char* kVirtualMouseName = "macro-daemon-virtual-mouse";
+inline constexpr const char* kVirtualGamepadName = "macro-daemon-virtual-gamepad";
 inline constexpr int kVirtualVendorId = 0x1234;
 inline constexpr int kVirtualProductId = 0x5678;
 
@@ -39,6 +40,15 @@ public:
     // EV_REL for REL_X/REL_Y/REL_WHEEL. Throws std::runtime_error on
     // failure (missing /dev/uinput, no permission, etc.).
     void create(const std::string& name, const std::vector<int>& key_codes, bool with_rel);
+
+    // A controller: the Xbox-style button set, two sticks, two triggers
+    // and a d-pad hat (the usual evdev layout games expect). Created only
+    // when "virtual_controller" is on (an extra controller can shift player
+    // numbers in some games).
+    void create_gamepad(const std::string& name);
+    // One absolute-axis value + SYN_REPORT. `norm` is -1..1 for sticks and
+    // the d-pad, 0..1 for triggers; scaled to the device's range here.
+    void abs_frame(int code, double norm);
 
     // One key/button transition + SYN_REPORT, in a single write().
     void key_frame(int code, int value);
@@ -69,6 +79,8 @@ private:
     int fd_ = -1;
     bool is_sink_ = false;
     std::atomic<unsigned long long> frames_{0};
+    int abs_min_[ABS_CNT] = {};
+    int abs_max_[ABS_CNT] = {};
 };
 
 } // namespace puppetry

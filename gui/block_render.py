@@ -319,7 +319,7 @@ class Layouter:
                     h = max(h, ph + 2 * NEST_PAD)
                 pad = h / 2 if v.kind in ("compare", "held") else FIELD_PAD
                 return w - GAP + 2 * pad, h
-            label = rep_label(v) + (" ▾" if v.kind in ("mouse", "var") else "")
+            label = rep_label(v) + (" ▾" if v.kind in ("mouse", "var", "axis") else "")
             return max(28.0, m.width(m.base, label) + 2 * FIELD_PAD), FIELD_H
         text = expr_text(v) if not isinstance(v, str) else v
         return max(24.0, m.width(m.base, text) + 2 * FIELD_PAD + (12 if kind_hint == "choice" else 0)), FIELD_H
@@ -372,7 +372,7 @@ class Layouter:
                         cx += self.place_value(lb, sub, (ref[0], ref[1], ref[2] + (payload,)), cx, cy,
                                                placeholder_text=ph) + GAP
                 return w
-            label = rep_label(v) + (" ▾" if v.kind in ("mouse", "var") else "")
+            label = rep_label(v) + (" ▾" if v.kind in ("mouse", "var", "axis") else "")
             lb.fields.append(FieldHit(rect, ref, v.kind, label, rep=v, accepts=True))
             return w
         text = v if isinstance(v, str) else ""

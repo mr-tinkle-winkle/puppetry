@@ -92,6 +92,26 @@ getButtonsHeld()
   A list of every real key/button held right now, e.g.
   if KEY_A in getButtonsHeld(): ...
 
+getAxis(axis)
+  Where a real game controller's stick or trigger is right now. axis:
+  "LX", "LY", "RX", "RY" (sticks, -1 to 1; right and down are positive),
+  "LT", "RT" (triggers, 0 to 1), "DPAD_X", "DPAD_Y" (-1, 0 or 1).
+  0 when no controller is connected.
+
+axis(axis, value, time_=0)
+  Moves a stick or trigger on Puppetry's virtual controller (turn on
+  "Virtual controller" in Settings > Devices first), ramping over time_
+  seconds:  axis("LX", -1, time_=0.2)  then  axis("LX", 0).  The abort key
+  puts every stick and trigger back to rest.
+
+Controller buttons
+  Work like keys everywhere -- in key combos, tap()/kd()/ku(),
+  waitForPress() and getButtonsHeld(): BTN_SOUTH (A / Cross), BTN_EAST
+  (B / Circle), BTN_WEST, BTN_NORTH, BTN_TL / BTN_TR (bumpers), BTN_TL2 /
+  BTN_TR2 (triggers as buttons), BTN_SELECT, BTN_START, BTN_MODE,
+  BTN_THUMBL / BTN_THUMBR (stick clicks), BTN_DPAD_UP/DOWN/LEFT/RIGHT.
+  Pressing them from a macro needs the virtual controller.
+
 command(cmd, *args)
   Runs a shell command fire-and-forget (/bin/sh). Extra args are
   shell-quoted into {0}, {1}, ... placeholders:
@@ -204,6 +224,8 @@ class Primitive:
 _REPRESS = Param("repress", "False", kind="bool", caption="block it",
                  doc="True: the press is swallowed -- nothing else (no app, no other macro) sees it.")
 
+_AXES = ('"LX"', '"LY"', '"RX"', '"RY"', '"LT"', '"RT"', '"DPAD_X"', '"DPAD_Y"')
+
 PRIMITIVES: tuple = (
     Primitive("tap", (Param("key", kind="key", doc="The key or mouse button, e.g. KEY_A or BTN_LEFT."),
                       Param("time_", "0.1", caption="hold", doc="Seconds to hold it down.")),
@@ -273,6 +295,15 @@ PRIMITIVES: tuple = (
               "mouse position", reporter=True),
     Primitive("getButtonsHeld", (), "input", "Every real key/button held down right now.", "buttons held",
               reporter=True),
+    Primitive("getAxis", (Param("axis", '"LX"', kind="choice", choices=_AXES,
+                                doc="Which stick / trigger / d-pad axis."),),
+              "input", "A real controller's stick or trigger right now (sticks -1..1, triggers 0..1).",
+              "controller axis", reporter=True),
+    Primitive("axis", (Param("axis", kind="choice", choices=_AXES, doc="Which stick / trigger / d-pad axis."),
+                       Param("value", caption="to", doc="Sticks and d-pad -1 to 1 (right/down +), triggers 0 to 1."),
+                       Param("time_", "0", caption="over", doc="Seconds to move there (0 = at once).")),
+              "output", "Move a stick or trigger on the virtual controller (Settings > Devices).",
+              "move controller axis"),
 )
 
 PRIMITIVES_BY_NAME: dict = {p.name: p for p in PRIMITIVES}
@@ -290,6 +321,19 @@ def primitive_names() -> list[str]:
 import re as _re
 
 
+def _reflow(lines: list) -> list:
+    """Join the prose's hard-wrapped lines into paragraphs (so they wrap to
+    the page), keeping further-indented lines -- code examples -- as-is."""
+    out: list = []
+    for ln in lines:
+        code = ln.startswith(" ")
+        if out and not code and not out[-1].startswith(" "):
+            out[-1] = out[-1] + " " + ln.strip()
+        else:
+            out.append(ln.rstrip() if code else ln.strip())
+    return out
+
+
 def parse_dictionary() -> tuple:
     """-> (entries, notes). An entry is {name, signature, description,
     category}; `notes` are the trailing paragraphs that describe no single
@@ -298,7 +342,7 @@ def parse_dictionary() -> tuple:
     for para in DICTIONARY_TEXT.strip().split("\n\n"):
         lines = para.split("\n")
         head = [l for l in lines if not l.startswith(" ")][:]
-        body = [l.strip() for l in lines if l.startswith(" ")]
+        body = _reflow([l[2:] for l in lines if l.startswith(" ")])
         first_head = next((i for i, l in enumerate(lines) if l.startswith(" ")), len(lines))
         head = lines[:first_head]
         if not body:

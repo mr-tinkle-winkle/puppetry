@@ -130,6 +130,17 @@ class Runtime {
 public:
     UinputDevice ui_keyboard;
     UinputDevice ui_mouse;
+    // Virtual controller: only created when state.json "virtual_controller"
+    // is on; controller-button presses and axis() need it.
+    UinputDevice ui_gamepad;
+    std::atomic<bool> gamepad_enabled{false};
+
+    // Real controller axes, normalized (see normalize_abs_range): the
+    // dispatch loop writes, getAxis() reads.
+    std::mutex axes_mutex;
+    std::unordered_map<int, double> axes;
+    // What axis() last set on the virtual controller (ramps start here).
+    std::unordered_map<int, double> out_axes;
 
     // See CursorCache above. Lives here rather than in primitives.cpp so
     // the dispatch loop can invalidate it when the user moves the real

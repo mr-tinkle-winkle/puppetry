@@ -15,11 +15,13 @@ from __future__ import annotations
 import time
 from collections import deque
 
-from PySide6.QtCore import QRectF, QTimer, Qt
+from PySide6.QtCore import QRectF, QThread, QTimer, Qt, Signal
 from PySide6.QtGui import QFont, QKeySequence, QPainter, QPalette, QPen
 from PySide6.QtWidgets import QApplication, QGridLayout, QHBoxLayout, QLabel, QPlainTextEdit, QWidget
 
+import kbm_layout as kl
 from input_transcript import InputLog
+from kbm_paint import layout_for, needs_animation, paint_kbm, picture_size, theme_style
 from ui_kit.custom_button import CustomButton
 from ui_kit.custom_checkbox import CustomCheckBox
 from ui_kit.rounded_rect import rounded_rect_path
@@ -30,45 +32,9 @@ WINDOW_S = 1.0     # "current" = events in the last second
 SAMPLE_MS = 50
 
 
-# ---------------------------------------------------------------------------
-# On-screen keyboard: (evdev code, KEY_ name, label, width in key units).
-# A row is a list; None is a half-key gap.
-# ---------------------------------------------------------------------------
-def _k(code, name, label=None, w=1.0):
-    return (code, name, label if label is not None else name[4:], w)
-
-
-_LETTERS = {c: n for c, n in zip(
-    (30, 48, 46, 32, 18, 33, 34, 35, 23, 36, 37, 38, 50, 49, 24, 25, 16, 19, 31, 20, 22, 47, 17, 45, 21, 44),
-    "ABCDEFGHIJKLMNOPQRSTUVWXYZ")}
-_LETTERS = {n: c for c, n in _LETTERS.items()}
-
-
-def _ltr(ch, w=1.0):
-    return _k(_LETTERS[ch], "KEY_" + ch, ch, w)
-
-
-KEY_ROWS = [
-    [_k(1, "KEY_ESC", "Esc"), None] + [_k(59 + i, f"KEY_F{i + 1}", f"F{i + 1}") for i in range(10)]
-    + [_k(87, "KEY_F11", "F11"), _k(88, "KEY_F12", "F12")],
-    [_k(41, "KEY_GRAVE", "`")] + [_k(2 + i, f"KEY_{(i + 1) % 10}", str((i + 1) % 10)) for i in range(10)]
-    + [_k(12, "KEY_MINUS", "-"), _k(13, "KEY_EQUAL", "="), _k(14, "KEY_BACKSPACE", "Bksp", 2.0)],
-    [_k(15, "KEY_TAB", "Tab", 1.5)] + [_ltr(c) for c in "QWERTYUIOP"]
-    + [_k(26, "KEY_LEFTBRACE", "["), _k(27, "KEY_RIGHTBRACE", "]"), _k(43, "KEY_BACKSLASH", "\\", 1.5)],
-    [_k(58, "KEY_CAPSLOCK", "Caps", 1.75)] + [_ltr(c) for c in "ASDFGHJKL"]
-    + [_k(39, "KEY_SEMICOLON", ";"), _k(40, "KEY_APOSTROPHE", "'"), _k(28, "KEY_ENTER", "Enter", 2.25)],
-    [_k(42, "KEY_LEFTSHIFT", "Shift", 2.25)] + [_ltr(c) for c in "ZXCVBNM"]
-    + [_k(51, "KEY_COMMA", ","), _k(52, "KEY_DOT", "."), _k(53, "KEY_SLASH", "/"), _k(54, "KEY_RIGHTSHIFT", "Shift", 2.75)],
-    [_k(29, "KEY_LEFTCTRL", "Ctrl", 1.25), _k(125, "KEY_LEFTMETA", "Meta", 1.25), _k(56, "KEY_LEFTALT", "Alt", 1.25),
-     _k(57, "KEY_SPACE", "", 6.25), _k(100, "KEY_RIGHTALT", "Alt", 1.25), _k(126, "KEY_RIGHTMETA", "Meta", 1.25),
-     _k(127, "KEY_COMPOSE", "Menu", 1.25), _k(97, "KEY_RIGHTCTRL", "Ctrl", 1.25)],
-]
-# navigation block: (row, column offset in units, key)
-NAV_KEYS = [(1, 0, _k(110, "KEY_INSERT", "Ins")), (1, 1, _k(102, "KEY_HOME", "Home")), (1, 2, _k(104, "KEY_PAGEUP", "PgUp")),
-            (2, 0, _k(111, "KEY_DELETE", "Del")), (2, 1, _k(107, "KEY_END", "End")), (2, 2, _k(109, "KEY_PAGEDOWN", "PgDn")),
-            (4, 1, _k(103, "KEY_UP", "\u2191")),
-            (5, 0, _k(105, "KEY_LEFT", "\u2190")), (5, 1, _k(108, "KEY_DOWN", "\u2193")), (5, 2, _k(106, "KEY_RIGHT", "\u2192"))]
-CODE_TO_NAME = {k[0]: k[1] for row in KEY_ROWS for k in row if k} | {k[0]: k[1] for _r, _c, k in NAV_KEYS}
+# Keyboard/mouse geometry + state live in kbm_layout (shared with the OBS
+# pages, the Dictionary and the overlay renderer).
+KEY_ROWS, NAV_KEYS, CODE_TO_NAME = kl.KEY_ROWS, kl.NAV_KEYS + kl.ARROW_KEYS, kl.CODE_TO_NAME
 
 # Qt key -> KEY_ name, for when the platform gives no scan code
 _QT_KEYS = {Qt.Key_Escape: "KEY_ESC", Qt.Key_Tab: "KEY_TAB", Qt.Key_Backspace: "KEY_BACKSPACE",
@@ -152,11 +118,13 @@ class CpsArea(QWidget):
         self.held_keys: set[str] = set()
         self.held_buttons: set[str] = set()
         self.held_names: set[str] = set()       # KEY_/BTN_ names, what the drawing lights up
+        self.kbm = kl.KbmState()                 # what the drawing shows (timers, arrow, wheel)
+        self.style_ = theme_style(Theme())
+        self.layout_ = layout_for(self.style_)
+        self.stream_live = False                 # True: the picture follows the daemon's stream instead
+        self.show_controller = False
         self.dirty = True
         self._last_pos = None
-        self._last_move = (0, 0)
-        self._wheel_flash = 0.0                 # perf_counter deadline
-        self._wheel_dir = 0
         self.setFocusPolicy(Qt.StrongFocus)
         self.setMouseTracking(True)
         self.setMinimumHeight(330)
@@ -167,8 +135,34 @@ class CpsArea(QWidget):
         return {Qt.LeftButton: "LMB", Qt.RightButton: "RMB", Qt.MiddleButton: "MMB",
                 Qt.BackButton: "MB4", Qt.ForwardButton: "MB5"}.get(b, "button")
 
+    # window events drive the picture only while the daemon's stream isn't there
+    def _pic_key(self, name, down, now):
+        if not self.stream_live:
+            self.kbm.key(name, down, now)
+
+    def _pic_move(self, dx, dy, now):
+        if not self.stream_live:
+            self.kbm.move(dx, dy, now)
+
+    def _pic_wheel(self, n, now):
+        if not self.stream_live:
+            self.kbm.wheel(n, now)
+
+    def set_show_controller(self, on: bool) -> None:
+        self.show_controller = on
+        base = layout_for(self.style_)
+        self.layout_ = kl.combine_layouts(base, kl.build_controller_layout(), 1.2) if on else base
+        self.dirty = True
+        self.update()
+
+    def set_stream_live(self, live: bool) -> None:
+        if live != self.stream_live:
+            self.stream_live = live
+            self.kbm.clear()
+            self.dirty = True
+
     def wants_repaint(self, now: float) -> bool:
-        return self.dirty or (self._wheel_dir != 0 and now > self._wheel_flash)
+        return self.dirty or needs_animation(self.kbm, self.style_, now)
 
     def mousePressEvent(self, e) -> None:
         self.clicks.count += 1
@@ -176,8 +170,10 @@ class CpsArea(QWidget):
         self.held_buttons.add(self._button_name(e.button()))
         name = MOUSE_NAMES.get(e.button())
         if name:
+            now = time.perf_counter()
             self.held_names.add(name)
-            self.log.add(time.perf_counter(), "kd", name)
+            self._pic_key(name, True, now)
+            self.log.add(now, "kd", name)
         self.dirty = True
         self.held_changed()
 
@@ -187,8 +183,10 @@ class CpsArea(QWidget):
         self.held_buttons.discard(self._button_name(e.button()))
         name = MOUSE_NAMES.get(e.button())
         if name:
+            now = time.perf_counter()
             self.held_names.discard(name)
-            self.log.add(time.perf_counter(), "ku", name)
+            self._pic_key(name, False, now)
+            self.log.add(now, "ku", name)
         self.dirty = True
         self.held_changed()
 
@@ -197,8 +195,9 @@ class CpsArea(QWidget):
         if self._last_pos is not None:
             dx, dy = round(pos.x() - self._last_pos.x()), round(pos.y() - self._last_pos.y())
             if dx or dy:
-                self.log.add(time.perf_counter(), "move", dx, dy)
-                self._last_move = (dx, dy)
+                now = time.perf_counter()
+                self.log.add(now, "move", dx, dy)
+                self._pic_move(dx, dy, now)
                 self.dirty = True
         self._last_pos = pos
 
@@ -214,9 +213,9 @@ class CpsArea(QWidget):
         n = e.angleDelta().y() / 120.0
         if n:
             n = int(n) if float(n).is_integer() else round(n, 2)
-            self.log.add(time.perf_counter(), "wheel", n)
-            self._wheel_dir = 1 if n > 0 else -1
-            self._wheel_flash = time.perf_counter() + 0.25
+            now = time.perf_counter()
+            self.log.add(now, "wheel", n)
+            self._pic_wheel(n, now)
             self.dirty = True
         e.accept()
 
@@ -226,8 +225,10 @@ class CpsArea(QWidget):
         self.keys.count += 1
         self.held_keys.add(QKeySequence(e.key()).toString() or str(e.key()))
         name = key_name_of(e)
+        now = time.perf_counter()
         self.held_names.add(name)
-        self.log.add(time.perf_counter(), "kd", name)
+        self._pic_key(name, True, now)
+        self.log.add(now, "kd", name)
         self.dirty = True
         self.held_changed()
 
@@ -236,8 +237,10 @@ class CpsArea(QWidget):
             return
         self.held_keys.discard(QKeySequence(e.key()).toString() or str(e.key()))
         name = key_name_of(e)
+        now = time.perf_counter()
         self.held_names.discard(name)
-        self.log.add(time.perf_counter(), "ku", name)
+        self._pic_key(name, False, now)
+        self.log.add(now, "ku", name)
         self.dirty = True
         self.held_changed()
 
@@ -247,6 +250,7 @@ class CpsArea(QWidget):
         now = time.perf_counter()
         for name in sorted(self.held_names):
             self.log.add(now, "ku", name)
+            self._pic_key(name, False, now)
         self.held_keys.clear()
         self.held_buttons.clear()
         self.held_names.clear()
@@ -265,85 +269,88 @@ class CpsArea(QWidget):
             fill = fill.lighter(112)
         r = QRectF(self.rect()).adjusted(1, 1, -1, -1)
         p.fillPath(rounded_rect_path(r, theme.corner_radius(12)), fill)
-        text = contrast_text(fill)
-        p.setPen(text)
-        small = QFont(self.font())
-        p.setFont(small)
+        p.setPen(contrast_text(fill))
+        p.setFont(QFont(self.font()))
         p.drawText(QRectF(r.left(), r.top() + 6, r.width(), 22), Qt.AlignCenter, self.hint)
-
         top = r.top() + 34
-        avail_h = r.bottom() - top - 8
-        # keyboard 18.5 units wide (main 15 + gap + nav 3) + mouse ~4.2 units
-        u = max(10.0, min((r.width() - 24) / (18.5 + 0.8 + 4.2), avail_h / 6.3))
-        gap = max(2.0, u * 0.08)
-        x0 = r.left() + 12
-        lit = theme.input_color()
-        key_fill = fill.lighter(140) if fill.lightness() < 128 else fill.darker(108)
-        edge = key_fill.darker(130)
-        kf = QFont(self.font())
-        kf.setPixelSize(max(8, int(u * 0.32)))
-        p.setFont(kf)
+        lay = self.layout_
+        u = max(8.0, min((r.width() - 24) / lay["w"], (r.bottom() - top - 8) / lay["h"]))
+        w, _h = picture_size(lay, self.style_, u)
+        paint_kbm(p, lay, self.style_, self.kbm, time.perf_counter(), unit=u,
+                  origin=(r.left() + (r.width() - w) / 2, top))
 
-        def draw_key(name, label, x, y, w):
-            rect = QRectF(x, y, w * u - gap, u - gap)
-            down = name in self.held_names
-            p.setPen(QPen(edge, 1))
-            p.setBrush(lit if down else key_fill)
-            p.drawRoundedRect(rect, u * 0.14, u * 0.14)
-            p.setPen(contrast_text(lit if down else key_fill))
-            p.drawText(rect, Qt.AlignCenter, label)
 
-        for ri, row in enumerate(KEY_ROWS):
-            x = x0
-            y = top + ri * u + (u * 0.35 if ri > 0 else 0)
-            for k in row:
-                if k is None:
-                    x += u * 0.5
+class StreamClient(QThread):
+    """Reads the daemon's live event stream (every real input, and what
+    macros send, marked) for the picture. Reconnects on its own; `live`
+    says whether it's connected. Times are perf_counter at receipt."""
+
+    event = Signal(str, str, str, float, float)   # src, type, name, a, b
+    live = Signal(bool)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._stop = False
+
+    def stop(self) -> None:
+        self._stop = True
+
+    def run(self) -> None:
+        import socket as _socket
+        import overlay_config as oc
+        from overlay_server import load_code_names
+        names = load_code_names()
+        was = None
+        while not self._stop:
+            sock = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
+            try:
+                sock.connect(str(oc.event_socket()))
+            except OSError:
+                sock.close()
+                if was is not False:
+                    self.live.emit(False)
+                    was = False
+                for _ in range(20):
+                    if self._stop:
+                        return
+                    self.msleep(100)
+                continue
+            sock.settimeout(0.3)
+            self.live.emit(True)
+            was = True
+            buf = b""
+            while not self._stop:
+                try:
+                    chunk = sock.recv(65536)
+                except _socket.timeout:
                     continue
-                draw_key(k[1], k[2], x, y, k[3])
-                x += k[3] * u
-        nav_x = x0 + 15.5 * u
-        for ri, col, k in NAV_KEYS:
-            draw_key(k[1], k[2], nav_x + col * u, top + ri * u + u * 0.35, 1.0)
-
-        # mouse
-        mx = nav_x + 3.8 * u
-        mw, mh = 2.6 * u, 4.0 * u
-        my = top + 0.6 * u
-        body = QRectF(mx, my, mw, mh)
-        p.setPen(QPen(edge, 1))
-        p.setBrush(key_fill)
-        p.drawRoundedRect(body, mw * 0.42, mw * 0.42)
-        bh = mh * 0.42
-
-        def part(rect, name, label=""):
-            down = name in self.held_names
-            p.setPen(QPen(edge, 1))
-            p.setBrush(lit if down else key_fill.lighter(112))
-            p.drawRoundedRect(rect, u * 0.2, u * 0.2)
-            if label:
-                p.setPen(contrast_text(lit if down else key_fill))
-                p.drawText(rect, Qt.AlignCenter, label)
-
-        gw = mw * 0.06
-        part(QRectF(mx + gw, my + gw, mw * 0.38, bh), "BTN_LEFT", "L")
-        part(QRectF(mx + mw * 0.56, my + gw, mw * 0.38, bh), "BTN_RIGHT", "R")
-        wheel = QRectF(mx + mw * 0.42, my + bh * 0.25, mw * 0.16, bh * 0.6)
-        flash = self._wheel_dir != 0 and time.perf_counter() <= self._wheel_flash
-        if not flash:
-            self._wheel_dir = 0
-        p.setPen(QPen(edge, 1))
-        p.setBrush(lit if ("BTN_MIDDLE" in self.held_names or flash) else key_fill.lighter(112))
-        p.drawRoundedRect(wheel, u * 0.1, u * 0.1)
-        if flash:
-            p.setPen(contrast_text(lit))
-            p.drawText(wheel, Qt.AlignCenter, "\u25b2" if self._wheel_dir > 0 else "\u25bc")
-        part(QRectF(mx - u * 0.18, my + mh * 0.42, u * 0.3, u * 0.6), "BTN_SIDE", "")
-        part(QRectF(mx - u * 0.18, my + mh * 0.42 + u * 0.7, u * 0.3, u * 0.6), "BTN_EXTRA", "")
-        p.setPen(text.darker(130))
-        p.setFont(small)
-        dx, dy = self._last_move
-        p.drawText(QRectF(mx - u, my + mh + 6, mw + 2 * u, 20), Qt.AlignCenter, f"last move  {dx:+d}, {dy:+d}")
+                except OSError:
+                    break
+                if not chunk:
+                    break
+                buf += chunk
+                *lines, buf = buf.split(b"\n")
+                for ln in lines:
+                    parts = ln.split()
+                    try:
+                        if parts[0] == b"h":
+                            for c in parts[2:]:
+                                self.event.emit("r", "k", names.get(int(c), f"CODE_{int(c)}"), 1, 0)
+                        elif len(parts) == 5:
+                            src, typ, a, b = parts[0].decode(), parts[2].decode(), int(parts[3]), int(parts[4])
+                            if typ == "k":
+                                self.event.emit(src, "k", names.get(a, f"CODE_{a}"), float(b), 0)
+                            elif typ == "a":
+                                ax = kl.AXIS_NAMES.get(a)
+                                if ax:
+                                    self.event.emit(src, "a", ax, b / 10000.0, 0)
+                            else:
+                                self.event.emit(src, typ, "", float(a), float(b))
+                    except (ValueError, IndexError):
+                        pass
+            sock.close()
+            self.live.emit(False)
+            was = False
 
 
 class VisualizerPage(PageBase):
@@ -385,6 +392,19 @@ class VisualizerPage(PageBase):
         self.content_layout.addWidget(self.area)
 
         row = QHBoxLayout()
+        self.source_lbl = dim_label("")
+        self.show_pad = CustomCheckBox("Show controller")
+        self.show_pad.setToolTip("Draw a game controller next to the mouse (needs the daemon: controller input "
+                                 "comes from it).")
+        self.show_pad.toggled.connect(self.area.set_show_controller)
+        src_row = QHBoxLayout()
+        src_row.addWidget(self.source_lbl, 1)
+        src_row.addWidget(self.show_pad)
+        self.content_layout.insertLayout(self.content_layout.indexOf(self.area) + 1, src_row)
+        self.stream = StreamClient(self)
+        self.stream.event.connect(self._stream_event)
+        self.stream.live.connect(self._stream_live)
+        self._stream_live(False)
         self.held = QLabel("Held: (nothing)")
         row.addWidget(self.held, stretch=1)
         reset = CustomButton("Reset")
@@ -428,12 +448,52 @@ class VisualizerPage(PageBase):
         self.macro_text.setPalette(pal)
         self.content_layout.addWidget(self.macro_text)
         self._log_rev = -1
+
+        from overlay_settings import OverlaySection
+        self.overlay = OverlaySection()
+        self.content_layout.addWidget(self.overlay)
         self.content_layout.addStretch(1)
 
         self.timer = QTimer(self)
         self.timer.setInterval(SAMPLE_MS)
         self.timer.timeout.connect(self._tick)
         self.timer.start()
+
+    def hideEvent(self, e) -> None:
+        self.overlay.flush()
+        self.stream.stop()
+        self.stream.wait(1000)
+        super().hideEvent(e)
+
+    def showEvent(self, e) -> None:
+        super().showEvent(e)
+        if not self.stream.isRunning():
+            self.stream._stop = False
+            self.stream.start()
+
+    def _stream_live(self, live: bool) -> None:
+        self.area.set_stream_live(live)
+        self.source_lbl.setText(
+            "Showing all input from the daemon -- yours in the input color, macros' in the output color."
+            if live else "Showing this window's input only (the daemon isn't running). Colors, controller and "
+                         "macro output need the daemon.")
+
+    def _stream_event(self, src, typ, name, a, b) -> None:
+        k = self.area.kbm
+        now = time.perf_counter()
+        if typ == "k":
+            k.key(name, a == 1, now, src)
+            if src == "r" and name in kl.PAD_BUTTONS and not self.show_pad.isChecked():
+                self.show_pad.setChecked(True)          # a controller showed up: show it
+        elif typ == "m":
+            k.move(a, b, now, src)
+        elif typ == "w":
+            k.wheel(a, now, src)
+        elif typ == "a":
+            k.axis(name, a, now, src)
+            if src == "r" and not self.show_pad.isChecked() and abs(a) > 0.5:
+                self.show_pad.setChecked(True)
+        self.area.dirty = True
 
     def reset(self) -> None:
         self.clicks.reset()
