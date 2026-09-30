@@ -42,6 +42,7 @@ class SmoothScrollArea(QScrollArea):
         # since only the BAR WIDGET's painting changed, not the
         # QAbstractSlider machinery underneath it.
         self.setVerticalScrollBar(CustomScrollBar(Qt.Vertical))
+        self.setHorizontalScrollBar(CustomScrollBar(Qt.Horizontal))   # same look as the vertical one
 
     def wheelEvent(self, event) -> None:
         bar = self.verticalScrollBar()

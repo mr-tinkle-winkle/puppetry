@@ -1809,3 +1809,13 @@ the previous Python daemon. The daemon is still a `systemd --user`
 service (`macro-daemon.service`) — after a config change made outside
 the GUI's own Save button, `systemctl --user restart macro-daemon` is
 what actually applies it. Logs: `journalctl --user -u macro-daemon`.
+
+
+## Session 15 — palette clipping + symmetric scroll bars
+
+- Palette reporters (`PaletteReporter`) shrink to fit and are packed into rows by measured width
+  (`Palette.USABLE_W`, wraps at the palette edge) instead of a fixed 2-per-row -- "mouse position" no longer
+  runs under the scroll bar. Palette margins are 6/6.
+- `CustomScrollBar` insets its track and handle by `INSET` (3px) on all sides so the gap is equal either side
+  of a vertical bar / above and below a horizontal one; `SmoothScrollArea` now installs the custom bar on the
+  horizontal axis too, so in-panel bars match.

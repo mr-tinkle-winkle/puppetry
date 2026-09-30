@@ -479,6 +479,14 @@ def block_tests(w, ed, model) -> None:
     out_sec = next(e for t, _c, e in __import__("block_editor").palette_sections(be) if t.startswith("Output"))
     check("a custom block shows up in the category it picked",
           any(x[0] == "block" and x[1].get("func") == "double_tap" for x in out_sec))
+    from PySide6.QtWidgets import QApplication as _QA
+    _QA.processEvents()
+    pw = be.palette_widget
+    check("palette content never wider than its viewport (no clipped reporters)",
+          pw.sizeHint().width() <= be.palette_scroll.viewport().width())
+    from ui_kit.custom_scrollbar import CustomScrollBar as _CSB
+    check("smooth scroll areas use matching custom bars on both axes",
+          isinstance(be.palette_scroll.horizontalScrollBar(), _CSB))
     be.add_blocks([bm.new_block("custom", defn=built)])
     check("custom blocks generate a call", ed.code_text().endswith("double_tap(KEY_A)\n"))
     if cfg.find_binary("puppetry-daemon"):

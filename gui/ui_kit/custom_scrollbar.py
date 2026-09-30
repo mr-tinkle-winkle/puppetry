@@ -23,6 +23,8 @@ from .theme import Theme
 
 
 class CustomScrollBar(QScrollBar):
+    INSET = 3
+
     def __init__(self, orientation=Qt.Vertical, parent=None):
         super().__init__(orientation, parent)
         appearance = get_settings()
@@ -38,7 +40,9 @@ class CustomScrollBar(QScrollBar):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
 
-        track_rect = QRectF(self.rect())
+        # Inset evenly on every side so the track sits centred in its gutter
+        # (same gap either side of a vertical bar, above/below a horizontal one).
+        track_rect = QRectF(self.rect()).adjusted(self.INSET, self.INSET, -self.INSET, -self.INSET)
         radius = self._appearance.rounded_corner_radius if self._appearance.rounded_corners_enabled else 0
         radius = min(radius, track_rect.width() / 2, track_rect.height() / 2) if radius else 0
         if radius:
@@ -51,6 +55,10 @@ class CustomScrollBar(QScrollBar):
         handle_rect = self.style().subControlRect(QStyle.CC_ScrollBar, opt, QStyle.SC_ScrollBarSlider, self)
         if handle_rect.isValid() and handle_rect.width() > 0 and handle_rect.height() > 0:
             handle_qrectf = QRectF(handle_rect)
+            if self.orientation() == Qt.Vertical:      # keep the handle inside the inset track, same gap both sides
+                handle_qrectf = handle_qrectf.adjusted(self.INSET, 0, -self.INSET, 0)
+            else:
+                handle_qrectf = handle_qrectf.adjusted(0, self.INSET, 0, -self.INSET)
             handle_radius = min(radius, handle_qrectf.width() / 2, handle_qrectf.height() / 2) if radius else 0
             bg = self._theme.accent()
             if self.isSliderDown():

@@ -279,7 +279,12 @@ class PaletteReporter(_DragSource):
     def __init__(self, ed: "BlockEditor", rep: Rep, tip: str, parent=None):
         super().__init__(parent)
         self.rep = rep
-        self.setPixmap(render_rep_pixmap(ed, rep, self.SCALE))
+        pm = render_rep_pixmap(ed, rep, self.SCALE)
+        max_w = Palette.USABLE_W
+        w = pm.width() / pm.devicePixelRatio()
+        if w > max_w:                                       # never wider than the palette
+            pm = render_rep_pixmap(ed, rep, self.SCALE * max_w / w)
+        self.setPixmap(pm)
         self.setToolTip(tip)
 
     def mime(self) -> QMimeData:
@@ -289,11 +294,15 @@ class PaletteReporter(_DragSource):
 
 
 class Palette(QWidget):
+    # pscroll is 300 wide; minus the scroll bar (28) and the two 6px margins
+    USABLE_W = 300 - 28 - 12
+    ROW_GAP = 6
+
     def __init__(self, editor: "BlockEditor", parent=None):
         super().__init__(parent)
         self.editor = editor
         self._lay = QVBoxLayout(self)
-        self._lay.setContentsMargins(4, 4, 8, 4)
+        self._lay.setContentsMargins(6, 4, 6, 4)
         self._lay.setSpacing(6)
         self._key = None
 
@@ -340,18 +349,24 @@ class Palette(QWidget):
                 w = QWidget()
                 rl = QHBoxLayout(w)
                 rl.setContentsMargins(0, 0, 0, 0)
-                rl.setSpacing(6)
+                rl.setSpacing(self.ROW_GAP)
                 for r in row_reps:
                     rl.addWidget(r)
                 rl.addStretch(1)
                 self._lay.addWidget(w)
                 row_reps.clear()
 
+            def add_rep(r):
+                # pack reporters left to right, wrapping when the next one
+                # would run past the palette's usable width
+                used = sum(x.sizeHint().width() for x in row_reps) + self.ROW_GAP * len(row_reps)
+                if row_reps and (used + r.sizeHint().width() > self.USABLE_W or len(row_reps) >= 3):
+                    flush_reps()
+                row_reps.append(r)
+
             for entry in entries:
                 if entry[0] == "rep":
-                    row_reps.append(PaletteReporter(ed, entry[1], entry[2]))
-                    if len(row_reps) == 2:
-                        flush_reps()
+                    add_rep(PaletteReporter(ed, entry[1], entry[2]))
                     continue
                 flush_reps()
                 if entry[0] == "block":
@@ -380,15 +395,9 @@ class Palette(QWidget):
                     self._wrap(b)
                 elif entry[0] == "vars":
                     chips = [PaletteReporter(ed, Rep("var", n), REP_TIPS["var"]) for n in allv[:16]]
-                    for i in range(0, len(chips), 3):
-                        w = QWidget()
-                        rl = QHBoxLayout(w)
-                        rl.setContentsMargins(0, 0, 0, 0)
-                        rl.setSpacing(6)
-                        for c in chips[i:i + 3]:
-                            rl.addWidget(c)
-                        rl.addStretch(1)
-                        self._lay.addWidget(w)
+                    for c in chips:
+                        add_rep(c)
+                    flush_reps()
                     nb = CustomButton("+ New variable")
                     nb.setToolTip("Make a variable name to drag into sockets (set it with a \"set\" block).")
                     nb.clicked.connect(ed.new_variable)
