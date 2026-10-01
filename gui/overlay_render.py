@@ -92,13 +92,36 @@ class Timeline:
 # ---------------------------------------------------------------------------
 # Frames
 # ---------------------------------------------------------------------------
-MODES = ("full", "keyboard", "mouse", "controller", "simple", "movement")
+MODES = ("full", "simple", "movement")      # plus "el:<element id>" (one element of the scene)
+
+
+def element_for(mode: str, cfg: dict) -> "str | None":
+    """Mode -> scene element id: "el:<id>", a bare element id, or (older
+    pieces) a type -- "keyboard", "mouse", "controller" -> the first element
+    of that type. None for full / simple / movement."""
+    if mode in ("full", "scene", "simple", "movement", "mouse_arrow"):
+        return None
+    els = cfg["scene"].get("elements", [])
+    if mode.startswith("el:"):
+        want = mode[3:]
+        if not any(e.get("id") == want for e in els):
+            raise RenderError(f"no element {want!r} in the scene ({', '.join(e.get('id', '?') for e in els)})")
+        return want
+    for e in els:
+        if e.get("id") == mode:
+            return mode
+    for e in els:
+        if e.get("type") == mode:
+            return e["id"]
+    raise RenderError(f"unknown overlay mode {mode!r} (full, simple, movement, el:<id>; elements: "
+                      f"{', '.join(e.get('id', '?') for e in els)})")
 
 
 class FrameMaker:
-    """mode: "full" (keyboard + mouse), "keyboard", "mouse" (mouse + arrow),
-    "controller" -- the picture pieces -- or "simple" (text list),
-    "movement" (the arrow alone)."""
+    """mode: "full" (the whole layout), "el:<id>" / an element id / an
+    element type (one element; a type the layout lacks gets a default one),
+    "simple" (text list) or "movement" (one movement view, per the movement
+    page's style)."""
 
     def __init__(self, mode: str, cfg: dict, scale: float = 1.0):
         from PySide6.QtGui import QGuiApplication, QImage
@@ -106,14 +129,26 @@ class FrameMaker:
         self.mode, self.cfg, self.scale = mode, cfg, scale
         if mode == "mouse_arrow":           # (pre-Session-18 name for "movement")
             mode = self.mode = "movement"
-        if mode in ("full", "keyboard", "mouse", "controller"):
+        try:
+            el = element_for(mode, cfg)
+        except RenderError:
+            if mode not in kl.ELEMENT_TYPES:
+                raise
+            # a piece of a type the layout doesn't show (e.g. "controller"
+            # for a clip when the visualizer has none): draw a default one
+            cfg = dict(cfg, scene={"elements": [kl.default_element({"elements": []}, mode)]})
+            self.cfg, el = cfg, mode
+        if mode in ("full", "scene") or el is not None:
+            self.mode = "picture"
             self.style = dict(cfg["style"])
-            self.layout = kl.build_piece(mode, self.style)
+            self.layout = kl.build_scene(cfg["scene"], only=el)
             w, h = kl.layout_pixel_size(self.layout, self.style)
         elif mode == "simple":
+            self.mode = "simple"
             self.style = dict(cfg["simple_style"])
             w, h = int(cfg["simple"].get("width", 900)), int(max(20, self.style["font_px"] * 1.6))
         elif mode == "movement":
+            self.mode = "movement"
             self.style = dict(cfg["movement_style"])
             w = h = int(self.style["size"])
         else:
@@ -127,10 +162,10 @@ class FrameMaker:
     def frame(self, state: "kl.KbmState", t: float) -> bytes:
         from kbm_paint import needs_animation
         style = self.style
-        if self.mode in ("full", "keyboard", "mouse", "controller"):
+        if self.mode == "picture":
             animating = needs_animation(state, style, t)
         elif self.mode == "movement":
-            animating = bool(style.get("arrow_fade_ms")) and (t - state.last_move_t) * 1000 <= style["arrow_fade_ms"] + 50
+            animating = kl.motion_animating(state, style, t)
         else:
             animating = bool(style.get("show_timers") and (state.held or state.out_held)) or (t - state.wheel_t) < 0.45 or bool(
                 style.get("history"))
@@ -153,13 +188,15 @@ class FrameMaker:
         p.setRenderHint(QPainter.TextAntialiasing)
         p.scale(self.scale, self.scale)
         w, h = self.w / self.scale, self.h / self.scale
-        if self.mode in ("full", "keyboard", "mouse", "controller"):
+        if self.mode == "picture":
             paint_kbm(p, self.layout, self.style, state, t)
         elif self.mode == "movement":
             bg = qcolor(self.style.get("background", "#00000000"))
             if bg.alpha():
                 p.fillRect(QRectF(0, 0, w, h), bg)
-            paint_arrow(p, QRectF(0, 0, w, h), state, self.style, t)
+            from kbm_paint import paint_motion
+            paint_motion(p, QRectF(0, 0, w, h), state, self.style, t, self.style.get("motion", "comet"),
+                         "movement", self.style.get("center", "tail"))
         else:
             self._paint_simple(p, state, t, w, h)
         p.end()

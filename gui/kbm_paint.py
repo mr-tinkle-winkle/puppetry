@@ -78,46 +78,75 @@ def _draw_text_fit(p: QPainter, fonts: _Fonts, rect: QRectF, text: str, px: floa
     p.drawText(rect, Qt.AlignCenter, text)
 
 
-def paint_arrow(p: QPainter, box: QRectF, state: "kl.KbmState", style: dict, now: float, fonts=None) -> None:
-    fade = style.get("arrow_fade_ms", 0)
-    if fade and (now - state.last_move_t) * 1000 > fade:
-        return
-    curve = kl.arrow_curve(state.burst)
-    if curve is None:
-        return
-    pts = kl.fit_arrow(curve, box.width(), box.height(), style.get("arrow_full_distance", 600))
-    pts = [QPointF(box.left() + x, box.top() + y) for x, y in pts]
-    if state.burst_src == "m":                  # a macro moved the mouse: output color
-        if not style.get("show_macro_output", True):
-            return
-        color = qcolor(style.get("macro_color", "#5a9ee0ff"))
-    else:
-        color = qcolor(style.get("arrow_color", "#e0955aff"))
-    width = float(style.get("arrow_width", 3.0))
-    head = max(width * 3.2, 8.0)
-    dx, dy = kl.arrow_head_dir([(q.x(), q.y()) for q in pts])
-    tip = pts[3]
-    # stop the shaft short of the tip so the round cap doesn't poke through the head
-    shaft_end = QPointF(tip.x() - dx * head * 0.7, tip.y() - dy * head * 0.7)
-    path = QPainterPath(pts[0])
-    path.cubicTo(pts[1], pts[2], shaft_end)
-    p.setBrush(Qt.NoBrush)
-    p.setPen(QPen(color, width, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
-    p.drawPath(path)
-    nx, ny = -dy, dx
-    back = QPointF(tip.x() - dx * head, tip.y() - dy * head)
-    tri = QPolygonF([tip, QPointF(back.x() + nx * head * 0.55, back.y() + ny * head * 0.55),
-                     QPointF(back.x() - nx * head * 0.55, back.y() - ny * head * 0.55)])
+def _mix(a: QColor, b: QColor, f: float, alpha: float = 1.0) -> QColor:
+    c = _blend(a, b, f)
+    c.setAlpha(round(c.alpha() * max(0.0, min(1.0, alpha))))
+    return c
+
+
+def paint_motion(p: QPainter, box: QRectF, state: "kl.KbmState", style: dict, now: float, kind: str = "comet",
+                 view_key: str = "", center: str = "tail") -> None:
+    """A movement view (Comet / Mousepad / Joystick) inside `box`, from
+    kbm_layout.motion_frame(): tapering trail fading over its oldest
+    quarter, the cursor dot, click rings (left out, right in, middle and side
+    buttons as arcs) and wheel chevrons. Your movement in arrow_color, a
+    macro's in macro_color, blended where both contributed."""
+    size = min(box.width(), box.height())
+    ox, oy = box.left() + (box.width() - size) / 2, box.top() + (box.height() - size) / 2
+    fr = kl.motion_frame(state, kind, size, style, now, view_key or kind, center)
+    real = qcolor(style.get("arrow_color", "#e0955aff"))
+    macro = qcolor(style.get("macro_color", "#5a9ee0ff"))
+    if not style.get("show_macro_output", True):
+        macro = real
+    p.save()
+    p.setClipRect(QRectF(ox, oy, size, size))
+    tr = fr["trail"]
+    for i in range(1, len(tr)):
+        x0, y0, w0, a0, m0 = tr[i - 1]
+        x1, y1, w1, a1, m1 = tr[i]
+        if abs(x1 - x0) < 0.01 and abs(y1 - y0) < 0.01:
+            continue
+        p.setPen(QPen(_mix(real, macro, (m0 + m1) / 2, (a0 + a1) / 2), (w0 + w1) / 2, Qt.SolidLine, Qt.RoundCap,
+                      Qt.RoundJoin))
+        p.drawLine(QPointF(ox + x0, oy + y0), QPointF(ox + x1, oy + y1))
+    dx, dy, dr, dm = fr["dot"]
+    c = QPointF(ox + dx, oy + dy)
     p.setPen(Qt.NoPen)
-    p.setBrush(color)
-    p.drawPolygon(tri)
-    if style.get("show_move_text"):
-        fonts = fonts or _Fonts(style.get("font_family", ""), False)
-        font, _fm = fonts.get(max(9, box.height() * 0.12))
-        p.setFont(font)
-        p.setPen(qcolor(style.get("text_color", "#ffffffff")))
-        p.drawText(QRectF(box.left(), box.bottom() - box.height() * 0.16, box.width(), box.height() * 0.16),
-                   Qt.AlignCenter, f"{curve['mag']:.0f} px")
+    p.setBrush(_mix(real, macro, dm))
+    p.drawEllipse(c, dr, dr)
+    if fr["held"]:
+        hc = real if fr["held"] == "r" else macro
+        p.setBrush(Qt.NoBrush)
+        p.setPen(QPen(hc, max(1.5, dr * 0.3)))
+        p.drawEllipse(c, dr * 1.55, dr * 1.55)
+    for ring in fr["rings"]:
+        col = _mix(real, macro, 1.0 if ring["src"] == "m" else 0.0, ring["alpha"])
+        p.setBrush(Qt.NoBrush)
+        p.setPen(QPen(col, ring["width"], Qt.SolidLine, Qt.RoundCap))
+        r = ring["r"]
+        rect = QRectF(c.x() - r, c.y() - r, 2 * r, 2 * r)
+        if ring["arcs"] is None:
+            p.drawEllipse(rect)
+        else:
+            for mid, span in ring["arcs"]:
+                p.drawArc(rect, round((mid - span / 2) * 16), round(span * 16))
+    for ch in fr["chevrons"]:
+        col = _mix(real, macro, 1.0 if ch["src"] == "m" else 0.0, ch["alpha"])
+        sz = ch["size"]
+        x, y = ox + ch["x"], oy + ch["y"]
+        tip = -sz * 0.35 if ch["dir"] > 0 else sz * 0.35
+        p.setPen(QPen(col, max(1.5, sz * 0.22), Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        p.setBrush(Qt.NoBrush)
+        path = QPainterPath(QPointF(x - sz * 0.5, y - tip))
+        path.lineTo(QPointF(x, y + tip))
+        path.lineTo(QPointF(x + sz * 0.5, y - tip))
+        p.drawPath(path)
+    p.restore()
+
+
+def paint_arrow(p: QPainter, box: QRectF, state: "kl.KbmState", style: dict, now: float, fonts=None) -> None:
+    """(Old name.) The movement view under the mouse: now a Comet."""
+    paint_motion(p, box, state, style, now, "comet", "arrow")
 
 
 def paint_kbm(p: QPainter, layout: dict, style: dict, state: "kl.KbmState", now: float, *, unit=None,
@@ -128,8 +157,8 @@ def paint_kbm(p: QPainter, layout: dict, style: dict, state: "kl.KbmState", now:
     u = float(unit or style["unit"])
     pad = float(style.get("padding", 0))
     ox, oy = origin[0] + pad, origin[1] + pad
-    gap = u * style.get("gap", 8) / 100.0
-    rad = u * style.get("radius", 14) / 100.0
+    base_gap = gap = u * style.get("gap", 8) / 100.0
+    base_rad = rad = u * style.get("radius", 14) / 100.0
     key_c = qcolor(style["key_color"])
     edge = qcolor(style["key_outline"])
     ow = float(style.get("outline_width", 1.0))
@@ -138,7 +167,7 @@ def paint_kbm(p: QPainter, layout: dict, style: dict, state: "kl.KbmState", now:
     text_c = qcolor(style["text_color"])
     ptext_c = qcolor(style["pressed_text_color"])
     fonts = _Fonts(style.get("font_family", ""), bool(style.get("bold")))
-    fpx = u * style.get("font_scale", 32) / 100.0
+    base_fpx = fpx = u * style.get("font_scale", 32) / 100.0
     fade_ms = style.get("release_fade_ms", 0)
     show_timers = style.get("show_timers", True)
     timer_delay = style.get("timer_delay_ms", 0) / 1000.0
@@ -294,10 +323,16 @@ def paint_kbm(p: QPainter, layout: dict, style: dict, state: "kl.KbmState", now:
 
     for it in layout["items"]:
         kind = it["kind"]
+        fs = float(it.get("fs", 1.0))              # the item's element scale (Edit mode)
+        fpx, gap, rad = base_fpx * fs, base_gap * fs, base_rad * fs
         r = QRectF(ox + it["x"] * u, oy + it["y"] * u, it["w"] * u, it["h"] * u)
         if kind == "arrow_box":
             if style.get("show_arrow", True):
                 paint_arrow(p, r, state, style, now, fonts)
+            continue
+        if kind == "motion":
+            paint_motion(p, r, state, style, now, it.get("mode", "comet"), it.get("el") or it.get("mode", ""),
+                         it.get("center", "tail"))
             continue
         if kind == "mouse_body":
             p.setPen(QPen(edge, ow) if ow > 0 else Qt.NoPen)
@@ -360,8 +395,7 @@ def needs_animation(state: "kl.KbmState", style: dict, now: float) -> bool:
         return True
     if (now - state.wheel_t) * 1000 <= style.get("wheel_flash_ms", 250) + 50:
         return True
-    af = style.get("arrow_fade_ms", 0)
-    return bool(af) and (now - state.last_move_t) * 1000 <= af + 50
+    return kl.motion_animating(state, style, now)
 
 
 class KbmView(QWidget):

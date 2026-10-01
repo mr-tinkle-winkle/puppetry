@@ -85,6 +85,28 @@ bool device_has_rel(const std::string& path, int code) {
     return ok && has_bit(relbits, code);
 }
 
+int device_vendor(const std::string& path) {
+    int fd = ::open(path.c_str(), O_RDONLY | O_NONBLOCK);
+    if (fd < 0) return -1;
+    struct input_id id = {};
+    bool ok = ioctl(fd, EVIOCGID, &id) >= 0;
+    ::close(fd);
+    return ok ? id.vendor : -1;
+}
+
+std::string describe_device(const std::string& path) {
+    std::string kinds;
+    auto add = [&](const char* k) { if (!kinds.empty()) kinds += ","; kinds += k; };
+    int letters = 0;
+    for (int c = KEY_A; c <= KEY_Z; ++c) letters += device_has_key(path, c);
+    if (letters >= 20) add("keyboard");
+    else if (device_has_key(path, KEY_ENTER) || device_has_key(path, KEY_ESC)) add("keys");
+    if (device_has_key(path, BTN_LEFT) && device_has_rel(path, REL_X)) add("mouse");
+    if (device_has_key(path, BTN_SOUTH) && device_has_abs(path, ABS_X)) add("gamepad");
+    if (device_has_key(path, BTN_TOUCH)) add("touch");
+    return kinds.empty() ? "other" : kinds;
+}
+
 bool device_has_abs(const std::string& path, int code) {
     int fd = ::open(path.c_str(), O_RDONLY | O_NONBLOCK);
     if (fd < 0) return false;

@@ -90,6 +90,23 @@ class SettingsPage(PageBase):
         self.watch_controller.toggled.connect(lambda on: (model.set_pref("watch_controller", on), model.mark_dirty()))
         mark_input(self.watch_controller)
         dl.addWidget(self.watch_controller)
+        self.watch_steam = CustomCheckBox("Watch Steam Controller / Steam Deck input")
+        self.watch_steam.setChecked(bool(model.state.get("watch_steam_devices", True)))
+        self.watch_steam.setToolTip("Outside games, Steam turns its controllers into their OWN keyboard and mouse\n"
+                                    "(desktop mode), separate from the keyboard and mouse above -- this watches\n"
+                                    "those too, so their presses work in combos and show in the visualizer.\n"
+                                    "In a game (or Big Picture) the controller appears as a real controller instead.")
+        self.watch_steam.toggled.connect(lambda on: (model.set_pref("watch_steam_devices", on), model.mark_dirty()))
+        mark_input(self.watch_steam)
+        dl.addWidget(self.watch_steam)
+        self.watch_all = CustomCheckBox("Watch every input device (keyboards, mice, pads, remotes...)")
+        self.watch_all.setChecked(bool(model.state.get("watch_all_devices", False)))
+        self.watch_all.setToolTip("Read every input device besides the ones above, read-only: their keys work in\n"
+                                  "combos and show in the visualizer. ignore() still only blocks the main keyboard\n"
+                                  "and mouse.")
+        self.watch_all.toggled.connect(lambda on: (model.set_pref("watch_all_devices", on), model.mark_dirty()))
+        mark_input(self.watch_all)
+        dl.addWidget(self.watch_all)
         self.virtual_controller = CustomCheckBox("Virtual controller (macros can press controller buttons and move sticks)")
         self.virtual_controller.setChecked(bool(model.state.get("virtual_controller", False)))
         self.virtual_controller.setToolTip("Creates an extra controller for macros to drive: tap(BTN_SOUTH),\n"

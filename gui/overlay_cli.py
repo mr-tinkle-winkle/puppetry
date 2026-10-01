@@ -5,7 +5,7 @@ puppetry-overlay -- the overlay helper and its tools.
     puppetry-overlay status                 JSON: pages, replay-buffer file + length, OBS connection
     puppetry-overlay snapshot OUT           copy the replay-buffer file right now (freeze a clip's input)
     puppetry-overlay render --start T --end T OUT [--buffer F] [--mode M] [--fps N] [--scale S]
-                            modes: full (keyboard + mouse), keyboard, mouse, controller, simple, movement
+                            modes: full (the arrangement), el:<element id>, simple, movement
     puppetry-overlay composite --clip IN (--clip-end T | --start T) OUT [--buffer F] [--position P]
                                [--scale-frac F] [--margin PX] [--mode M] [--offset-ms MS] [--crf N]
     puppetry-overlay apply --clip IN --overlay OV OUT [--clip-end T --overlay-start T] [--position P]
@@ -44,7 +44,7 @@ def main(argv=None) -> int:
     def common(p):
         p.add_argument("--buffer", help="input buffer file (default: the live one)")
         p.add_argument("--mode", default="full",
-                       choices=("full", "keyboard", "mouse", "controller", "simple", "movement"))
+                       help="full (the whole arrangement), simple, movement, or el:<element id> (see status)")
         p.add_argument("--offset-ms", type=float, default=0.0,
                        help="shift inputs later (+) or earlier (-) relative to the video")
 
@@ -160,19 +160,25 @@ def main(argv=None) -> int:
     return 0
 
 
-SOURCE_NAMES = {"full": "Puppetry Input Overlay", "keyboard": "Puppetry Keyboard", "mouse": "Puppetry Mouse",
-                "controller": "Puppetry Controller", "simple": "Puppetry Input List",
+SOURCE_NAMES = {"full": "Puppetry Input Overlay", "simple": "Puppetry Input List",
                 "movement": "Puppetry Mouse Movement"}
 
 
 def obs_sources(cfg: dict) -> list:
-    """Browser Source definitions for every enabled page, sized to it."""
+    """Browser Source definitions for every enabled page (and, with "each
+    element as its own source", every element), sized to it."""
     import kbm_layout as kl
     import overlay_config as oc
     out = []
+    els = oc.element_urls(cfg)
     for page, url in oc.urls(cfg).items():
-        if page in ("full", "keyboard", "mouse", "controller"):
-            w, h = kl.piece_pixel_size(page, cfg["style"])
+        if page == "full":
+            if els:
+                for el_id, el_url in els.items():
+                    w, h = kl.layout_pixel_size(kl.build_scene(cfg["scene"], only=el_id), cfg["style"])
+                    out.append({"name": f"Puppetry: {el_id}", "url": el_url, "width": w, "height": h})
+                continue
+            w, h = kl.layout_pixel_size(kl.build_scene(cfg["scene"]), cfg["style"])
         elif page == "simple":
             w, h = int(cfg["simple"]["width"]), int(max(20, cfg["simple_style"]["font_px"] * 1.6))
         else:

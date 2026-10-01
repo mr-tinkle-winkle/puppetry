@@ -94,7 +94,29 @@ session to take effect.
   search. Click a command to see what it does; key names are drawn on a
   keyboard (hover for every alias).
 - Held keys in the Input Visualizer show how long they've been held (to the
-  millisecond), and a curved arrow under the mouse shows your last movement.
+  millisecond).
+- **Edit layout** (Input Visualizer) arranges what's drawn: drag to move,
+  drag the corner square to resize, right-click for options. **+ Add
+  element** adds any number of:
+  - keyboards: full size, 80% (TKL), 60%, or the left half for gaming;
+  - mice: classic, gaming (extra side buttons), minimal, or buttons only;
+  - controllers (Xbox / PlayStation / Nintendo labels);
+  - mouse movement views, all square with no background:
+    - *Comet*: a trail behind a dot, centered on the tail (default) or the
+      head;
+    - *Mousepad*: the dot moves around a virtual mousepad that re-centers
+      after a pause;
+    - *Joystick*: the dot leans toward the direction and speed of movement.
+    The trail lasts a set time and thins and fades toward its end. Left
+    click sends a ring outward, right click inward, middle click two short
+    arcs up and down, side buttons an arc toward their side; scrolling
+    stacks chevrons above or below the dot. Auto zoom (on by default) zooms
+    out when movement would leave the view.
+- **Steam Controller / Steam Deck**: outside games Steam presents these as
+  its own keyboard and mouse. Their input is watched by default (*Watch
+  Steam Controller / Steam Deck input*, Settings > Devices), and *Watch
+  every input device* covers anything else. `puppetry-daemon
+  --list-devices` lists every input device and whether Puppetry watches it.
 - **Game controllers** are picked up automatically (Settings > Devices):
   their buttons work in key combos (`BTN_SOUTH`, `BTN_TL`, ...), `getAxis("LX")`
   reads a stick or trigger, and with *Virtual controller* on, macros can
@@ -104,14 +126,16 @@ session to take effect.
     `http://127.0.0.1:17380/`. Add it to OBS as a Browser Source, or press
     **Add to OBS** (needs OBS's WebSocket server: Tools > WebSocket Server
     Settings).
-  - *Keyboard and mouse as separate pieces* splits that page in two
-    (`:17383`, `:17384`); *Controller* is its own page (`:17385`).
+  - *Each element as its own OBS source* also serves every element of the
+    layout on its own page (`:17380/el/<id>`), so each can be placed
+    separately in OBS.
   - *Simple input visualizer* (`:17381`) is a one-line list of what's held;
-    its *Mouse movement* toggle adds an arrow-only page (`:17382`).
-  - Your own input shows in orange, what macros press or move in blue.
-  - **Customize…** changes colors, sizes, fonts, timers, the arrow and what's
-    shown, with a live preview. Changes reach OBS immediately.
-  - *Layered Replay Buffer* keeps your input in memory for as long as OBS's
+    its *Mouse movement* toggle adds a page with one movement view
+    (`:17382`; Comet, Mousepad or Joystick under Customize).
+  - Real input shows in orange, what macros press or move in blue.
+  - **Customize…** changes colors, sizes, fonts, timers, the movement view
+    and what's shown, with a live preview. Changes reach OBS immediately.
+  - *Layered Replay Buffer* keeps input in memory for as long as OBS's
     replay buffer, so afterglow can put the overlay on saved clips. The same
     look can be rendered by hand with `puppetry-overlay composite --clip
     clip.mp4 --clip-end <unix time> out.mp4`.

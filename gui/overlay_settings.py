@@ -51,7 +51,7 @@ def demo_state(clock) -> kl.KbmState:
         s.move(-12, 0, t + i * 0.01)
     for i in range(10):
         s.move(0, -9, t + 0.2 + i * 0.01)
-    s.last_move_t = now            # keep the arrow on screen even with a fade set
+    s.last_move_t = now
     s.key("KEY_E", True, now - 0.3, "m")          # pressed by a macro: output color
     s.key("BTN_SOUTH", True, now - 0.52)
     s.axis("LX", 0.7, now)
@@ -141,9 +141,10 @@ class StyleForm(QWidget):
 class _Preview(QWidget):
     """Checkerboard (= transparent) + the page drawn with the real painter."""
 
-    def __init__(self, page: str, style: dict, parent=None):
+    def __init__(self, page: str, style: dict, parent=None, scene=None):
         super().__init__(parent)
         self.page, self.style_ = page, dict(style)
+        self.scene = scene
         self.clock = time.perf_counter
         self.state = demo_state(self.clock)
         self.setMinimumSize(420, 220)
@@ -157,6 +158,9 @@ class _Preview(QWidget):
         self.update()
 
     def paintEvent(self, _e) -> None:
+        if self.clock() - getattr(self, "_born", 0) > 1.6:       # replay the demo movement
+            self._born = self.clock()
+            self.state = demo_state(self.clock)
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
         r = QRectF(self.rect())
@@ -168,7 +172,7 @@ class _Preview(QWidget):
         now = self.clock()
         if self.page == "full":
             from kbm_paint import layout_for, paint_kbm, picture_size
-            lay = kl.combine_layouts(layout_for(self.style_), kl.build_controller_layout(), 1.2)
+            lay = kl.build_scene(self.scene or kl.DEFAULT_SCENE)
             u = min((r.width() - 16) / lay["w"], (r.height() - 16) / lay["h"], float(self.style_["unit"]))
             w, h = picture_size(lay, self.style_, u)
             paint_kbm(p, lay, self.style_, self.state, now, unit=u, origin=((r.width() - w) / 2, (r.height() - h) / 2))
@@ -183,7 +187,9 @@ class _Preview(QWidget):
             bg = qcolor(self.style_.get("background", "#00000000"))
             if bg.alpha():
                 p.fillRect(box, bg)
-            paint_arrow(p, box, self.state, self.style_, now)
+            from kbm_paint import paint_motion
+            paint_motion(p, box, self.state, self.style_, now, self.style_.get("motion", "comet"), "preview",
+                         self.style_.get("center", "tail"))
 
 
 class CustomizeDialog(QDialog):
@@ -211,7 +217,7 @@ class CustomizeDialog(QDialog):
         root.addWidget(scroll)
         right = QVBoxLayout()
         right.addWidget(dim_label("Preview (checkers = transparent). Changes reach OBS right away."))
-        self.preview = _Preview(page, section.cfg[key])
+        self.preview = _Preview(page, section.cfg[key], scene=section.cfg.get("scene"))
         right.addWidget(self.preview, 1)
         reset = CustomButton("Reset to defaults")
         reset.clicked.connect(self._reset)
@@ -227,6 +233,8 @@ class CustomizeDialog(QDialog):
 
     def _changed(self, k, v) -> None:
         key = self.KEYS[self.page]
+        if k == "screen_height":
+            self.section.cfg["screen_height_user"] = True
         self.section.cfg[key][k] = v
         self.preview.set_style(self.section.cfg[key])
         self.section.changed(restart=False)
@@ -249,6 +257,13 @@ class OverlaySection(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.cfg = oc.load()
+        if not self.cfg.get("screen_height_user"):              # the movement views' scale: this screen
+            scr = QApplication.primaryScreen()
+            if scr is not None:
+                hpx = int(scr.size().height() * scr.devicePixelRatio())
+                if hpx > 0:
+                    self.cfg["style"]["screen_height"] = hpx
+                    self.cfg["movement_style"]["screen_height"] = hpx
         self._saved_sig = self._restart_sig()
         theme = Theme()
         self.relay = _Relay()
@@ -275,31 +290,29 @@ class OverlaySection(QWidget):
         # --- full (keyboard + mouse), or split into pieces
         self.full_toggle, self.full_port, self.full_url = self._page_row(
             lay, "Expose Input Visualizer to OBS", "full", "port", "full",
-            "The keyboard + mouse picture, with hold timers and the movement arrow.")
+            "The visualizer's arrangement (keyboard, mouse, controller, movement views), with hold timers.")
         srow = QHBoxLayout()
         srow.addSpacing(28)
-        self.split_toggle = CustomCheckBox("Keyboard and mouse as separate pieces")
-        self.split_toggle.setToolTip("Two pages instead of one, so each can be placed and sized on its own in OBS "
-                                     "(and in afterglow).")
-        self.split_toggle.setChecked(bool(self.cfg["full"].get("split")))
-        self.split_toggle.toggled.connect(lambda v: self._set("full", "split", bool(v)))
+        self.split_toggle = CustomCheckBox("Each element as its own OBS source")
+        self.split_toggle.setToolTip("Every element of the arrangement (keyboard, mouse, controller, movement views) "
+                                     "also gets its own page, so OBS -- and afterglow -- can place and size each one.")
+        self.split_toggle.setChecked(bool(self.cfg["full"].get("element_sources")))
+        self.split_toggle.toggled.connect(lambda v: self._set("full", "element_sources", bool(v)))
         srow.addWidget(self.split_toggle)
         srow.addStretch(1)
         lay.addLayout(srow)
-        self.keyboard_port, self.keyboard_url = self._sub_row(lay, "Keyboard", "full", "keyboard_port", "keyboard")
-        self.mousepiece_port, self.mousepiece_url = self._sub_row(lay, "Mouse", "full", "mouse_port", "mouse")
-        # --- controller piece
-        self.controller_toggle, self.controller_port, self.controller_url = self._page_row(
-            lay, "Controller", "controller", "port", "full",
-            "A game controller: buttons, bumpers, triggers (filled as far as they're pressed), sticks (move with "
-            "yours) and the d-pad. Same look as the input overlay (Customize).")
+        self.element_box = QVBoxLayout()
+        lay.addLayout(self.element_box)
+        lay.addWidget(dim_label("What's shown and where: \"Edit layout\" above the visualizer (add the controller, "
+                                "a different keyboard size or mouse, Comet / Mousepad / Joystick movement)."))
+
         # --- simple
         self.simple_toggle, self.simple_port, self.simple_url = self._page_row(
             lay, "Simple input visualizer", "simple", "port", "simple",
             "Just a line of text: what's held right now (Ctrl + Shift + A + LMB).")
         mrow = QHBoxLayout()
         mrow.addSpacing(28)
-        self.mouse_toggle = CustomCheckBox("Mouse movement (a separate page with just the movement arrow)")
+        self.mouse_toggle = CustomCheckBox("Mouse movement (a separate page with one movement view)")
         self.mouse_toggle.setChecked(bool(self.cfg["simple"].get("mouse_movement")))
         self.mouse_toggle.toggled.connect(self._mouse_toggled)
         mrow.addWidget(self.mouse_toggle)
@@ -444,22 +457,40 @@ class OverlaySection(QWidget):
     def _sync_urls(self) -> None:
         c = self.cfg
         on = oc.pages(c)
-        split = bool(c["full"].get("split"))
         for lbl, page, port in ((self.full_url, "full", c["full"]["port"]),
-                                (self.keyboard_url, "keyboard", c["full"]["keyboard_port"]),
-                                (self.mousepiece_url, "mouse", c["full"]["mouse_port"]),
-                                (self.controller_url, "controller", c["controller"]["port"]),
                                 (self.simple_url, "simple", c["simple"]["port"]),
                                 (self.mouse_url, "movement", c["simple"]["mouse_port"])):
             lbl.setText(f"http://127.0.0.1:{port}/")
             lbl.setEnabled(page in on)
             lbl._copy.setEnabled(page in on)
-        self.full_port.setEnabled(not split)
         self.split_toggle.setEnabled(bool(c["full"]["enabled"]))
-        for w in (self.keyboard_port, self.mousepiece_port):
-            w.setEnabled(split)
         self.mouse_toggle.setEnabled(bool(c["simple"]["enabled"]))
         self.add_btn.setEnabled(bool(on))
+        # one row per element when they're separate sources
+        while self.element_box.count():
+            it = self.element_box.takeAt(0)
+            if it.layout():
+                while it.layout().count():
+                    w = it.layout().takeAt(0).widget()
+                    if w:
+                        w.setParent(None)
+                        w.deleteLater()
+        self.element_urls = {}
+        for el_id, url in oc.element_urls(c).items():
+            row = QHBoxLayout()
+            row.addSpacing(56)
+            row.addWidget(QLabel(el_id))
+            lbl = self._url_widgets(row, None)
+            lbl.setText(url)
+            self.element_urls[el_id] = lbl
+            row.addStretch(1)
+            self.element_box.addLayout(row)
+
+    def set_scene(self, scene: dict) -> None:
+        """The visualizer's Edit mode changed the arrangement."""
+        self.cfg["scene"] = scene
+        self._sync_urls()
+        self.changed(restart=False)
 
     # -- saving -------------------------------------------------------------------
     def _restart_sig(self):

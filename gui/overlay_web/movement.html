@@ -28,12 +28,12 @@ P.onconfig = resize;
 
 function frame() {
   const now = nowS();
-  if (side && (P.dirty || arrowAnimating(P.style, now))) {
+  if (side && (P.dirty || motionAnimating(P.style, now))) {
     P.dirty = false;
     ctx.clearRect(0, 0, side, side);
     const bg = cssColor(P.style.background);
     if (bg !== "rgba(0,0,0,0)") { ctx.fillStyle = bg; ctx.fillRect(0, 0, side, side); }
-    drawArrow(ctx, 0, 0, side, side, P.style, now);
+    drawMotion(ctx, 0, 0, side, side, P.style, now, P.style.motion || "comet", "movement", P.style.center || "tail");
   }
   requestAnimationFrame(frame);
 }

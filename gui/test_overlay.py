@@ -67,42 +67,118 @@ def layout_tests():
     check("timer: minutes", kl.format_hold(75.5) == "1:15.500")
     check("timer: float noise doesn't lose a millisecond", kl.format_hold(2.1 - 1.0) == "1.100")
 
-    # arrow: the cubic passes through the burst's positions at 1/3 and 2/3 of its duration
-    pts = [(0.0, 0.0, 0.0)]
-    for i in range(1, 11):
-        pts.append((i * 0.1, -10.0 * i, 0.0))             # left for 1 s
-    for i in range(1, 6):
-        pts.append((1.0 + i * 0.1, -100.0, -10.0 * i))    # then up for 0.5 s
-    c = kl.arrow_curve(pts)
+    # keyboard presets + mouse looks
+    sizes = {p: kl.keyboard_layout(p) for p in kl.KEYBOARD_PRESETS}
+    check("presets: full > 80% > 60% > half, by width",
+          sizes["full"]["w"] > sizes["tkl"]["w"] > sizes["60"]["w"] > sizes["half"]["w"])
+    names = {p: {i["name"] for i in l["items"]} for p, l in sizes.items()}
+    check("presets: full has the numpad, 80% the print-screen row, 60% neither",
+          "KEY_KP5" in names["full"] and "KEY_KP5" not in names["tkl"] and "KEY_SYSRQ" in names["tkl"]
+          and "KEY_SYSRQ" not in names["60"] and "KEY_F1" not in names["60"] and "KEY_UP" not in names["60"])
+    check("presets: half is the gaming side (WASD yes, P no)", {"KEY_W", "KEY_A", "KEY_S", "KEY_D"} <= names["half"]
+          and "KEY_P" not in names["half"] and "KEY_6" not in names["half"])
+    kp_plus = next(i for i in sizes["full"]["items"] if i["name"] == "KEY_KPPLUS")
+    check("presets: numpad + and Enter are two keys tall", kp_plus["h"] == 2)
+    for look in kl.MOUSE_LOOKS:
+        ml = kl.mouse_layout(look)
+        check(f"mouse look {look}: has left and right buttons",
+              {"BTN_LEFT", "BTN_RIGHT"} <= {i["name"] for i in ml["items"]} and min(i["x"] for i in ml["items"]) == 0)
 
-    def bez(u):
-        p0, c1, c2, p3 = c["p0"], c["c1"], c["c2"], c["p3"]
-        return tuple((1 - u) ** 3 * p0[k] + 3 * (1 - u) ** 2 * u * c1[k] + 3 * (1 - u) * u ** 2 * c2[k] + u ** 3 * p3[k]
-                     for k in (0, 1))
-    b1 = kl._pos_at(pts, 0.5)
-    b2 = kl._pos_at(pts, 1.0)
-    check("arrow: interpolates the path at 1/3 and 2/3 of the time",
-          all(abs(a - b) < 1e-6 for a, b in zip(bez(1 / 3), b1)) and all(abs(a - b) < 1e-6 for a, b in zip(bez(2 / 3), b2)))
-    check("arrow: points along the net movement", c["p3"] == (-100.0, -50.0) and abs(c["mag"] - (100 ** 2 + 50 ** 2) ** .5) < 1e-9)
-    # left-then-up: end bends up; start leaves horizontally
-    end_dir = kl.arrow_head_dir([c["p0"], c["c1"], c["c2"], c["p3"]])
-    start = (c["c1"][0] - c["p0"][0], c["c1"][1] - c["p0"][1])
-    check("arrow: left then up -> the END curves up", end_dir[1] < -0.3 and abs(start[1]) < abs(start[0]))
-    pts2 = [(0.0, 0.0, 0.0)] + [(i * 0.1, 0.0, -10.0 * i) for i in range(1, 6)] + \
-           [(0.5 + i * 0.1, -10.0 * i, -50.0) for i in range(1, 11)]
-    c2 = kl.arrow_curve(pts2)
-    s2 = (c2["c1"][0], c2["c1"][1])
-    e2 = kl.arrow_head_dir([c2["p0"], c2["c1"], c2["c2"], c2["p3"]])
-    check("arrow: up then left -> the START curves up, the end points left", s2[1] < 0 and abs(s2[1]) > abs(s2[0]) * 0.5
-          and e2[0] < -0.7)
-    check("arrow: no arrow for a tiny movement", kl.arrow_curve([(0, 0, 0), (0.1, 1, 0)]) is None)
-    fitted = kl.fit_arrow(c, 100, 80)
-    xs, ys = [p[0] for p in fitted], [p[1] for p in fitted]
-    check("arrow: fitted inside its box", min(xs) >= 0 and max(xs) <= 100 and min(ys) >= 0 and max(ys) <= 80)
-    long_c = kl.arrow_curve([(0, 0, 0), (1, 5000, 0)])
-    short_c = kl.arrow_curve([(0, 0, 0), (1, 50, 0)])
-    lf, sf = kl.fit_arrow(long_c, 200, 200), kl.fit_arrow(short_c, 200, 200)
-    check("arrow: longer movement -> longer arrow", (lf[3][0] - lf[0][0]) > (sf[3][0] - sf[0][0]))
+    # scene
+    sc = {"elements": [{"id": "k", "type": "keyboard", "layout": "half", "x": 2, "y": 1, "scale": 2.0},
+                       {"id": "p", "type": "controller", "x": 30, "y": 0, "scale": 0.5},
+                       {"id": "j", "type": "joystick", "size": 3, "x": 0, "y": 20, "scale": 1}]}
+    whole = kl.build_scene(sc)
+    only_k = kl.build_scene(sc, only="k")
+    check("scene: elements are placed and scaled", only_k["w"] == sizes["half"]["w"] * 2
+          and all(i["fs"] == 2.0 and i["el"] == "k" for i in only_k["items"]))
+    check("scene: one element alone starts at (0, 0)", min(i["x"] for i in only_k["items"]) == 0)
+    raw = kl.build_scene(sc, normalize=False)
+    check("scene: the editor keeps scene coordinates", min(i["x"] for i in raw["items"]) == 0
+          and min(i["x"] for i in raw["items"] if i["el"] == "k") == 2)
+    check("scene: movement views are motion items", any(i["kind"] == "motion" and i["mode"] == "joystick"
+                                                       for i in whole["items"]))
+    check("scene: new ids don't collide", kl.new_element_id(sc, "keyboard") == "keyboard"
+          and kl.new_element_id({"elements": [{"id": "comet"}]}, "comet") == "comet2")
+
+    # movement views
+    st = kl.KbmState()
+    t = 0.0
+    for i in range(40):                      # right ...
+        st.move(10, 0, t)
+        t += 0.01
+    for i in range(40):                      # ... and straight back (the case the arrow got wrong)
+        st.move(-10, 0, t)
+        t += 0.01
+    style = {"screen_height": 1000, "pad_fraction": 80}
+    f = kl.motion_frame(st, "comet", 200, style, t, "c1", "tail")
+    xs = [p[0] for p in f["trail"]]
+    check("comet: tail centered -- the oldest point sits in the middle", abs(f["trail"][0][0] - 100) < 1e-6
+          and abs(f["trail"][0][1] - 100) < 1e-6)
+    check("comet: moving back on yourself draws the whole out-and-back path",
+          max(xs) - 100 > 30 and abs(f["dot"][0] - 100) < 2)
+    widths = [p[2] for p in f["trail"]]
+    alphas = [p[3] for p in f["trail"]]
+    check("comet: the trail thins toward its old end", widths[0] < widths[-1] and widths == sorted(widths))
+    q = len(alphas) // 4
+    check("comet: only the oldest quarter fades", alphas[0] == 0 and all(a == 1 for a in alphas[q + 1:]))
+    check("comet: the cursor dot is wider than the trail", f["dot"][2] > max(widths) / 2)
+    fh = kl.motion_frame(st, "comet", 200, style, t, "c2", "head")
+    check("comet: head centered -- the newest point sits in the middle", abs(fh["dot"][0] - 100) < 1e-6)
+    big = kl.KbmState()
+    for i in range(60):
+        big.move(200, 0, i * 0.01)           # far bigger than the view
+    fz = kl.motion_frame(big, "comet", 200, style, 0.6, "z", "tail")
+    check("comet: auto zoom keeps the whole trail on screen", all(0 <= p[0] <= 200 for p in fz["trail"])
+          and len(fz["trail"]) > 50)
+    fc = kl.motion_frame(big, "comet", 200, dict(style, auto_zoom=False), 0.6, "nz", "tail")
+    check("comet: without auto zoom, old points are dropped so the head stays on screen",
+          len(fc["trail"]) < len(fz["trail"]) and 0 <= fc["dot"][0] <= 200)
+    fz2 = kl.motion_frame(big, "comet", 200, style, 0.65, "z", "tail")
+    check("comet: zooming back in is gradual", big.views["z"]["z"] <= 1.0)
+    mp = kl.KbmState()
+    for i in range(20):
+        mp.move(5, 0, i * 0.01)
+    f1 = kl.motion_frame(mp, "mousepad", 200, style, 0.2, "m", "tail")
+    check("mousepad: the dot moves away from the middle with the mouse", f1["dot"][0] > 105)
+    kl.motion_frame(mp, "mousepad", 200, style, 2.0, "m", "tail")
+    f2 = kl.motion_frame(mp, "mousepad", 200, style, 3.0, "m", "tail")
+    check("mousepad: re-centers after resting", abs(f2["dot"][0] - 100) < 2)
+    js = kl.KbmState()
+    for i in range(20):
+        js.move(30, 0, i * 0.01)             # 3000 px/s to the right
+    fj = kl.motion_frame(js, "joystick", 200, {"joystick_speed": 3000}, 0.19, "j", "tail")
+    check("joystick: the dot leans the way you're moving, by speed", fj["dot"][0] > 150 and abs(fj["dot"][1] - 100) < 1)
+    fj2 = kl.motion_frame(js, "joystick", 200, {"joystick_speed": 3000}, 2.0, "j", "tail")
+    check("joystick: back to the middle when the mouse stops", abs(fj2["dot"][0] - 100) < 1e-6)
+    ck = kl.KbmState()
+    ck.key("BTN_LEFT", True, 1.0)
+    ck.key("BTN_RIGHT", True, 1.0)
+    ck.key("BTN_MIDDLE", True, 1.0)
+    ck.key("BTN_SIDE", True, 1.0)
+    ck.key("BTN_EXTRA", True, 1.0)
+    ck.wheel(1, 1.0)
+    ck.wheel(-1, 1.05)
+    fr = kl.motion_frame(ck, "comet", 200, {}, 1.1, "r", "tail")
+    rings = {(r["arcs"] and tuple(tuple(a) for a in r["arcs"])): r for r in fr["rings"]}
+    full_rings = [r for r in fr["rings"] if r["arcs"] is None]
+    check("clicks: left ring grows outward, right ring shrinks inward",
+          len(full_rings) == 2 and full_rings[0]["r"] < full_rings[1]["r"])
+    check("clicks: middle = two 60-degree arcs top and bottom; side buttons = one arc each side",
+          ((90.0, 60.0), (270.0, 60.0)) in rings and ((180.0, 60.0),) in rings and ((0.0, 60.0),) in rings)
+    check("wheel: chevrons above for up, below for down",
+          {c["dir"] for c in fr["chevrons"]} == {1, -1}
+          and all((c["y"] < fr["dot"][1]) == (c["dir"] > 0) for c in fr["chevrons"]))
+    check("held: a held button rings the dot", fr["held"] == "r")
+    mix = kl.KbmState()
+    for i in range(10):
+        mix.move(5, 0, i * 0.01, "r")
+    for i in range(10):
+        mix.move(5, 0, 0.1 + i * 0.01, "m")
+    fm = kl.motion_frame(mix, "comet", 200, {}, 0.2, "mx", "tail")
+    shares = [p[4] for p in fm["trail"]]
+    check("colors: your movement then a macro's blends across the switch", shares[0] == 0 and shares[-1] == 1
+          and any(0 < v < 1 for v in shares))
 
     st = kl.KbmState()
     st.move(5, 0, 0.0)
@@ -197,8 +273,9 @@ def hub_tests():
     import overlay_server as osv
     cfg = oc.merged({"full": {"enabled": True, "port": 18480},
                      "simple": {"enabled": True, "port": 18481, "mouse_movement": True, "mouse_port": 18482},
-                     "controller": {"enabled": True, "port": 18485},
                      "replay": {"enabled": True, "fallback_seconds": 20}})
+    cfg["full"]["element_sources"] = True
+    cfg["scene"]["elements"].append({"id": "pad", "type": "controller", "x": 24, "y": 0, "scale": 1})
     oc.save(cfg)
     fake = FakeDaemon(oc.event_socket())
     hub = osv.Hub(oc.load(), obs_factory=lambda o: (_ for _ in ()).throw(RuntimeError("no OBS here")))
@@ -209,15 +286,17 @@ def hub_tests():
     check("hub: full page served", st == 200 and "text/html" in ctype and b"drawKbm" in body)
     st, _c, body = _get("http://127.0.0.1:18480/config")
     c = json.loads(body)
-    check("hub: /config has the style and the shared layout", c["style"]["unit"] == 48
-          and len(c["layout"]["items"]) == len(kl.build_layout()["items"]))
+    check("hub: /config has the style and the whole arrangement", c["style"]["unit"] == 48
+          and len(c["layout"]["items"]) == len(kl.build_scene(cfg["scene"])["items"]) and c["piece"] == "scene")
     check("hub: simple + movement pages served", _get("http://127.0.0.1:18481/")[0] == 200
-          and b"drawArrow" in _get("http://127.0.0.1:18482/")[2])
-    cc = json.loads(_get("http://127.0.0.1:18485/config")[2])
-    check("hub: the controller piece is its own page with the controller layout",
-          cc["piece"] == "controller" and any(i["kind"] == "stick" for i in cc["layout"]["items"])
-          and cc["pad_labels"]["BTN_SOUTH"] == "A")
-    check("hub: scripts served", b"arrowCurve" in _get("http://127.0.0.1:18482/common.js")[2]
+          and b"drawMotion" in _get("http://127.0.0.1:18482/")[2])
+    st_el, _c, body_el = _get("http://127.0.0.1:18480/el/pad")
+    cc = json.loads(_get("http://127.0.0.1:18480/config?el=pad")[2])
+    check("hub: each element is its own page at /el/<id> (the controller here)",
+          st_el == 200 and b"drawKbm" in body_el and cc["piece"] == "pad"
+          and any(i["kind"] == "stick" for i in cc["layout"]["items"])
+          and not any(i["kind"] == "key" for i in cc["layout"]["items"]) and cc["pad_labels"]["BTN_SOUTH"] == "A")
+    check("hub: scripts served", b"motionFrame" in _get("http://127.0.0.1:18482/common.js")[2]
           and b"drawKbm" in _get("http://127.0.0.1:18480/kbm.js")[2])
 
     # SSE: open a stream, send an event, read it back
@@ -254,7 +333,8 @@ def hub_tests():
     check("hub: replay file records the events", any('"k":"KEY_A"' in ln for ln in lines))
     status = json.loads(oc.status_file().read_text())
     check("hub: status file reports pages, file, and the fallback length when OBS is unreachable",
-          set(status["pages"]) == {"full", "simple", "movement", "controller"}
+          set(status["pages"]) == {"full", "simple", "movement"}
+          and status["element_urls"]["pad"] == "http://127.0.0.1:18480/el/pad"
           and status["replay"]["length_source"] == "fallback"
           and status["replay"]["length_s"] == 20)
     hub.poll_obs()
@@ -292,7 +372,7 @@ def hub_tests():
     time.sleep(0.5)
     check("hub: when the daemon goes away nothing stays held", not hub.state.held)
     c3 = oc.load()
-    for k in ("full", "controller", "simple", "replay"):
+    for k in ("full", "simple", "replay"):
         c3[k]["enabled"] = False
     oc.save(c3)
     os.utime(oc.config_file(), (time.time() + 10, time.time() + 10))
@@ -450,6 +530,7 @@ def render_tests():
                     "-f", "lavfi", "-i", "sine=duration=2", "-shortest", "-c:v", "libx264", "-preset", "ultrafast",
                     "-c:a", "aac", str(clip)], check=True)
     cfg = oc.merged({})
+    cfg["scene"]["elements"].append({"id": "controller", "type": "controller", "x": 24, "y": 0, "scale": 1})
     out = d / "out.mp4"
     r = orr.composite(clip, d / "buf.jsonl", out, clip_end=T + 2, cfg=cfg, position="top-left", margin=0)
     info = orr.probe(out)
@@ -467,9 +548,9 @@ def render_tests():
         i = (y * w + x) * 3
         return raw[i:i + 3]
     # the W key's position in the overlay (drawn at 35% of 640 px wide, top-left)
-    lay = kl.layout_for_style(cfg["style"])
+    lay = kl.build_scene(cfg["scene"])
     wkey = next(i for i in lay["items"] if i["name"] == "KEY_W")
-    s = (640 * 0.35 // 2 * 2) / kl.pixel_size(cfg["style"])[0]
+    s = (640 * 0.35 // 2 * 2) / kl.layout_pixel_size(lay, cfg["style"])[0]
     u, pad = cfg["style"]["unit"] * s, cfg["style"]["padding"] * s
     wx, wy = int(pad + (wkey["x"] + 0.12) * u), int(pad + (wkey["y"] + 0.12) * u)
     held = frame_rgb(out, 1.0, wx, wy)
@@ -538,7 +619,7 @@ def render_tests():
     u, pad = style["unit"], style["padding"]
     kb = d / "kb.mov"
     orr.render(d / "pad.jsonl", T2, T2 + 1, kb, mode="keyboard", cfg=cfg, fps=10)
-    lay = kl.build_piece("keyboard", style)
+    lay = kl.build_scene(cfg["scene"], only="keyboard")
     e_key = next(i for i in lay["items"] if i["name"] == "KEY_E")
     px = overlay_rgba(kb, 0.5, int(pad + (e_key["x"] + 0.12) * u), int(pad + (e_key["y"] + 0.12) * u))
     check("render: a macro's key press is drawn in the output color (blue)", px[2] > 150 and px[2] > px[0] + 40)
@@ -554,10 +635,20 @@ def render_tests():
           trig[0] > 150 and trig[0] > trig[2] + 40)
     check("render: controller piece -- a macro's button press is blue", eb[2] > 150 and eb[2] > eb[0] + 40)
     check("render: controller piece size", (orr.probe(padv)["width"], orr.probe(padv)["height"])[0]
-          == kl.piece_pixel_size("controller", style)[0] // 2 * 2)
+          == kl.layout_pixel_size(kl.build_controller_layout(), style)[0] // 2 * 2)
+    bare = dict(cfg, scene={"elements": [{"id": "keyboard", "type": "keyboard", "x": 0, "y": 0, "scale": 1}]})
+    jv = d / "joy.mov"
+    orr.render(d / "pad.jsonl", T2, T2 + 1, jv, mode="mousepad", cfg=bare, fps=10)
+    check("render: a type missing from the layout is drawn with its defaults", orr.probe(jv)["width"] > 0)
+    try:
+        orr.render(d / "pad.jsonl", T2, T2 + 1, d / "bad.mov", mode="el:nope", cfg=bare, fps=10)
+        bad = False
+    except orr.RenderError:
+        bad = True
+    check("render: an unknown el:<id> is an error", bad)
     for ext, dec in ((".mov", []), (".mkv", []), (".webm", ["-c:v", "libvpx-vp9"])):
         f = d / f"alpha{ext}"
-        orr.render(d / "pad.jsonl", T2, T2 + 0.3, f, mode="mouse", cfg=cfg, fps=10)
+        orr.render(d / "pad.jsonl", T2, T2 + 0.3, f, mode="el:mouse", cfg=cfg, fps=10)
         raw = subprocess.run(["ffmpeg", "-v", "error", *dec, "-i", str(f), "-frames:v", "1", "-f", "rawvideo",
                               "-pix_fmt", "rgba", "-"], capture_output=True).stdout
         check(f"render: {ext} keeps transparency" + (" (decoded with libvpx)" if dec else ""),
@@ -569,7 +660,7 @@ def render_tests():
     ai = orr.probe(d / "aligned.mov")
     check("align: stream-copies the overlay to start with the clip and match its length",
           abs(al["skip_s"] - 0.5) < 1e-6 and abs(ai["duration"] - 2.0) < 0.05)
-    lay_kb = kl.build_piece("keyboard", style)
+    lay_kb = kl.build_scene(cfg["scene"], only="keyboard")
     wk = next(i for i in lay_kb["items"] if i["name"] == "KEY_W")
     ov_w = orr.probe(d / "aligned.mov")["width"]
     res = orr.layer(clip, [{"file": d / "aligned.mov", "x": 0.5, "y": 0.5, "w": 0.5},
@@ -595,11 +686,18 @@ def render_tests():
     srcs = overlay_cli.obs_sources(oc.merged({"full": {"enabled": True}, "simple": {"enabled": True, "mouse_movement": True}}))
     check("cli: Add to OBS makes one source per enabled page, sized to it",
           [s["name"] for s in srcs] == ["Puppetry Input Overlay", "Puppetry Input List", "Puppetry Mouse Movement"]
-          and (srcs[0]["width"], srcs[0]["height"]) == kl.pixel_size(oc.DEFAULTS["style"]))
+          and (srcs[0]["width"], srcs[0]["height"]) == kl.layout_pixel_size(kl.build_scene(None), oc.DEFAULTS["style"]))
     srcs2 = overlay_cli.obs_sources(oc.merged({"full": {"enabled": True, "split": True}, "controller": {"enabled": True}}))
-    check("cli: split pieces + controller each get a source",
-          [s["name"] for s in srcs2] == ["Puppetry Keyboard", "Puppetry Mouse", "Puppetry Controller"]
-          and srcs2[2]["width"] == kl.piece_pixel_size("controller", oc.DEFAULTS["style"])[0])
+    check("cli: old split + controller settings -> one source per element (controller added to the scene)",
+          [s["name"] for s in srcs2] == ["Puppetry: keyboard", "Puppetry: mouse", "Puppetry: comet",
+                                         "Puppetry: controller"]
+          and srcs2[3]["url"].endswith("/el/controller"))
+    try:
+        orr.FrameMaker("el:nope", cfg)
+        bad_el = False
+    except orr.RenderError as e:
+        bad_el = "no element" in str(e)
+    check("render: an unknown element is a clear error", bad_el)
 
 
 # ---------------------------------------------------------------------------
@@ -609,27 +707,74 @@ def js_parity_tests():
         print("SKIP js parity (no node)")
         return
     web = Path(__file__).resolve().parent / "overlay_web"
-    pts = [[0.0, 0.0, 0.0]] + [[i * 0.1, -10.0 * i, 0.0] for i in range(1, 11)] + \
-          [[1.0 + i * 0.1, -100.0, -10.0 * i] for i in range(1, 6)]
+    # the same input + the same frame times through both implementations
+    events = []
+    t = 0.0
+    for i in range(50):
+        events.append(["mv", t, 37, -12 if i < 25 else 15, "r"])
+        t += 0.008
+    for i in range(30):
+        events.append(["mv", t, -50, 3, "m" if i % 3 == 0 else "r"])
+        t += 0.008
+    events += [["kd", t, "BTN_LEFT", "r"], ["wh", t + 0.01, 1, "r"], ["kd", t + 0.02, "BTN_MIDDLE", "m"]]
+    times = [t + 0.03 + k * 0.016 for k in range(12)]
+    style = {"screen_height": 900, "pad_fraction": 60, "trail_seconds": 0.5, "joystick_speed": 2500}
+    cases = [("comet", "tail", True), ("comet", "head", True), ("comet", "tail", False),
+             ("mousepad", "tail", True), ("mousepad", "tail", False), ("joystick", "tail", True)]
+
+    def py_frames():
+        out = []
+        for kind, center, auto in cases:
+            st = kl.KbmState()
+            for e in events:
+                if e[0] == "mv":
+                    st.move(e[2], e[3], e[1], e[4])
+                elif e[0] == "kd":
+                    st.key(e[2], True, e[1], e[3])
+                else:
+                    st.wheel(e[2], e[1], e[3])
+            for tt in times:
+                fr = kl.motion_frame(st, kind, 240, dict(style, auto_zoom=auto), tt, "v", center)
+            out.append(fr)
+        return out
+    js_events = json.dumps(events)
     script = (f"global.performance={{now:()=>0}};\n{(web / 'common.js').read_text()}\n"
-              f"const c=arrowCurve({json.dumps(pts)});"
-              f"console.log(JSON.stringify({{c, f: fitArrow(c,120,90,600), h: formatHold(75.5)}}));")
+              f"const ev={js_events}, times={json.dumps(times)}, style={json.dumps(style)}, cases={json.dumps(cases)};\n"
+              "const res=[];\n"
+              "for (const [kind, center, auto] of cases) {\n"
+              "  P.motion=[]; P.clicks=[]; P.wheels=[]; P.views={}; P.held={}; P.out={}; P.released={};\n"
+              "  for (const e of ev) {\n"
+              "    if (e[0]==='mv') addMotion(e[1], e[2], e[3], e[4]);\n"
+              "    else if (e[0]==='kd') { P.clicks.push([e[1], e[2], e[3]]); (e[3]==='r'?P.held:P.out)[e[2]]=e[1]; }\n"
+              "    else P.wheels.push([e[1], e[2] > 0 ? 1 : -1, e[3]]);\n"
+              "  }\n"
+              "  let fr; for (const tt of times) fr = motionFrame(P, kind, 240, Object.assign({}, style, {auto_zoom: auto}), tt, 'v', center);\n"
+              "  res.push(fr);\n"
+              "}\n"
+              "console.log(JSON.stringify({res, h: formatHold(75.5)}));")
     out = subprocess.run([node, "-e", script], capture_output=True, text=True)
     try:
         js = json.loads(out.stdout)
     except ValueError:
         check("js: common.js runs", False)
-        print(out.stderr)
+        print(out.stderr[-2000:])
         return
-    py = kl.arrow_curve([tuple(p) for p in pts])
-    pyf = kl.fit_arrow(py, 120, 90, 600)
-    same = all(abs(a - b) < 1e-9 for p, q in zip(js["c"]["pts"], [py["p0"], py["c1"], py["c2"], py["p3"]])
-               for a, b in zip(p, q))
-    samef = all(abs(a - b) < 1e-9 for p, q in zip(js["f"], pyf) for a, b in zip(p, q))
-    check("js: the page's arrow math matches Python exactly", same and samef)
+
+    def close(a, b):
+        if isinstance(a, dict):
+            return set(a) == set(b) and all(close(a[k], b[k]) for k in a)
+        if isinstance(a, (list, tuple)):
+            return len(a) == len(b) and all(close(x, y) for x, y in zip(a, b))
+        if isinstance(a, (int, float)) and isinstance(b, (int, float)):
+            return abs(a - b) < 1e-6
+        return a == b
+    pyr = json.loads(json.dumps(py_frames()))
+    for (kind, center, auto), p_fr, j_fr in zip(cases, pyr, js["res"]):
+        check(f"js: {kind} ({center}, auto zoom {'on' if auto else 'off'}) draws exactly what Python draws",
+              close(p_fr, j_fr))
     check("js: the page's timer format matches Python", js["h"] == kl.format_hold(75.5))
-    lay = json.loads(json.dumps(kl.build_layout()))
-    check("js: layout survives JSON (what the page receives)", lay == kl.build_layout())
+    lay = json.loads(json.dumps(kl.build_scene(None)))
+    check("js: layout survives JSON (what the page receives)", lay == kl.build_scene(None))
 
 
 def main() -> int:

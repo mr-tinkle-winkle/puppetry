@@ -24,6 +24,10 @@ std::vector<DeviceInfo> list_input_devices();
 bool device_has_key(const std::string& path, int code);
 // True if this device declares EV_REL for `code`.
 bool device_has_rel(const std::string& path, int code);
+// USB/Bluetooth vendor id (EVIOCGID), -1 if unreadable. 0x28de = Valve.
+int device_vendor(const std::string& path);
+// "keyboard", "mouse", "gamepad", "keys", "touch" (comma-joined) or "other".
+std::string describe_device(const std::string& path);
 // True if this device declares EV_ABS for `code`.
 bool device_has_abs(const std::string& path, int code);
 

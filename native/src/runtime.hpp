@@ -139,6 +139,19 @@ public:
     // dispatch loop writes, getAxis() reads.
     std::mutex axes_mutex;
     std::unordered_map<int, double> axes;
+    // Device paths some watcher thread has open (controller / extra devices),
+    // so two watchers never read the same device twice.
+    std::mutex watched_paths_mutex;
+    std::set<std::string> watched_paths;
+    bool claim_path(const std::string& p) {
+        std::lock_guard<std::mutex> lock(watched_paths_mutex);
+        return watched_paths.insert(p).second;
+    }
+    void release_path(const std::string& p) {
+        std::lock_guard<std::mutex> lock(watched_paths_mutex);
+        watched_paths.erase(p);
+    }
+
     // What axis() last set on the virtual controller (ramps start here).
     std::unordered_map<int, double> out_axes;
 

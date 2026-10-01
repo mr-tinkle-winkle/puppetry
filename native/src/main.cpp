@@ -9,6 +9,9 @@
 #include <iterator>
 #include <sched.h>
 #include <sys/prctl.h>
+#include <set>
+#include <memory>
+#include <algorithm>
 #include <thread>
 #include <vector>
 #include "config.hpp"
@@ -147,6 +150,20 @@ int main(int argc, char** argv) {
     if (argc > 1 && std::string(argv[1]) == "--check") {
         return check_mode();
     }
+    if (argc > 1 && std::string(argv[1]) == "--list-devices") {
+        // Diagnostics: every input device the daemon can read, what it looks
+        // like (keyboard / mouse / gamepad ...), and its vendor id.
+        json out = json::array();
+        for (const auto& d : list_input_devices()) {
+            char vend[8];
+            std::snprintf(vend, sizeof(vend), "%04x", device_vendor(d.path) & 0xffff);
+            out.push_back({{"path", d.path}, {"name", d.name}, {"vendor", vend},
+                           {"kind", describe_device(d.path)}, {"ours", is_our_virtual_device_name(d.name)}});
+        }
+        std::printf("%s\n", out.dump(2).c_str());
+        return 0;
+    }
+
     if (argc > 1 && std::string(argv[1]) == "--dump-names") {
         // For the GUI's reference panels / alias pickers: the C++ tables
         // are the single source of truth, so the GUI never keeps its own
@@ -408,11 +425,20 @@ int main(int argc, char** argv) {
                         std::this_thread::sleep_for(std::chrono::seconds(3));
                         continue;
                     }
+                    if (!rt.claim_path(c.path)) {            // an extra-device watcher has it
+                        std::this_thread::sleep_for(std::chrono::seconds(3));
+                        continue;
+                    }
                     InputDevice dev;
-                    if (!dev.open(c.path)) { std::this_thread::sleep_for(std::chrono::seconds(3)); continue; }
+                    if (!dev.open(c.path)) {
+                        rt.release_path(c.path);
+                        std::this_thread::sleep_for(std::chrono::seconds(3));
+                        continue;
+                    }
                     std::printf("Controller: %s (%s)\n", c.path.c_str(), c.name.c_str());
                     announced_missing = false;
                     watch_device(rt, registry, macros, dev, "controller", abort_code);
+                    rt.release_path(c.path);
                     // unplugged: release its held buttons and axes, then look again
                     {
                         std::lock_guard<std::mutex> lock(rt.held_mutex);
@@ -425,6 +451,59 @@ int main(int argc, char** argv) {
                     }
                     std::printf("Controller disconnected\n");
                     std::this_thread::sleep_for(std::chrono::seconds(1));
+                }
+            }).detach();
+        }
+    }
+
+    // Extra devices, watched alongside the main keyboard/mouse (read only:
+    // their keys work in combos and show in the overlay, but ignore() can't
+    // block them). Which ones: every Valve device (Steam Controller / Deck --
+    // in desktop mode Steam turns the controller into its OWN keyboard and
+    // mouse, which the main pair never sees) unless "watch_steam_devices" is
+    // off; every device with "watch_all_devices"; and any listed in
+    // "extra_devices" (by path or name). Re-scanned every 3 s (hotplug).
+    {
+        bool watch_steam = json_bool(state, "watch_steam_devices", true);
+        bool watch_all = json_bool(state, "watch_all_devices", false);
+        std::vector<std::string> listed;
+        if (state.contains("extra_devices") && state["extra_devices"].is_array())
+            for (const auto& e : state["extra_devices"]) if (e.is_string()) listed.push_back(e.get<std::string>());
+        std::string kb_path = keyboard.path, ms_path = mouse.path;
+        if (watch_steam || watch_all || !listed.empty()) {
+            std::thread([&rt, &registry, &macros, watch_steam, watch_all, listed, kb_path, ms_path, abort_code] {
+                auto active = std::make_shared<std::mutex>();
+                auto open_paths = std::make_shared<std::set<std::string>>();
+                while (true) {
+                    for (const auto& d : list_input_devices()) {
+                        if (is_our_virtual_device_name(d.name) || d.path == kb_path || d.path == ms_path) continue;
+                        bool want = watch_all
+                                 || (watch_steam && device_vendor(d.path) == 0x28de)
+                                 || std::find(listed.begin(), listed.end(), d.path) != listed.end()
+                                 || std::find(listed.begin(), listed.end(), d.name) != listed.end();
+                        if (!want) continue;
+                        {
+                            std::lock_guard<std::mutex> lock(*active);
+                            if (open_paths->count(d.path)) continue;
+                            if (!rt.claim_path(d.path)) continue;      // the controller watcher has it
+                            open_paths->insert(d.path);
+                        }
+                        // a gamepad node is the controller watcher's job when it picked it
+                        bool pad = device_has_key(d.path, BTN_SOUTH) && device_has_abs(d.path, ABS_X);
+                        std::string path = d.path, name = d.name;
+                        std::thread([&rt, &registry, &macros, active, open_paths, path, name, pad, abort_code] {
+                            InputDevice dev;
+                            if (dev.open(path)) {
+                                std::printf("Also watching: %s (%s)\n", path.c_str(), name.c_str());
+                                watch_device(rt, registry, macros, dev, pad ? "extra_pad" : "extra", abort_code);
+                                std::printf("Stopped watching: %s\n", path.c_str());
+                            }
+                            rt.release_path(path);
+                            std::lock_guard<std::mutex> lock(*active);
+                            open_paths->erase(path);
+                        }).detach();
+                    }
+                    std::this_thread::sleep_for(std::chrono::seconds(3));
                 }
             }).detach();
         }

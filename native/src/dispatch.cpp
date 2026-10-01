@@ -145,7 +145,10 @@ static bool should_forward(Runtime& rt, const std::string& kind, int code, bool 
 
 void watch_device(Runtime& rt, MacroRegistry& registry, std::vector<std::unique_ptr<Macro>>& macros,
                    InputDevice& dev, const std::string& kind, int abort_code) {
-    if (kind != "controller") {
+    // "controller", "extra" and "extra_pad" devices are only read: never
+    // grabbed, never forwarded (their own events already reach the system).
+    const bool primary = (kind == "keyboard" || kind == "mouse");
+    if (primary) {
         std::lock_guard<std::mutex> lock(rt.grab_mutex);
         (kind == "keyboard" ? rt.watched_keyboard : rt.watched_mouse) = &dev;
     }
@@ -195,7 +198,7 @@ void watch_device(Runtime& rt, MacroRegistry& registry, std::vector<std::unique_
                                ((ev.value == 0) || should_forward(rt, kind, ev.code, original_wants_forward));
                 handle_key_event(rt, macros, abort_code, ev.code, ev.value, on_trigger);
                 if (forward) push(is_mouse_button(ev.code) ? out_mouse : out_kb, EV_KEY, ev.code, ev.value);
-            } else if (ev.type == EV_REL && kind == "mouse") {
+            } else if (ev.type == EV_REL && (kind == "mouse" || kind == "extra" || kind == "extra_pad")) {
                 // The user just moved the real mouse, so any position
                 // move_mouse(move_to=True) had cached is now wrong. One
                 // relaxed atomic store; safe to do even when the motion
@@ -209,7 +212,7 @@ void watch_device(Runtime& rt, MacroRegistry& registry, std::vector<std::unique_
                     default: break;
                 }
                 frame_t = ev.time_us;
-                if (rt.mouse_grabbed.load()) {
+                if (kind == "mouse" && rt.mouse_grabbed.load()) {
                     bool movement_ignored;
                     {
                         std::lock_guard<std::mutex> lock(rt.ignore_mutex);
@@ -218,7 +221,7 @@ void watch_device(Runtime& rt, MacroRegistry& registry, std::vector<std::unique_
                     bool is_motion = ev.code == REL_X || ev.code == REL_Y;
                     if (!(is_motion && movement_ignored)) push(out_mouse, EV_REL, ev.code, ev.value);
                 }
-            } else if (ev.type == EV_ABS && kind == "controller") {
+            } else if (ev.type == EV_ABS && (kind == "controller" || kind == "extra_pad")) {
                 double v = dev.normalize_abs(ev.code, ev.value);
                 double prev;
                 {
@@ -230,6 +233,15 @@ void watch_device(Runtime& rt, MacroRegistry& registry, std::vector<std::unique_
                 if (v != prev && (std::abs(v - prev) >= 0.004 || v == 0.0 || v == 1.0 || v == -1.0)) {
                     EventStream* es = g_event_stream.load(std::memory_order_relaxed);
                     if (es && es->active()) es->publish('r', ev.time_us, 'a', ev.code, (int)std::lround(v * 10000));
+                }
+            } else if (ev.type == EV_SYN && ev.code == SYN_REPORT && !primary) {
+                if (frame_dx | frame_dy | frame_wheel | frame_hwheel) {
+                    EventStream* es = g_event_stream.load(std::memory_order_relaxed);
+                    if (es && es->active()) {
+                        if (frame_dx | frame_dy) es->publish('r', frame_t, 'm', frame_dx, frame_dy);
+                        if (frame_wheel | frame_hwheel) es->publish('r', frame_t, 'w', frame_wheel, frame_hwheel);
+                    }
+                    frame_dx = frame_dy = frame_wheel = frame_hwheel = 0;
                 }
             } else if (ev.type == EV_SYN && ev.code == SYN_REPORT) {
                 if (frame_dx | frame_dy | frame_wheel | frame_hwheel) {

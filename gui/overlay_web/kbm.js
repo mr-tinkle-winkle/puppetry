@@ -28,8 +28,9 @@ function contrast(hex) {
 function drawKbm(ctx, layout, st, now, unit, ox, oy) {
   const u = unit || st.unit || 48, pad = st.padding || 0;
   ox += pad; oy += pad;
-  const gap = u * (st.gap ?? 8) / 100, rad = u * (st.radius ?? 14) / 100;
-  const fpx = u * (st.font_scale ?? 32) / 100, ow = st.outline_width ?? 1;
+  const baseGap = u * (st.gap ?? 8) / 100, baseRad = u * (st.radius ?? 14) / 100;
+  const baseFpx = u * (st.font_scale ?? 32) / 100, ow = st.outline_width ?? 1;
+  let gap = baseGap, rad = baseRad, fpx = baseFpx;
   const fade = st.release_fade_ms || 0, delay = (st.timer_delay_ms || 0) / 1000;
   const showMacro = st.show_macro_output !== false;
   const wheelOn = (now - P.wheelT) * 1000 <= (st.wheel_flash_ms ?? 250) && (P.wheelSrc === "r" || showMacro);
@@ -142,9 +143,12 @@ function drawKbm(ctx, layout, st, now, unit, ox, oy) {
   const PAD_KINDS = new Set(["pad_body", "trigger", "stick", "dpad", "pad_btn", "shoulder", "small"]);
 
   for (const it of layout.items) {
+    const fs = it.fs ?? 1;                 // the item's element scale (Edit mode)
+    gap = baseGap * fs; rad = baseRad * fs; fpx = baseFpx * fs;
     let x = ox + it.x * u, y = oy + it.y * u, w = it.w * u, h = it.h * u;
     if (PAD_KINDS.has(it.kind)) { controllerItem(it, x, y, w, h); continue; }
     if (it.kind === "arrow_box") { if (st.show_arrow !== false) drawArrow(ctx, x, y, w, h, st, now); continue; }
+    if (it.kind === "motion") { drawMotion(ctx, x, y, w, h, st, now, it.mode || "comet", it.el || it.mode, it.center || "tail"); continue; }
     if (it.kind === "mouse_body") {
       roundRect(ctx, x, y, w, h, w * 0.42); ctx.fillStyle = keyC; ctx.fill();
       if (ow > 0) { ctx.strokeStyle = edge; ctx.lineWidth = ow; ctx.stroke(); }

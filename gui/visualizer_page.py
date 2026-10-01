@@ -12,6 +12,7 @@ a press -- both are counted, or the tester would read half.
 """
 from __future__ import annotations
 
+import copy
 import time
 from collections import deque
 
@@ -120,9 +121,17 @@ class CpsArea(QWidget):
         self.held_names: set[str] = set()       # KEY_/BTN_ names, what the drawing lights up
         self.kbm = kl.KbmState()                 # what the drawing shows (timers, arrow, wheel)
         self.style_ = theme_style(Theme())
-        self.layout_ = layout_for(self.style_)
+        self.style_["padding"] = 0
+        self.scene = copy.deepcopy(kl.DEFAULT_SCENE)
+        self.layout_ = kl.build_scene(self.scene, normalize=False)
         self.stream_live = False                 # True: the picture follows the daemon's stream instead
         self.show_controller = False
+        # Edit mode: move / resize / add / remove the scene's elements
+        self.editing = False
+        self.selected: str | None = None
+        self._drag = None                        # ("move"|"scale", el, start units, start x, y, scale)
+        self._geom = (0.0, 0.0, 10.0)            # origin x, origin y (px of scene 0,0), px per unit
+        self.on_scene_changed = None             # callback(scene)
         self.dirty = True
         self._last_pos = None
         self.setFocusPolicy(Qt.StrongFocus)
@@ -148,12 +157,160 @@ class CpsArea(QWidget):
         if not self.stream_live:
             self.kbm.wheel(n, now)
 
-    def set_show_controller(self, on: bool) -> None:
-        self.show_controller = on
-        base = layout_for(self.style_)
-        self.layout_ = kl.combine_layouts(base, kl.build_controller_layout(), 1.2) if on else base
+    def set_show_controller(self, on: bool) -> None:      # (kept for old callers)
+        if on and not kl.scene_has(self.scene, "controller"):
+            self.add_element("controller")
+
+    # -- the scene / Edit mode --------------------------------------------------
+    def set_scene(self, scene: dict) -> None:
+        self.scene = copy.deepcopy(scene)
+        self.layout_ = kl.build_scene(self.scene, normalize=False)
         self.dirty = True
         self.update()
+
+    def _scene_changed(self) -> None:
+        self.layout_ = kl.build_scene(self.scene, normalize=False)
+        self.dirty = True
+        self.update()
+        if self.on_scene_changed:
+            self.on_scene_changed(copy.deepcopy(self.scene))
+
+    def set_editing(self, on: bool) -> None:
+        self.editing = on
+        self.selected = None
+        self._drag = None
+        self.setCursor(Qt.ArrowCursor if on else Qt.PointingHandCursor)
+        self.hint = ("Edit: drag to move, drag the corner square to resize, right-click for options"
+                     if on else "Click here, then press keys / click / scroll / move -- the macro for it appears below")
+        self.dirty = True
+        self.update()
+
+    def element(self, el_id):
+        return next((e for e in self.scene["elements"] if e.get("id") == el_id), None)
+
+    def add_element(self, typ: str) -> dict:
+        right = max((kl.element_rect(e)[0] + kl.element_rect(e)[2] for e in self.scene["elements"]), default=-1.0)
+        el = kl.default_element(self.scene, typ, right + 1.0, 0.0)
+        self.scene["elements"].append(el)
+        self.selected = el["id"]
+        self._scene_changed()
+        return el
+
+    def remove_element(self, el_id) -> None:
+        self.scene["elements"] = [e for e in self.scene["elements"] if e.get("id") != el_id]
+        if self.selected == el_id:
+            self.selected = None
+        self._scene_changed()
+
+    def reset_scene(self) -> None:
+        self.scene = copy.deepcopy(kl.DEFAULT_SCENE)
+        self.selected = None
+        self._scene_changed()
+
+    def _units(self, pos):
+        ox, oy, u = self._geom
+        return (pos.x() - ox) / u, (pos.y() - oy) / u
+
+    def _hit(self, pos):
+        """(element id, on its resize handle?) under `pos`, topmost first."""
+        ox, oy, u = self._geom
+        for el in reversed(self.scene["elements"]):
+            x, y, w, h = kl.element_rect(el)
+            hx, hy = ox + (x + w) * u, oy + (y + h) * u
+            if el.get("id") == self.selected and abs(pos.x() - hx) <= 9 and abs(pos.y() - hy) <= 9:
+                return el["id"], True
+            if ox + x * u <= pos.x() <= ox + (x + w) * u and oy + y * u <= pos.y() <= oy + (y + h) * u:
+                return el["id"], False
+        return None, False
+
+    def _edit_press(self, e) -> None:
+        el_id, handle = self._hit(e.position())
+        self.selected = el_id
+        if el_id is not None and e.button() == Qt.LeftButton:
+            el = self.element(el_id)
+            ux, uy = self._units(e.position())
+            self._drag = ("scale" if handle else "move", el_id, ux, uy, float(el.get("x", 0)),
+                          float(el.get("y", 0)), float(el.get("scale", 1.0)))
+        self.update()
+
+    def _edit_move(self, e) -> None:
+        if not self._drag:
+            el_id, handle = self._hit(e.position())
+            self.setCursor(Qt.SizeFDiagCursor if handle else (Qt.OpenHandCursor if el_id else Qt.ArrowCursor))
+            return
+        mode, el_id, sx, sy, x0, y0, s0 = self._drag
+        el = self.element(el_id)
+        if el is None:
+            return
+        ux, uy = self._units(e.position())
+        if mode == "move":
+            el["x"] = round((x0 + ux - sx) * 4) / 4          # quarter-key snapping
+            el["y"] = round((y0 + uy - sy) * 4) / 4
+        else:
+            nat = kl.element_layout(el)
+            want = max(0.3, min(4.0, (ux - x0) / max(nat["w"], 0.1)))
+            el["scale"] = round(want * 20) / 20
+        self.layout_ = kl.build_scene(self.scene, normalize=False)
+        self.dirty = True
+        self.update()
+
+    def _edit_release(self, _e) -> None:
+        if self._drag:
+            self._drag = None
+            self._scene_changed()
+
+    def _edit_menu(self, e) -> None:
+        from PySide6.QtWidgets import QMenu
+        el_id, _h = self._hit(e.pos())
+        menu = QMenu(self)
+        if el_id is None:
+            add = menu.addMenu("Add element")
+            for typ, label in kl.ELEMENT_TYPES.items():
+                add.addAction(label, lambda t=typ: self.add_element(t))
+            menu.exec(e.globalPos())
+            return
+        self.selected = el_id
+        el = self.element(el_id)
+        typ = el.get("type")
+        menu.addSection(f"{kl.ELEMENT_TYPES.get(typ, typ)} ({el_id})")
+
+        def setter(k, v):
+            def go():
+                el[k] = v
+                self._scene_changed()
+            return go
+        if typ == "keyboard":
+            sub = menu.addMenu("Layout")
+            for k, label in kl.KEYBOARD_PRESETS.items():
+                a = sub.addAction(label, setter("layout", k))
+                a.setCheckable(True)
+                a.setChecked(el.get("layout", "tkl") == k)
+        elif typ == "mouse":
+            sub = menu.addMenu("Look")
+            for k, label in kl.MOUSE_LOOKS.items():
+                a = sub.addAction(label, setter("look", k))
+                a.setCheckable(True)
+                a.setChecked(el.get("look", "classic") == k)
+        if typ == "comet":
+            sub = menu.addMenu("Keep centered")
+            for k, label in (("tail", "Tail centered"), ("head", "Head centered")):
+                a = sub.addAction(label, setter("center", k))
+                a.setCheckable(True)
+                a.setChecked(el.get("center", "tail") == k)
+        if typ in kl.MOTION_TYPES:
+            sub = menu.addMenu("Show as")
+            for k, label in kl.MOTION_TYPES.items():
+                a = sub.addAction(label, setter("type", k))
+                a.setCheckable(True)
+                a.setChecked(typ == k)
+        menu.addAction("Actual size", setter("scale", 1.0))
+        menu.addSeparator()
+        menu.addAction("Remove", lambda: self.remove_element(el_id))
+        menu.exec(e.globalPos())
+
+    def contextMenuEvent(self, e) -> None:
+        if self.editing:
+            self._edit_menu(e)
 
     def set_stream_live(self, live: bool) -> None:
         if live != self.stream_live:
@@ -165,6 +322,8 @@ class CpsArea(QWidget):
         return self.dirty or needs_animation(self.kbm, self.style_, now)
 
     def mousePressEvent(self, e) -> None:
+        if self.editing:
+            return self._edit_press(e)
         self.clicks.count += 1
         self.setFocus()
         self.held_buttons.add(self._button_name(e.button()))
@@ -177,9 +336,12 @@ class CpsArea(QWidget):
         self.dirty = True
         self.held_changed()
 
-    mouseDoubleClickEvent = mousePressEvent
+    def mouseDoubleClickEvent(self, e) -> None:
+        self.mousePressEvent(e)
 
     def mouseReleaseEvent(self, e) -> None:
+        if self.editing:
+            return self._edit_release(e)
         self.held_buttons.discard(self._button_name(e.button()))
         name = MOUSE_NAMES.get(e.button())
         if name:
@@ -191,6 +353,8 @@ class CpsArea(QWidget):
         self.held_changed()
 
     def mouseMoveEvent(self, e) -> None:
+        if self.editing:
+            return self._edit_move(e)
         pos = e.position()
         if self._last_pos is not None:
             dx, dy = round(pos.x() - self._last_pos.x()), round(pos.y() - self._last_pos.y())
@@ -210,6 +374,8 @@ class CpsArea(QWidget):
         super().enterEvent(e)
 
     def wheelEvent(self, e) -> None:
+        if self.editing:
+            return None
         n = e.angleDelta().y() / 120.0
         if n:
             n = int(n) if float(n).is_integer() else round(n, 2)
@@ -220,6 +386,8 @@ class CpsArea(QWidget):
         e.accept()
 
     def keyPressEvent(self, e) -> None:
+        if self.editing:
+            return None
         if e.isAutoRepeat():
             return
         self.keys.count += 1
@@ -233,6 +401,8 @@ class CpsArea(QWidget):
         self.held_changed()
 
     def keyReleaseEvent(self, e) -> None:
+        if self.editing:
+            return None
         if e.isAutoRepeat():
             return
         self.held_keys.discard(QKeySequence(e.key()).toString() or str(e.key()))
@@ -265,19 +435,51 @@ class CpsArea(QWidget):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
         fill = theme.surface()
-        if self.hasFocus():
+        if self.hasFocus() and not self.editing:
             fill = fill.lighter(112)
         r = QRectF(self.rect()).adjusted(1, 1, -1, -1)
         p.fillPath(rounded_rect_path(r, theme.corner_radius(12)), fill)
         p.setPen(contrast_text(fill))
         p.setFont(QFont(self.font()))
         p.drawText(QRectF(r.left(), r.top() + 6, r.width(), 22), Qt.AlignCenter, self.hint)
-        top = r.top() + 34
+        top = r.top() + (56 if self.editing else 34)       # room for the element labels while editing
         lay = self.layout_
-        u = max(8.0, min((r.width() - 24) / lay["w"], (r.bottom() - top - 8) / lay["h"]))
-        w, _h = picture_size(lay, self.style_, u)
-        paint_kbm(p, lay, self.style_, self.kbm, time.perf_counter(), unit=u,
-                  origin=(r.left() + (r.width() - w) / 2, top))
+        rects = [kl.element_rect(e) for e in self.scene["elements"]]
+        if rects:
+            minx, miny = min(x for x, *_ in rects), min(y for _x, y, *_ in rects)
+            maxx = max(x + w for x, _y, w, _h in rects)
+            maxy = max(y + h for _x, y, _w, h in rects)
+        else:
+            minx, miny, maxx, maxy = 0.0, 0.0, 10.0, 4.0
+        if self.editing:                                    # room to grow while editing
+            maxx += 2
+            maxy += 1
+        sw, sh = max(maxx - minx, 1.0), max(maxy - miny, 1.0)
+        u = max(6.0, min((r.width() - 24) / sw, (r.bottom() - top - 8) / sh))
+        ox = r.left() + (r.width() - sw * u) / 2 - minx * u
+        oy = top - miny * u
+        self._geom = (ox, oy, u)
+        now = time.perf_counter()
+        paint_kbm(p, lay, self.style_, self.kbm, now, unit=u, origin=(ox, oy))
+        if self.editing:
+            from PySide6.QtGui import QPen
+            acc = theme.button_color()
+            f = QFont(self.font())
+            f.setPointSizeF(max(7.0, f.pointSizeF() * 0.85))
+            p.setFont(f)
+            for el in self.scene["elements"]:
+                x, y, w, h = kl.element_rect(el)
+                box = QRectF(ox + x * u, oy + y * u, w * u, h * u)
+                sel = el.get("id") == self.selected
+                pen = QPen(acc if sel else contrast_text(fill), 2 if sel else 1, Qt.SolidLine if sel else Qt.DashLine)
+                p.setPen(pen)
+                p.setBrush(Qt.NoBrush)
+                p.drawRect(box)
+                p.drawText(QRectF(box.left(), box.top() - 18, max(box.width(), 220.0), 16), Qt.AlignLeft,
+                           f"{kl.ELEMENT_TYPES.get(el.get('type'), el.get('type'))}  ({el.get('id')})")
+                if sel:
+                    p.setBrush(acc)
+                    p.drawRect(QRectF(box.right() - 6, box.bottom() - 6, 12, 12))
 
 
 class StreamClient(QThread):
@@ -393,13 +595,25 @@ class VisualizerPage(PageBase):
 
         row = QHBoxLayout()
         self.source_lbl = dim_label("")
-        self.show_pad = CustomCheckBox("Show controller")
-        self.show_pad.setToolTip("Draw a game controller next to the mouse (needs the daemon: controller input "
-                                 "comes from it).")
-        self.show_pad.toggled.connect(self.area.set_show_controller)
+        self.edit_btn = CustomButton("Edit layout")
+        self.edit_btn.setCheckable(True)
+        self.edit_btn.setToolTip("Move, resize, add and remove what's shown -- keyboard (half, 60%, 80%, full), "
+                                 "mouse, controller, and the Comet / Mousepad / Joystick movement views. "
+                                 "The same arrangement is what OBS shows.")
+        self.edit_btn.toggled.connect(self._toggle_edit)
+        self.add_el_btn = CustomButton("+ Add element")
+        self.add_el_btn.clicked.connect(self._add_menu)
+        self.reset_layout_btn = CustomButton("Reset layout")
+        self.reset_layout_btn.clicked.connect(self.area.reset_scene)
+        for b in (self.add_el_btn, self.reset_layout_btn):
+            b.setVisible(False)
+        self.pad_hint = dim_label("")
         src_row = QHBoxLayout()
         src_row.addWidget(self.source_lbl, 1)
-        src_row.addWidget(self.show_pad)
+        src_row.addWidget(self.pad_hint)
+        src_row.addWidget(self.add_el_btn)
+        src_row.addWidget(self.reset_layout_btn)
+        src_row.addWidget(self.edit_btn)
         self.content_layout.insertLayout(self.content_layout.indexOf(self.area) + 1, src_row)
         self.stream = StreamClient(self)
         self.stream.event.connect(self._stream_event)
@@ -452,6 +666,8 @@ class VisualizerPage(PageBase):
         from overlay_settings import OverlaySection
         self.overlay = OverlaySection()
         self.content_layout.addWidget(self.overlay)
+        self.area.set_scene(self.overlay.cfg["scene"])
+        self.area.on_scene_changed = self.overlay.set_scene
         self.content_layout.addStretch(1)
 
         self.timer = QTimer(self)
@@ -471,6 +687,28 @@ class VisualizerPage(PageBase):
             self.stream._stop = False
             self.stream.start()
 
+    def _controller_seen(self) -> None:
+        if not kl.scene_has(self.area.scene, "controller"):
+            self.pad_hint.setText("Controller detected -- add it with Edit layout.")
+
+    def _toggle_edit(self, on: bool) -> None:
+        self.area.set_editing(on)
+        self.edit_btn.setText("Done" if on else "Edit layout")
+        for b in (self.add_el_btn, self.reset_layout_btn):
+            b.setVisible(on)
+        if not on:
+            self.overlay.flush()
+        if kl.scene_has(self.area.scene, "controller"):
+            self.pad_hint.setText("")
+
+    def _add_menu(self) -> None:
+        from PySide6.QtGui import QCursor
+        from PySide6.QtWidgets import QMenu
+        menu = QMenu(self)
+        for typ, label in kl.ELEMENT_TYPES.items():
+            menu.addAction(label, lambda t=typ: self.area.add_element(t))
+        menu.exec(QCursor.pos())
+
     def _stream_live(self, live: bool) -> None:
         self.area.set_stream_live(live)
         self.source_lbl.setText(
@@ -483,16 +721,16 @@ class VisualizerPage(PageBase):
         now = time.perf_counter()
         if typ == "k":
             k.key(name, a == 1, now, src)
-            if src == "r" and name in kl.PAD_BUTTONS and not self.show_pad.isChecked():
-                self.show_pad.setChecked(True)          # a controller showed up: show it
+            if src == "r" and name in kl.PAD_BUTTONS:
+                self._controller_seen()
         elif typ == "m":
             k.move(a, b, now, src)
         elif typ == "w":
             k.wheel(a, now, src)
         elif typ == "a":
             k.axis(name, a, now, src)
-            if src == "r" and not self.show_pad.isChecked() and abs(a) > 0.5:
-                self.show_pad.setChecked(True)
+            if src == "r" and abs(a) > 0.5:
+                self._controller_seen()
         self.area.dirty = True
 
     def reset(self) -> None:

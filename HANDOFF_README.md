@@ -29,7 +29,7 @@ features. That document's content has been folded into this one
 (see "Prior session" below) rather than kept as a separate file, so
 this is now the single source of truth for project state.
 
-## Start here — current state (Session 18)
+## Start here — current state (Session 19)
 
 **What it is.** A NixOS input-macro system: a C++17 daemon (evdev in,
 `uinput` out; control socket; embedded CPython *or* a built-in interpreter
@@ -164,6 +164,56 @@ separately from profiles.
     nothing burned in until export; previewer/editor toggle, move and
     resize via mpv `lavfi-complex`.
 
+- **Session 19: scene of elements, movement views, Steam devices.**
+  - *Scene* (`overlay.json` `scene.elements`, edited in the visualizer):
+    each element is `{id, type, x, y, scale}` in key units plus
+    `layout` (keyboard presets `full` / `tkl` (80%) / `60` / `half` (left
+    half, gaming)), `look` (mouse `classic` / `gaming` (extra side buttons)
+    / `minimal` / `buttons` (buttons only)), or `size` + `center` (movement
+    views). Types: keyboard, mouse, controller, comet, mousepad, joystick;
+    any number, any arrangement. `kbm_layout.build_scene(scene, only=id)`
+    builds the whole picture or one element; items carry `el` and `fs`
+    (element scale). `DEFAULT_SCENE` = TKL keyboard, classic mouse, a
+    tail-centered comet under the mouse. Old configs migrate (`split` ->
+    `element_sources`, old controller page -> a controller element).
+  - *Edit layout* (visualizer page): drag to move (quarter-key snap),
+    corner handle to resize (0.3x-4x), right-click for layout / look /
+    centering / remove; "+ Add element", "Reset layout". A controller
+    button seen on the stream shows a hint to add the controller here; the
+    old "show controller" checkbox is gone.
+  - *Movement views* (replace the curved arrow; `kbm_layout.motion_frame`,
+    mirrored exactly in `common.js` `motionFrame` and checked under node):
+    a square, invisible-background view of the last `trail_seconds` of
+    pointer motion. Trail width shrinks toward older points, alpha falls in
+    the oldest quarter; the dot is wider than the trail. *Comet*: centered
+    on the tail (oldest point, default) or the head. *Mousepad*: a fixed pad
+    whose origin re-centers after `recenter_s` of stillness. *Joystick*: the
+    dot shows velocity (tanh-mapped by `joystick_speed`). View scale: the
+    pad side is `pad_fraction`% (80) of `screen_height` (the primary
+    screen's height, auto-filled); `auto_zoom` (default on) zooms out at
+    once when the trail would leave the view and eases back in (tau 0.6 s);
+    off = crop mode (drop the points that would go off-view, fade faster).
+    Clicks: left = ring out, right = ring in, middle = two 60-degree arcs up
+    and down, side = a short arc toward back/forward, held button = a ring
+    on the dot; scroll = chevrons stacking above/below. Each trail segment
+    mixes input/output color by how much macro motion it contains.
+  - *Pages*: `full` at `/` draws the scene; with `element_sources` every
+    element is also served at `/el/<id>` (events filtered with `?el=`), and
+    "Add to OBS" creates one source per element ("Puppetry: <id>").
+    `movement` (port 17382) shows one view chosen by its `motion` style.
+    The per-piece ports of Session 18 are gone. Renderer modes:
+    `full`, `simple`, `movement`, `el:<id>` (or a bare id / type).
+  - *Steam Controller / Steam Deck*: in desktop mode Steam turns the pad
+    into its own virtual keyboard and mouse (and a gamepad only in game),
+    so `find_best_controller` never saw it. The daemon now also watches
+    every Valve (vendor 0x28de) input node read-only as an *extra*
+    (`watch_steam_devices`, default on), optionally every input device
+    (`watch_all_devices`), rescanning every 3 s; a claim registry keeps the
+    controller and extras watchers from opening one node twice. Extras feed
+    the stream and the visualizer and are never grabbed.
+    `puppetry-daemon --list-devices` prints every node with vendor, kind and
+    whether Puppetry would watch it. Not confirmed on the hardware.
+
 **Not verified on real hardware / display.** Everything above ran under
 `QT_QPA_PLATFORM=offscreen`; OBS pages were rendered in headless Chromium
 (the engine behind OBS's browser source). Unchecked: a real OBS (tested
@@ -180,7 +230,8 @@ that only accept known pads may ignore it). Visualizer mouse movement is measure
 **Planned, in rough priority.**
 1. Next: real-desktop pass (OBS Browser Source + "Add to OBS" + replay
    length; the helper starting with the daemon; timing offset calibration
-   against a real replay clip); icon art (drop SVGs into
+   against a real replay clip; `--list-devices` with a Steam Controller in
+   desktop mode and in game); icon art (drop SVGs into
    `gui/ui_kit/resources/icons/`; names in `gui/ui_kit/icons.py`, including
    `nav_dictionary`); a real `nix build`. The afterglow side of the clip
    overlay (per-clip-type toggle + pipeline hook) is specified in the prep
@@ -195,14 +246,12 @@ that only accept known pads may ignore it). Visualizer mouse movement is measure
    colors in the overlay.
 
 **Open questions.** Whether the Dictionary should also preview the matching
-block; which easing recorded movement should use (`linear` today); whether
-the afterglow overlay should be burned into the saved clip or kept as a
-side file for the editor; whether the OBS password should move from
+block; which easing recorded movement should use (`linear` today); whether the OBS password should move from
 `overlay.json` (mode 0600) to a keyring.
 
 **Run the checks.** GUI: `cd gui && QT_QPA_PLATFORM=offscreen python3
-test_app.py` (289 checks), `python3 test_overlay.py` (82 checks: layout and
-arrow math, replay file, helper over HTTP/SSE with a fake daemon, fake OBS
+test_app.py` (298 checks), `python3 test_overlay.py` (112 checks: layouts,
+scene, movement-view math, replay file, helper over HTTP/SSE with a fake daemon, fake OBS
 server, renderer + CLI, pieces/controller/source colors, transparency per
 format, align/layer, JS parity; needs ffmpeg, node optional) and
 `python3 ui_kit_test_kit.py`. Daemon: `cd native && mkdir build && cd build

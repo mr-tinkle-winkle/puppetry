@@ -36,9 +36,8 @@ WEB_DIR = Path(__file__).resolve().parent / "overlay_web"
 MOVE_BATCH_S = 1 / 60          # mouse motion is summed into ~60 Hz steps for the pages
 BUFFER_MOVE_BATCH_S = 0.008    # ... and ~125 Hz steps in the replay-buffer file
 STATIC = {"/kbm.js": "application/javascript", "/common.js": "application/javascript"}
-PAGES = ("full", "keyboard", "mouse", "controller", "simple", "movement")
-PAGE_FILE = {"full": "full", "keyboard": "full", "mouse": "full", "controller": "full", "simple": "simple",
-             "movement": "movement"}
+PAGES = ("full", "simple", "movement")
+PAGE_FILE = {"full": "full", "simple": "simple", "movement": "movement"}
 AXIS_BATCH_S = 1 / 60
 
 
@@ -256,8 +255,9 @@ class ReplayBuffer:
 # Pages
 # ---------------------------------------------------------------------------
 class Client:
-    def __init__(self):
+    def __init__(self, el: str | None = None):
         self.q: queue.Queue = queue.Queue(maxsize=2000)
+        self.el = el                         # an element page (/el/<id>) or None (the whole page)
 
     def put(self, msg: str) -> None:
         try:
@@ -286,14 +286,23 @@ class PageServer:
                 self.end_headers()
                 self.wfile.write(body)
 
+            def _el(self):
+                """Element id from ?el=<id> (the element pages pass it on)."""
+                from urllib.parse import parse_qs, urlparse
+                v = parse_qs(urlparse(self.path).query).get("el")
+                return v[0] if v else None
+
             def do_GET(self):
                 path = self.path.split("?", 1)[0]
+                if page_ref == "full" and path.startswith("/el/") and len(path) > 4:
+                    return self._send(200, "text/html; charset=utf-8", (WEB_DIR / "full.html").read_bytes())
                 if path in ("/", "/index.html"):
                     return self._send(200, "text/html; charset=utf-8", (WEB_DIR / f"{PAGE_FILE[page_ref]}.html").read_bytes())
                 if path in STATIC:
                     return self._send(200, STATIC[path], (WEB_DIR / path.lstrip("/")).read_bytes())
                 if path == "/config":
-                    return self._send(200, "application/json", json.dumps(hub_ref.page_config(page_ref)).encode())
+                    return self._send(200, "application/json",
+                                      json.dumps(hub_ref.page_config(page_ref, self._el())).encode())
                 if path == "/state":
                     return self._send(200, "application/json", json.dumps(hub_ref.snapshot()).encode())
                 if path == "/events":
@@ -307,10 +316,11 @@ class PageServer:
                 self.send_header("Connection", "keep-alive")
                 self.send_header("Access-Control-Allow-Origin", "*")
                 self.end_headers()
-                client = Client()
+                client = Client(self._el())
                 hub_ref.add_client(page_ref, client)
                 try:
-                    self.wfile.write(f"event: config\ndata: {json.dumps(hub_ref.page_config(page_ref))}\n\n".encode())
+                    cfg_now = hub_ref.page_config(page_ref, client.el)
+                    self.wfile.write(f"event: config\ndata: {json.dumps(cfg_now)}\n\n".encode())
                     self.wfile.write(f"event: snapshot\ndata: {json.dumps(hub_ref.snapshot())}\n\n".encode())
                     self.wfile.flush()
                     while not hub_ref.stopping:
@@ -390,11 +400,14 @@ class Hub:
         except OSError:
             return None
 
-    def page_config(self, page: str) -> dict:
+    def page_config(self, page: str, el: str | None = None) -> dict:
         c = self.cfg
-        if page in ("full", "keyboard", "mouse", "controller"):
-            return {"style": c["style"], "layout": kl.build_piece(page, c["style"]), "piece": page,
-                    "pad_labels": kl.PAD_LABELS.get(c["style"].get("controller_labels", "xbox"), kl.PAD_LABELS["xbox"])}
+        if page == "full":
+            out = {"style": c["style"], "layout": kl.build_scene(c["scene"], only=el), "piece": el or "scene",
+                   "pad_labels": kl.PAD_LABELS.get(c["style"].get("controller_labels", "xbox"), kl.PAD_LABELS["xbox"])}
+            if el and not any(e.get("id") == el for e in c["scene"].get("elements", [])):
+                out["missing"] = el
+            return out
         if page == "simple":
             st = c["simple_style"]
             labels = dict(kl.LABELS)
@@ -432,8 +445,11 @@ class Hub:
             if self.length_source == "fallback":
                 self.replay_length = float(cfg["replay"]["fallback_seconds"])
                 self.replay.set_length(self.replay_length)
-        for page in self.clients:
-            self.broadcast(page, "config", self.page_config(page))
+        for page in self.clients:                     # each client gets ITS page / element's config
+            with self.lock:
+                targets = list(self.clients[page])
+            for cl in targets:
+                cl.put(f"event: config\ndata: {json.dumps(self.page_config(page, cl.el), separators=(',', ':'))}\n\n")
         self.write_status()
 
     def reload_if_changed(self) -> bool:
@@ -475,6 +491,8 @@ class Hub:
     def write_status(self) -> None:
         st = {"pid": os.getpid(), "updated": time.time(), "daemon_connected": self.source.connected,
               "pages": {p: f"http://127.0.0.1:{s.port}/" for p, s in self.servers.items()},
+              "elements": [{"id": e.get("id"), "type": e.get("type")} for e in self.cfg["scene"].get("elements", [])],
+              "element_urls": oc.element_urls(self.cfg),
               "replay": {"enabled": bool(self.replay), "file": str(self.buffer_path),
                          "length_s": self.replay_length, "length_source": self.length_source,
                          "extra_s": float(self.cfg["replay"]["extra_seconds"])},
@@ -518,7 +536,10 @@ class Hub:
                 "out": {k: now - t for k, t in s.out_held.items()},
                 "burst": [[round(t - now, 4), x, y] for t, x, y in s.burst[-600:]], "burst_src": s.burst_src,
                 "last_move_age": now - s.last_move_t if s.burst else None,
-                "axes": dict(s.axes), "out_axes": dict(s.out_axes)}
+                "axes": dict(s.axes), "out_axes": dict(s.out_axes),
+                "motion": [[round(t - now, 4), x, y, src] for t, x, y, src in s.motion[-1500:]],
+                "clicks": [[round(t - now, 4), b, src] for t, b, src in s.clicks],
+                "wheels": [[round(t - now, 4), d, src] for t, d, src in s.wheels]}
 
     # -- events --------------------------------------------------------------------
     def name(self, code: int) -> str:

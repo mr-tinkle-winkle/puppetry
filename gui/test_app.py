@@ -1197,10 +1197,12 @@ def main() -> int:
     for i in range(6):
         QTest.mouseMove(vp.area, QPoint(256, 200 - i * 10))
         pump(5)
-    curve = kl.arrow_curve(vp.area.kbm.burst)
-    check("visualizer: mouse movement gives a curved arrow (left, then up at the end)",
-          curve is not None and curve["p3"][0] < 0 and curve["p3"][1] < 0
-          and kl.arrow_head_dir([curve["p0"], curve["c1"], curve["c2"], curve["p3"]])[1] < 0)
+    mo = vp.area.kbm.motion
+    check("visualizer: mouse movement is recorded for the movement views (left, then up)",
+          len(mo) > 4 and mo[-1][1] < mo[0][1] and mo[-1][2] < mo[0][2])
+    fr = kl.motion_frame(vp.area.kbm, "comet", 200, {"trail_seconds": 1.0, "trail_width": 4.0}, time.perf_counter(),
+                         "t", "tail")
+    check("visualizer: the comet has a trail and a dot", len(fr["trail"]) > 2 and fr["dot"] is not None)
     vp.area.repaint()
 
     # ---- OBS & replay overlay section
@@ -1234,14 +1236,12 @@ def main() -> int:
         d2.preview.repaint()
         d2.close()
     ov.split_toggle.setChecked(True)
-    ov.controller_toggle.setChecked(True)
     ov.flush()
-    check("overlay: split pieces + controller get their own pages",
-          set(oc.pages(oc.load())) == {"keyboard", "mouse", "controller", "simple", "movement"}
-          and ov.keyboard_url.isEnabled() and not ov.full_url.isEnabled())
+    ids = [e["id"] for e in oc.load()["scene"]["elements"]]
+    check("overlay: each element gets its own OBS page", set(ov.element_urls) == set(ids)
+          and all("/el/" in ov.element_urls[i].text() for i in ids))
     ov.split_toggle.setChecked(False)
     ov.full_toggle.setChecked(False)
-    ov.controller_toggle.setChecked(False)
     ov.simple_toggle.setChecked(False)
     ov.replay_toggle.setChecked(False)
     ov.flush()
@@ -1257,14 +1257,59 @@ def main() -> int:
     kbm = vp.area.kbm
     check("visualizer: stream input is split into yours vs macros'",
           "KEY_Q" in kbm.held and "KEY_E" in kbm.out_held and kbm.axis_value("RT") == (0.8, "m"))
-    check("visualizer: a controller button shows the controller", vp.show_pad.isChecked()
-          and any(i["kind"] == "stick" for i in vp.area.layout_["items"]))
+    check("visualizer: a controller button suggests adding the controller", "Controller" in vp.pad_hint.text())
     QTest.keyClick(vp.area, Qt.Key_Z)
     check("visualizer: with the stream live, window events don't double-draw keys", "KEY_Z" not in kbm.held
           and "KEY_Z" not in kbm.released)
     vp.area.repaint()
     vp._stream_live(False)
     check("visualizer: falls back to window input when the daemon's gone", not vp.area.stream_live)
+
+    # ---- Edit layout: add / move / resize / remove elements, saved to overlay.json
+    vp.edit_btn.setChecked(True)
+    pump(3)
+    check("edit: the button switches to Done and shows Add / Reset", vp.edit_btn.text() == "Done"
+          and vp.add_el_btn.isVisibleTo(vp) and vp.area.editing)
+    n0 = len(vp.area.scene["elements"])
+    pad = vp.area.add_element("controller")
+    for typ in ("mousepad", "joystick"):
+        vp.area.add_element(typ)
+    ov.flush()
+    saved_ids = {e["id"]: e["type"] for e in oc.load()["scene"]["elements"]}
+    check("edit: added elements are saved to the scene", len(saved_ids) == n0 + 3
+          and pad["id"] in saved_ids and "joystick" in saved_ids.values())
+    vp.area.repaint()
+    pump(2)
+    ox, oy, u = vp.area._geom
+    x, y, ew, eh = kl.element_rect(pad)
+    start = QPoint(int(ox + (x + ew / 2) * u), int(oy + (y + eh / 2) * u))
+    QTest.mousePress(vp.area, Qt.LeftButton, Qt.NoModifier, start)
+    QTest.mouseMove(vp.area, start + QPoint(int(u * 2), int(u)))
+    QTest.mouseRelease(vp.area, Qt.LeftButton, Qt.NoModifier, start + QPoint(int(u * 2), int(u)))
+    moved = vp.area.element(pad["id"])
+    check("edit: dragging moves an element (quarter-key snap)", abs(moved["x"] - (x + 2)) <= 0.25
+          and abs(moved["y"] - (y + 1)) <= 0.25 and (moved["x"] * 4) % 1 == 0)
+    moved["scale"] = 1.5
+    vp.area._scene_changed()
+    ov.flush()
+    check("edit: resize is saved", next(e for e in oc.load()["scene"]["elements"] if e["id"] == pad["id"])["scale"] == 1.5)
+    kb = next(e for e in vp.area.scene["elements"] if e["type"] == "keyboard")
+    for preset in kl.KEYBOARD_PRESETS:
+        kb["layout"] = preset
+        vp.area._scene_changed()
+        vp.area.repaint()
+    for look in kl.MOUSE_LOOKS:
+        vp.area.add_element("mouse")["look"] = look
+        vp.area._scene_changed()
+        vp.area.repaint()
+    check("edit: every keyboard preset and mouse look draws", True)
+    vp.area.remove_element(pad["id"])
+    check("edit: remove", vp.area.element(pad["id"]) is None)
+    vp.area.reset_scene()
+    ov.flush()
+    check("edit: reset restores the default scene", oc.load()["scene"]["elements"] == kl.DEFAULT_SCENE["elements"])
+    vp.edit_btn.setChecked(False)
+    check("edit: Done leaves edit mode", not vp.area.editing and vp.edit_btn.text() == "Edit layout")
 
     L = it.InputLog()
     L.add(0.0, "kd", "KEY_LEFTCTRL"); L.add(0.05, "kd", "KEY_C"); L.add(0.15, "ku", "KEY_C"); L.add(0.2, "ku", "KEY_LEFTCTRL")

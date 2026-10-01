@@ -22,14 +22,19 @@ from puppetry_config import CONFIG_DIR  # noqa: E402  (one definition of the con
 # (key, label, type, default, extra) -- type: bool | color | int | float | choice | text
 # extra: (min, max) for numbers, list of (value, label) for choice.
 # Groups are only for laying out the form.
+MOTION_OPTIONS = [
+    ("trail_seconds", "Trail length (seconds)", "float", 1.0, (0.1, 10.0)),
+    ("trail_width", "Trail thickness (% of the view)", "float", 4.0, (0.5, 20.0)),
+    ("auto_zoom", "Auto zoom (zoom out instead of cutting the trail short)", "bool", True, None),
+    ("pad_fraction", "View covers this much of your screen height (%)", "int", 80, (5, 500)),
+    ("screen_height", "Screen height (px)", "int", 1080, (240, 8640)),
+    ("recenter_s", "Mousepad: re-center after resting (seconds)", "float", 1.0, (0.1, 30.0)),
+    ("joystick_speed", "Joystick: speed for a full push (px/s)", "int", 3000, (100, 50000)),
+]
+
 STYLE_SCHEMA = [
-    ("Layout", [
-        ("show_keyboard", "Show keyboard", "bool", True, None),
-        ("show_function_row", "Function row (Esc, F1-F12)", "bool", True, None),
-        ("show_nav", "Insert / Home / Page keys", "bool", True, None),
-        ("show_arrows", "Arrow keys", "bool", True, None),
-        ("show_mouse", "Show mouse", "bool", True, None),
-        ("show_arrow", "Movement arrow under the mouse", "bool", True, None),
+    # (what's shown and where: the Input Visualizer's Edit mode -> "scene")
+    ("Size", [
         ("unit", "Key size (px)", "int", 48, (16, 200)),
         ("gap", "Gap between keys (% of a key)", "int", 8, (0, 40)),
         ("radius", "Key corner rounding (% of a key)", "int", 14, (0, 50)),
@@ -45,7 +50,7 @@ STYLE_SCHEMA = [
         ("text_color", "Text", "color", "#e6e6e6ff", None),
         ("pressed_text_color", "Text on a pressed key", "color", "#111111ff", None),
         ("glow", "Glow around pressed keys", "bool", True, None),
-        ("arrow_color", "Movement arrow", "color", "#e0955aff", None),
+        ("arrow_color", "Mouse movement (your input)", "color", "#e0955aff", None),
     ]),
     ("Text", [
         ("font_family", "Font", "text", "sans-serif", None),
@@ -63,11 +68,8 @@ STYLE_SCHEMA = [
         ("release_fade_ms", "Fade out after release (ms)", "int", 120, (0, 3000)),
         ("show_macro_output", "Show what macros press and move (in the output color)", "bool", True, None),
         ("wheel_flash_ms", "Wheel flash (ms)", "int", 250, (0, 3000)),
-        ("arrow_width", "Arrow thickness (px)", "float", 3.0, (0.5, 30.0)),
-        ("arrow_full_distance", "Movement for a full-length arrow (px)", "int", 600, (10, 10000)),
-        ("arrow_fade_ms", "Hide the arrow after (ms, 0 = keep)", "int", 0, (0, 60000)),
-        ("show_move_text", "Print the distance under the arrow", "bool", False, None),
     ]),
+    ("Mouse movement (Comet, Mousepad, Joystick)", MOTION_OPTIONS),
 ]
 
 SIMPLE_SCHEMA = [
@@ -98,18 +100,16 @@ SIMPLE_SCHEMA = [
 ]
 
 MOVEMENT_SCHEMA = [
-    ("Mouse movement", [
-        ("arrow_color", "Arrow (your movement)", "color", "#e0955aff", None),
-        ("macro_color", "Arrow (a macro's movement)", "color", "#5a9ee0ff", None),
+    ("Mouse movement page", [
+        ("motion", "Style", "choice", "comet", [("comet", "Comet"), ("mousepad", "Mousepad"), ("joystick", "Joystick")]),
+        ("center", "Comet: keep centered", "choice", "tail", [("tail", "Tail centered"), ("head", "Head centered")]),
+        ("arrow_color", "Your movement", "color", "#e0955aff", None),
+        ("macro_color", "A macro's movement", "color", "#5a9ee0ff", None),
         ("show_macro_output", "Show movement made by macros", "bool", True, None),
-        ("arrow_width", "Arrow thickness (px)", "float", 5.0, (0.5, 40.0)),
         ("size", "Box size (px)", "int", 240, (40, 2000)),
         ("background", "Background", "color", "#00000000", None),
-        ("arrow_full_distance", "Movement for a full-length arrow (px)", "int", 600, (10, 10000)),
-        ("arrow_fade_ms", "Hide the arrow after (ms, 0 = keep)", "int", 1500, (0, 60000)),
-        ("show_move_text", "Print the distance under the arrow", "bool", False, None),
-        ("text_color", "Text", "color", "#ffffffff", None),
     ]),
+    ("Behavior", MOTION_OPTIONS),
 ]
 
 
@@ -117,11 +117,14 @@ def schema_defaults(schema) -> dict:
     return {key: default for _g, opts in schema for key, _l, _t, default, _e in opts}
 
 
+import kbm_layout as _kl  # noqa: E402
+
 DEFAULTS = {
-    # "split": keyboard and mouse as two pages (keyboard_port, mouse_port)
-    # instead of one combined page (port)
-    "full": {"enabled": False, "port": 17380, "split": False, "keyboard_port": 17383, "mouse_port": 17384},
-    "controller": {"enabled": False, "port": 17385},
+    # The input overlay: the scene (arranged in the Input Visualizer's Edit
+    # mode) at http://127.0.0.1:<port>/, and -- with element_sources --
+    # every element on its own at /el/<id> on the same port.
+    "full": {"enabled": False, "port": 17380, "element_sources": False},
+    "scene": copy.deepcopy(_kl.DEFAULT_SCENE),
     # mouse_movement / mouse_port: the arrow-only "movement" page
     "simple": {"enabled": False, "port": 17381, "mouse_movement": False, "mouse_port": 17382,
                "width": 900, "height": 120},
@@ -157,16 +160,30 @@ def status_file() -> Path:
 
 
 def merged(data: dict) -> dict:
-    data = dict(data or {})
+    data = copy.deepcopy(data or {})
     if "mouse_style" in data and "movement_style" not in data:     # renamed (Session 18)
         data["movement_style"] = data.pop("mouse_style")
     data.pop("mouse_style", None)
+    old_controller = data.pop("controller", None)                   # Session 18 pages -> Session 19 scene
     out = copy.deepcopy(DEFAULTS)
-    for section, vals in (data or {}).items():
-        if isinstance(vals, dict) and isinstance(out.get(section), dict):
+    for section, vals in data.items():
+        if section == "scene":
+            out["scene"] = vals if isinstance(vals, dict) and isinstance(vals.get("elements"), list) else out["scene"]
+        elif isinstance(vals, dict) and isinstance(out.get(section), dict):
             out[section].update(vals)
         else:
             out[section] = vals
+    f = out["full"]
+    if f.pop("split", False):
+        f["element_sources"] = True
+    for k in ("keyboard_port", "mouse_port"):
+        f.pop(k, None)
+    if isinstance(old_controller, dict) and old_controller.get("enabled"):
+        f["enabled"] = True
+        if not _kl.scene_has(out["scene"], "controller"):
+            right = max((_kl.element_rect(e)[0] + _kl.element_rect(e)[2] for e in out["scene"]["elements"]), default=0)
+            out["scene"]["elements"].append({"id": _kl.new_element_id(out["scene"], "controller"),
+                                             "type": "controller", "x": right + 1.0, "y": 0.0, "scale": 1.0})
     return out
 
 
@@ -187,23 +204,16 @@ def save(cfg: dict) -> None:
 
 def helper_wanted(cfg: dict) -> bool:
     """Same rule as the daemon's overlay_wanted()."""
-    return any(cfg.get(k, {}).get("enabled") for k in ("full", "controller", "simple", "replay"))
+    return any(cfg.get(k, {}).get("enabled") for k in ("full", "simple", "replay"))
 
 
 def pages(cfg: dict) -> dict:
-    """{page: port} for every page that's on. Pages: full (keyboard + mouse),
-    keyboard, mouse (split pieces), controller, simple (text list),
-    movement (the arrow on its own)."""
+    """{page: port} for every page that's on: full (the scene), simple (text
+    list), movement (one movement view). Elements live at /el/<id> on the
+    full page's port (element_urls)."""
     out = {}
-    f = cfg["full"]
-    if f["enabled"]:
-        if f.get("split"):
-            out["keyboard"] = int(f["keyboard_port"])
-            out["mouse"] = int(f["mouse_port"])
-        else:
-            out["full"] = int(f["port"])
-    if cfg["controller"]["enabled"]:
-        out["controller"] = int(cfg["controller"]["port"])
+    if cfg["full"]["enabled"]:
+        out["full"] = int(cfg["full"]["port"])
     if cfg["simple"]["enabled"]:
         out["simple"] = int(cfg["simple"]["port"])
         if cfg["simple"].get("mouse_movement"):
@@ -213,6 +223,14 @@ def pages(cfg: dict) -> dict:
 
 def urls(cfg: dict) -> dict:
     return {p: f"http://127.0.0.1:{port}/" for p, port in pages(cfg).items()}
+
+
+def element_urls(cfg: dict) -> dict:
+    """{element id: url} when "each element as its own source" is on."""
+    if not (cfg["full"]["enabled"] and cfg["full"].get("element_sources")):
+        return {}
+    port = int(cfg["full"]["port"])
+    return {e["id"]: f"http://127.0.0.1:{port}/el/{e['id']}" for e in cfg["scene"].get("elements", [])}
 
 
 def parse_color(s: str):
