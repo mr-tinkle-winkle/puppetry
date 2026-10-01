@@ -12,6 +12,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import math
 import os
 import shutil
 import socket
@@ -163,6 +164,24 @@ def layout_tests():
         fp = kl.motion_frame(pad, "mousepad", 200, style, 0.9 + k * 0.016, "pz", "head")
     check("mousepad: auto zoom keeps the whole trail (tail too) on screen",
           len(fp["trail"]) > 50 and all(-1 <= p[0] <= 201 and -1 <= p[1] <= 201 for p in fp["trail"]))
+    zz = kl.KbmState()
+    t = 0.0
+    zs = []
+    for i in range(40):                       # a big swipe left: zooms out
+        zz.move(-60, 0, t)
+        kl.motion_frame(zz, "mousepad", 200, style, t, "uz", "head")
+        t += 0.01
+    zoomed = zz.views["uz"]["z"]
+    for i in range(300):                      # then keep moving, in small circles, never resting
+        zz.move(4 * math.cos(i / 6), 4 * math.sin(i / 6), t)
+        kl.motion_frame(zz, "mousepad", 200, style, t, "uz", "head")
+        zs.append(zz.views["uz"]["z"])
+        t += 0.016
+    check("mousepad: zoomed out for the swipe, held while it's needed, then zooms all the way back in "
+          "once the trail fits -- without having to rest", zoomed < 0.5 and zs[20] < zoomed + 0.01 and zs[-1] == 1.0)
+    fz_end = kl.motion_frame(zz, "mousepad", 200, style, t, "uz", "head")
+    check("mousepad: ... and the trail is still fully in view after zooming in",
+          all(-1 <= p[0] <= 201 and -1 <= p[1] <= 201 for p in fz_end["trail"]))
     fpc = kl.motion_frame(pad, "mousepad", 200, dict(style, auto_zoom=False), 0.9, "pc", "head")
     check("mousepad: without auto zoom, what left the pad is dropped",
           all(-1 <= p[0] <= 201 and -1 <= p[1] <= 201 for p in fpc["trail"]) and len(fpc["trail"]) < len(fp["trail"]))

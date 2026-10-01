@@ -1224,6 +1224,8 @@ def main() -> int:
     dlg.form.widgets["show_timers"].setChecked(False)
     ov.flush()
     saved = oc.load()
+    check("visualizer: the page's picture uses the overlay's look (what OBS and afterglow get), live",
+          vp.area.style_["show_timers"] is False and vp.area.style_["unit"] == 33 and vp.area.style_["padding"] == 0)
     check("overlay: Customize edits the style live (no restart needed)", saved["style"]["unit"] == 33
           and saved["style"]["show_timers"] is False)
     check("overlay: every schema option has a control", set(dlg.form.widgets) == set(oc.DEFAULTS["style"]))

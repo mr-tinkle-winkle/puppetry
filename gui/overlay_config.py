@@ -28,6 +28,7 @@ MOTION_OPTIONS = [
     ("auto_zoom", "Mousepad: auto zoom (zoom out so the whole trail stays in view)", "bool", True, None),
     ("pad_fraction", "View covers this much of your screen height (%)", "int", 80, (5, 500)),
     ("screen_height", "Screen height (px)", "int", 1080, (240, 8640)),
+    ("unzoom_s", "Mousepad: zoom back in after (seconds without zooming out)", "float", 0.6, (0.0, 30.0)),
     ("recenter_s", "Mousepad: re-center after resting (seconds)", "float", 1.0, (0.1, 30.0)),
     ("joystick_speed", "Joystick: speed for a full push (px/s)", "int", 3000, (100, 50000)),
 ]

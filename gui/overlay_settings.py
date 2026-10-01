@@ -422,6 +422,7 @@ class OverlaySection(QWidget):
         super().__init__(parent)
         self.cfg = oc.load()
         self.on_scene_edited = None          # callback(scene): the Customize dialog's element list changed it
+        self.on_style_changed = None         # callback(): the look changed (the page's picture follows it)
         if not self.cfg.get("screen_height_user"):              # the movement views' scale: this screen
             scr = QApplication.primaryScreen()
             if scr is not None:
@@ -672,6 +673,8 @@ class OverlaySection(QWidget):
         self._set("simple", "mouse_movement", bool(v))
 
     def changed(self, restart: bool) -> None:
+        if self.on_style_changed:
+            self.on_style_changed()
         if restart and self._restart_sig() != self._saved_sig:
             self._save_timer.start()
         else:

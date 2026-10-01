@@ -741,10 +741,35 @@ def motion_frame(state, kind: str, box: float, style: dict, now: float, view_key
                     oy = ay - hs
                 if oy - ay > hs:
                     oy = ay + hs
+            z = 1.0
+            if auto:
+                # Zoom out at once so the WHOLE trail (not just the head) stays in view; every time
+                # that happens the "zoom back in" timer restarts. Once it runs out, pan to the
+                # trail's middle and zoom in as far as the trail allows (all the way when it fits).
+                allp = pts + [(now, ax, ay, "r")]
+
+                def extent(cx_, cy_):
+                    return max(max(abs(p[1] - cx_), abs(p[2] - cy_)) for p in allp) * scale0
+                z = view.get("z", 1.0)
+                need = extent(ox, oy)
+                allowed = min(1.0, half / need) if need > 1e-9 else 1.0
+                if allowed < z - 1e-9:
+                    z = allowed
+                    view["grow_t"] = now
+                elif z < 1.0 and now - view.get("grow_t", now) >= float(style.get("unzoom_s", 0.6)):
+                    xs, ys = [p[1] for p in allp], [p[2] for p in allp]
+                    ox = _ease(ox, (min(xs) + max(xs)) / 2, dt, 0.35)
+                    oy = _ease(oy, (min(ys) + max(ys)) / 2, dt, 0.35)
+                    need = extent(ox, oy)
+                    allowed = min(1.0, half / need) if need > 1e-9 else 1.0
+                    z = min(allowed, _ease(z, allowed, dt, 0.35))
+                    if z > 0.999:
+                        z = 1.0
+                else:
+                    z = min(z, allowed)
             view["ox"], view["oy"] = ox, oy
+            view["z"] = z
             cx, cy = ox, oy
-            # auto zoom keeps the WHOLE trail in view (not just the head)
-            need = max(max(abs(p[1] - ox), abs(p[2] - oy)) for p in pts + [(0, ax, ay, "r")]) * scale0
             if not auto:                                    # fixed scale: drop what has left the pad
                 i = 0
                 while i < len(pts) - 1 and any(max(abs(p[1] - ox), abs(p[2] - oy)) * scale0 > half
@@ -763,14 +788,7 @@ def motion_frame(state, kind: str, box: float, style: dict, now: float, view_key
             pts = pts[i:]
             c = pts[0] if center != "head" else pts[-1]
             cx, cy = c[1], c[2]
-        z = view.get("z", 1.0)
-        if auto and kind == "mousepad":
-            target = min(1.0, half / need) if need > 1e-9 else 1.0
-            z = target if target < z else _ease(z, target, dt, 0.6)
-        else:
-            z = 1.0
-        view["z"] = z
-        sc = scale0 * z
+        sc = scale0 * (view.get("z", 1.0) if (auto and kind == "mousepad") else 1.0)
         mapped = [(box / 2 + (p[1] - cx) * sc, box / 2 + (p[2] - cy) * sc, 1.0 if p[3] == "m" else 0.0)
                   for p in pts]
 

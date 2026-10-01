@@ -29,7 +29,7 @@ features. That document's content has been folded into this one
 (see "Prior session" below) rather than kept as a separate file, so
 this is now the single source of truth for project state.
 
-## Start here — current state (Session 21)
+## Start here — current state (Session 22)
 
 **What it is.** A NixOS input-macro system: a C++17 daemon (evdev in,
 `uinput` out; control socket; embedded CPython *or* a built-in interpreter
@@ -272,6 +272,20 @@ separately from profiles.
     font, separators between categories, popup sized so nothing
     truncates, and "Other installed font..." for system fonts.
 
+- **Session 22: Mousepad zooms back in; the page shows the overlay's look.**
+  - Mousepad auto zoom: zooming out is immediate and stamps `grow_t`; once
+    `unzoom_s` (default 0.6 s, new Mousepad option) passes without another
+    zoom-out, the origin eases (tau 0.35 s) to the middle of the trail's
+    bounding box and the zoom eases up to the most the trail allows,
+    reaching 1.0 when it fits -- no rest needed (before, the zoom was
+    measured from a fixed origin, so steady movement kept it zoomed out
+    until the idle re-center). Python and `common.js` match; parity cases
+    and a swipe-then-circle test cover it.
+  - The Input Visualizer page's picture draws with the overlay style
+    (`CpsArea.set_overlay_style(cfg["style"])`, padding 0), refreshed by
+    `OverlaySection.on_style_changed` on every Customize edit, so it shows
+    what OBS and afterglow get. The Dictionary keeps the app-themed style.
+
 **Not verified on real hardware / display.** Everything above ran under
 `QT_QPA_PLATFORM=offscreen`; OBS pages were rendered in headless Chromium
 (the engine behind OBS's browser source). Unchecked: a real OBS (tested
@@ -308,7 +322,7 @@ block; which easing recorded movement should use (`linear` today); whether the O
 `overlay.json` (mode 0600) to a keyring.
 
 **Run the checks.** GUI: `cd gui && QT_QPA_PLATFORM=offscreen python3
-test_app.py` (318 checks), `python3 test_overlay.py` (124 checks: layouts,
+test_app.py` (319 checks), `python3 test_overlay.py` (126 checks: layouts,
 scene, movement-view math, replay file, helper over HTTP/SSE with a fake daemon, fake OBS
 server, renderer + CLI, pieces/controller/source colors, transparency per
 format, align/layer, JS parity; needs ffmpeg, node optional) and

@@ -161,6 +161,14 @@ class CpsArea(QWidget):
         if on and not kl.scene_has(self.scene, "controller"):
             self.add_element("controller")
 
+    def set_overlay_style(self, style: dict) -> None:
+        """Draw with the OBS overlay's look (Customize), so this picture is what OBS and
+        afterglow get -- fonts, colors, key shape, timers, movement views."""
+        self.style_ = dict(style)
+        self.style_["padding"] = 0
+        self.dirty = True
+        self.update()
+
     # -- the scene / Edit mode --------------------------------------------------
     def set_scene(self, scene: dict) -> None:
         self.scene = copy.deepcopy(scene)
@@ -695,6 +703,8 @@ class VisualizerPage(PageBase):
         self.panel.set_scene(self.area.scene)
         self.area.on_scene_changed = self._area_scene_changed
         self.overlay.on_scene_edited = self._scene_from_customize
+        self.area.set_overlay_style(self.overlay.cfg["style"])
+        self.overlay.on_style_changed = lambda: self.area.set_overlay_style(self.overlay.cfg["style"])
         self.content_layout.addStretch(1)
 
         self.timer = QTimer(self)

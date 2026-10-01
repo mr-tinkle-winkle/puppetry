@@ -283,7 +283,7 @@ function motionFrame(state, kind, box, style, now, viewKey, center) {
     }
   } else {
     if (!pts.length) pts = [[now, 0, 0, "r"]];
-    let cx, cy, need;
+    let cx, cy;
     if (kind === "mousepad") {
       const ax = h.length ? h[h.length - 1][1] : 0, ay = h.length ? h[h.length - 1][2] : 0;
       let ox = view.ox ?? (h.length ? h[0][1] : ax), oy = view.oy ?? (h.length ? h[0][2] : ay);
@@ -296,10 +296,28 @@ function motionFrame(state, kind, box, style, now, viewKey, center) {
         if (ay - oy > hs) oy = ay - hs;
         if (oy - ay > hs) oy = ay + hs;
       }
-      view.ox = ox; view.oy = oy;
+      let z = 1.0;
+      if (auto) {
+        // zoom out at once to keep the WHOLE trail in view (restarting the "zoom back in"
+        // timer); once it runs out, pan to the trail's middle and zoom in as far as it allows
+        const allp = pts.concat([[now, ax, ay, "r"]]);
+        const extent = (cx_, cy_) => Math.max(...allp.map((p) => Math.max(Math.abs(p[1] - cx_), Math.abs(p[2] - cy_)))) * scale0;
+        z = view.z ?? 1.0;
+        let need = extent(ox, oy);
+        let allowed = need > 1e-9 ? Math.min(1, half / need) : 1;
+        if (allowed < z - 1e-9) { z = allowed; view.growT = now; }
+        else if (z < 1 && now - (view.growT ?? now) >= +(style.unzoom_s ?? 0.6)) {
+          const xs = allp.map((p) => p[1]), ys = allp.map((p) => p[2]);
+          ox = easeTo(ox, (Math.min(...xs) + Math.max(...xs)) / 2, dt, 0.35);
+          oy = easeTo(oy, (Math.min(...ys) + Math.max(...ys)) / 2, dt, 0.35);
+          need = extent(ox, oy);
+          allowed = need > 1e-9 ? Math.min(1, half / need) : 1;
+          z = Math.min(allowed, easeTo(z, allowed, dt, 0.35));
+          if (z > 0.999) z = 1;
+        } else z = Math.min(z, allowed);
+      }
+      view.ox = ox; view.oy = oy; view.z = z;
       cx = ox; cy = oy;
-      // auto zoom keeps the WHOLE trail in view (not just the head)
-      need = Math.max(...pts.concat([[0, ax, ay, "r"]]).map((p) => Math.max(Math.abs(p[1] - ox), Math.abs(p[2] - oy)))) * scale0;
       if (!auto) {                                  // fixed scale: drop what has left the pad
         let i = 0;
         while (i < pts.length - 1 && pts.slice(i).some((p) => Math.max(Math.abs(p[1] - ox), Math.abs(p[2] - oy)) * scale0 > half)) i++;
@@ -318,13 +336,7 @@ function motionFrame(state, kind, box, style, now, viewKey, center) {
       const c = center !== "head" ? pts[0] : pts[pts.length - 1];
       cx = c[1]; cy = c[2];
     }
-    let z = view.z ?? 1.0;
-    if (auto && kind === "mousepad") {
-      const target = need > 1e-9 ? Math.min(1, half / need) : 1;
-      z = target < z ? target : easeTo(z, target, dt, 0.6);
-    } else z = 1.0;
-    view.z = z;
-    const sc = scale0 * z;
+const sc = scale0 * (auto && kind === "mousepad" ? (view.z ?? 1) : 1);
     mapped = pts.map((p) => [box / 2 + (p[1] - cx) * sc, box / 2 + (p[2] - cy) * sc, p[3] === "m" ? 1 : 0]);
   }
   const n = mapped.length, trail = [];

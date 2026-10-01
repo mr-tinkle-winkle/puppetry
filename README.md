@@ -95,6 +95,8 @@ session to take effect.
   keyboard (hover for every alias).
 - Held keys in the Input Visualizer show how long they've been held (to the
   millisecond).
+- The Input Visualizer's picture uses the overlay's look from
+  **Customize…**, so it matches what OBS and afterglow show.
 - **Edit layout** (Input Visualizer) arranges what's drawn: drag to move,
   drag the corner square to resize. A sidebar lists every element; the
   selected one's options (keyboard size, mouse look, movement style, which
@@ -108,7 +110,8 @@ session to take effect.
   - mouse movement views, all square with no background:
     - *Mousepad* (default): the dot moves around a virtual mousepad that
       re-centers after a pause; auto zoom (on by default) zooms out so the
-      whole trail stays in view;
+      whole trail stays in view, then zooms back in once it hasn't needed
+      to zoom out for a moment;
     - *Comet*: a trail behind a dot that follows the head (the dot stays
       centered; default) or the tail, always at the same scale, so a
       longer trail means faster movement;
