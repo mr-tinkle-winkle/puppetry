@@ -196,7 +196,7 @@ class FrameMaker:
                 p.fillRect(QRectF(0, 0, w, h), bg)
             from kbm_paint import paint_motion
             paint_motion(p, QRectF(0, 0, w, h), state, self.style, t, self.style.get("motion", "comet"),
-                         "movement", self.style.get("center", "tail"))
+                         "movement", self.style.get("center", "head"))
         else:
             self._paint_simple(p, state, t, w, h)
         p.end()

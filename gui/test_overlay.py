@@ -166,6 +166,22 @@ def layout_tests():
           len(full_rings) == 2 and full_rings[0]["r"] < full_rings[1]["r"])
     check("clicks: middle = two 60-degree arcs top and bottom; side buttons = one arc each side",
           ((90.0, 60.0), (270.0, 60.0)) in rings and ((180.0, 60.0),) in rings and ((0.0, 60.0),) in rings)
+    fi = kl.motion_frame(ck, "comet", 200, {"invert_side_rings": True}, 1.1, "ri", "tail")
+    side_arcs = [r["arcs"][0][0] for r in fr["rings"] if r["arcs"] and len(r["arcs"]) == 1]
+    inv_arcs = [r["arcs"][0][0] for r in fi["rings"] if r["arcs"] and len(r["arcs"]) == 1]
+    check("clicks: back goes left and forward right; 'invert side button rings' swaps them",
+          side_arcs == [180.0, 0.0] and inv_arcs == [0.0, 180.0])
+    check("comet follows its head by default", kl.DEFAULT_SCENE["elements"][2]["center"] == "head"
+          and kl.default_element({"elements": []}, "comet")["center"] == "head"
+          and oc.DEFAULTS["movement_style"]["center"] == "head")
+    old = oc.merged({"scene": {"elements": [{"id": "c", "type": "comet", "center": "tail", "x": 0, "y": 0}]},
+                     "movement_style": {"center": "tail"}})
+    check("saved configs from before move to 'follows head' once", old["scene"]["elements"][0]["center"] == "head"
+          and old["movement_style"]["center"] == "head")
+    kept = oc.merged(dict(old, scene={"elements": [{"id": "c", "type": "comet", "center": "tail", "x": 0, "y": 0}]}))
+    check("... and a later choice of 'follows tail' is kept", kept["scene"]["elements"][0]["center"] == "tail")
+    inv_item = kl.element_layout({"id": "c", "type": "comet", "invert_side": True})["items"][0]
+    check("an element's own 'invert side button rings' reaches its item", inv_item["invert_side"] is True)
     check("wheel: chevrons above for up, below for down",
           {c["dir"] for c in fr["chevrons"]} == {1, -1}
           and all((c["y"] < fr["dot"][1]) == (c["dir"] > 0) for c in fr["chevrons"]))
@@ -716,15 +732,16 @@ def js_parity_tests():
     for i in range(30):
         events.append(["mv", t, -50, 3, "m" if i % 3 == 0 else "r"])
         t += 0.008
-    events += [["kd", t, "BTN_LEFT", "r"], ["wh", t + 0.01, 1, "r"], ["kd", t + 0.02, "BTN_MIDDLE", "m"]]
+    events += [["kd", t, "BTN_LEFT", "r"], ["wh", t + 0.01, 1, "r"], ["kd", t + 0.02, "BTN_MIDDLE", "m"],
+               ["kd", t + 0.025, "BTN_SIDE", "r"], ["kd", t + 0.026, "BTN_EXTRA", "r"]]
     times = [t + 0.03 + k * 0.016 for k in range(12)]
     style = {"screen_height": 900, "pad_fraction": 60, "trail_seconds": 0.5, "joystick_speed": 2500}
-    cases = [("comet", "tail", True), ("comet", "head", True), ("comet", "tail", False),
-             ("mousepad", "tail", True), ("mousepad", "tail", False), ("joystick", "tail", True)]
+    cases = [("comet", "tail", True, False), ("comet", "head", True, True), ("comet", "tail", False, False),
+             ("mousepad", "tail", True, False), ("mousepad", "tail", False, True), ("joystick", "tail", True, False)]
 
     def py_frames():
         out = []
-        for kind, center, auto in cases:
+        for kind, center, auto, inv in cases:
             st = kl.KbmState()
             for e in events:
                 if e[0] == "mv":
@@ -734,21 +751,21 @@ def js_parity_tests():
                 else:
                     st.wheel(e[2], e[1], e[3])
             for tt in times:
-                fr = kl.motion_frame(st, kind, 240, dict(style, auto_zoom=auto), tt, "v", center)
+                fr = kl.motion_frame(st, kind, 240, dict(style, auto_zoom=auto, invert_side_rings=inv), tt, "v", center)
             out.append(fr)
         return out
     js_events = json.dumps(events)
     script = (f"global.performance={{now:()=>0}};\n{(web / 'common.js').read_text()}\n"
               f"const ev={js_events}, times={json.dumps(times)}, style={json.dumps(style)}, cases={json.dumps(cases)};\n"
               "const res=[];\n"
-              "for (const [kind, center, auto] of cases) {\n"
+              "for (const [kind, center, auto, inv] of cases) {\n"
               "  P.motion=[]; P.clicks=[]; P.wheels=[]; P.views={}; P.held={}; P.out={}; P.released={};\n"
               "  for (const e of ev) {\n"
               "    if (e[0]==='mv') addMotion(e[1], e[2], e[3], e[4]);\n"
               "    else if (e[0]==='kd') { P.clicks.push([e[1], e[2], e[3]]); (e[3]==='r'?P.held:P.out)[e[2]]=e[1]; }\n"
               "    else P.wheels.push([e[1], e[2] > 0 ? 1 : -1, e[3]]);\n"
               "  }\n"
-              "  let fr; for (const tt of times) fr = motionFrame(P, kind, 240, Object.assign({}, style, {auto_zoom: auto}), tt, 'v', center);\n"
+              "  let fr; for (const tt of times) fr = motionFrame(P, kind, 240, Object.assign({}, style, {auto_zoom: auto, invert_side_rings: inv}), tt, 'v', center);\n"
               "  res.push(fr);\n"
               "}\n"
               "console.log(JSON.stringify({res, h: formatHold(75.5)}));")
@@ -769,8 +786,9 @@ def js_parity_tests():
             return abs(a - b) < 1e-6
         return a == b
     pyr = json.loads(json.dumps(py_frames()))
-    for (kind, center, auto), p_fr, j_fr in zip(cases, pyr, js["res"]):
-        check(f"js: {kind} ({center}, auto zoom {'on' if auto else 'off'}) draws exactly what Python draws",
+    for (kind, center, auto, inv), p_fr, j_fr in zip(cases, pyr, js["res"]):
+        check(f"js: {kind} ({center}, auto zoom {'on' if auto else 'off'}{', inverted' if inv else ''}) "
+              "draws exactly what Python draws",
               close(p_fr, j_fr))
     check("js: the page's timer format matches Python", js["h"] == kl.format_hold(75.5))
     lay = json.loads(json.dumps(kl.build_scene(None)))

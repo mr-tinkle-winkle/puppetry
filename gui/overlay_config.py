@@ -102,7 +102,9 @@ SIMPLE_SCHEMA = [
 MOVEMENT_SCHEMA = [
     ("Mouse movement page", [
         ("motion", "Style", "choice", "comet", [("comet", "Comet"), ("mousepad", "Mousepad"), ("joystick", "Joystick")]),
-        ("center", "Comet: keep centered", "choice", "tail", [("tail", "Tail centered"), ("head", "Head centered")]),
+        ("center", "Comet follows", "choice", "head", [("head", "Follows head (the pointer stays centered)"),
+                                                        ("tail", "Follows tail (the trail's end stays centered)")]),
+        ("invert_side_rings", "Invert side button rings (back goes right, forward left)", "bool", False, None),
         ("arrow_color", "Your movement", "color", "#e0955aff", None),
         ("macro_color", "A macro's movement", "color", "#5a9ee0ff", None),
         ("show_macro_output", "Show movement made by macros", "bool", True, None),
@@ -159,8 +161,19 @@ def status_file() -> Path:
     return runtime_dir() / "overlay_status.json"
 
 
+DEFAULTS_REV = 1     # bump when a default changes in a way saved configs should pick up
+
+
 def merged(data: dict) -> dict:
     data = copy.deepcopy(data or {})
+    rev = int(data.pop("defaults_rev", 0) or 0)
+    if rev < 1:     # Session 20: the comet follows its head by default (it used to default to the tail)
+        for el in (data.get("scene") or {}).get("elements", []) if isinstance(data.get("scene"), dict) else []:
+            if isinstance(el, dict) and el.get("type") == "comet" and el.get("center") == "tail":
+                el["center"] = "head"
+        ms = data.get("movement_style") or data.get("mouse_style")
+        if isinstance(ms, dict) and ms.get("center") == "tail":
+            ms["center"] = "head"
     if "mouse_style" in data and "movement_style" not in data:     # renamed (Session 18)
         data["movement_style"] = data.pop("mouse_style")
     data.pop("mouse_style", None)
@@ -184,6 +197,7 @@ def merged(data: dict) -> dict:
             right = max((_kl.element_rect(e)[0] + _kl.element_rect(e)[2] for e in out["scene"]["elements"]), default=0)
             out["scene"]["elements"].append({"id": _kl.new_element_id(out["scene"], "controller"),
                                              "type": "controller", "x": right + 1.0, "y": 0.0, "scale": 1.0})
+    out["defaults_rev"] = DEFAULTS_REV
     return out
 
 

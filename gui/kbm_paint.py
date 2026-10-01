@@ -85,7 +85,7 @@ def _mix(a: QColor, b: QColor, f: float, alpha: float = 1.0) -> QColor:
 
 
 def paint_motion(p: QPainter, box: QRectF, state: "kl.KbmState", style: dict, now: float, kind: str = "comet",
-                 view_key: str = "", center: str = "tail") -> None:
+                 view_key: str = "", center: str = "head") -> None:
     """A movement view (Comet / Mousepad / Joystick) inside `box`, from
     kbm_layout.motion_frame(): tapering trail fading over its oldest
     quarter, the cursor dot, click rings (left out, right in, middle and side
@@ -331,8 +331,9 @@ def paint_kbm(p: QPainter, layout: dict, style: dict, state: "kl.KbmState", now:
                 paint_arrow(p, r, state, style, now, fonts)
             continue
         if kind == "motion":
-            paint_motion(p, r, state, style, now, it.get("mode", "comet"), it.get("el") or it.get("mode", ""),
-                         it.get("center", "tail"))
+            st = dict(style, invert_side_rings=it["invert_side"]) if "invert_side" in it else style
+            paint_motion(p, r, state, st, now, it.get("mode", "comet"), it.get("el") or it.get("mode", ""),
+                         it.get("center", "head"))
             continue
         if kind == "mouse_body":
             p.setPen(QPen(edge, ow) if ow > 0 else Qt.NoPen)

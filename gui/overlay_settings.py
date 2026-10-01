@@ -132,6 +132,11 @@ class StyleForm(QWidget):
                     w.textChanged.connect(lambda v, k=key: on_change(k, v))
                 lbl = QLabel(label)
                 lbl.setStyleSheet(label_style(theme.text()))
+                lbl.setWordWrap(True)
+                lbl.setMinimumWidth(240)
+                if typ == "choice":
+                    w.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+                    w.setMinimumContentsLength(14)
                 form.addRow(lbl, w)
                 self.widgets[key] = w
             lay.addLayout(form)
@@ -189,7 +194,10 @@ class _Preview(QWidget):
                 p.fillRect(box, bg)
             from kbm_paint import paint_motion
             paint_motion(p, box, self.state, self.style_, now, self.style_.get("motion", "comet"), "preview",
-                         self.style_.get("center", "tail"))
+                         self.style_.get("center", "head"))
+
+
+SIDEBAR_WIDTH = 560      # the Customize dialog's options column (wide enough for every label)
 
 
 class CustomizeDialog(QDialog):
@@ -211,9 +219,23 @@ class CustomizeDialog(QDialog):
         root = QHBoxLayout(self)
         scroll = SmoothScrollArea()
         scroll.setWidgetResizable(True)
-        scroll.setMinimumWidth(430)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)     # the sidebar is sized to fit instead
+        side = QWidget()
+        side_lay = QVBoxLayout(side)
+        side_lay.setContentsMargins(0, 0, 12, 0)
+        self.elements = None
+        if page == "full":
+            from element_panel import ElementPanel
+            side_lay.addWidget(section_title("Layout"))
+            side_lay.addWidget(dim_label("What's shown and how it looks. Drag things around with Edit layout "
+                                         "on the Input Visualizer page."))
+            self.elements = ElementPanel(section.cfg["scene"], on_change=self._scene_changed, fixed_width=False)
+            side_lay.addWidget(self.elements)
         self.form = StyleForm(self.SCHEMAS[page], section.cfg[key], self._changed)
-        scroll.setWidget(self.form)
+        side_lay.addWidget(self.form)
+        scroll.setWidget(side)
+        need = max(side.sizeHint().width(), self.form.sizeHint().width() + 12)
+        scroll.setFixedWidth(max(SIDEBAR_WIDTH, need + scroll.verticalScrollBar().sizeHint().width() + 8))
         root.addWidget(scroll)
         right = QVBoxLayout()
         right.addWidget(dim_label("Preview (checkers = transparent). Changes reach OBS right away."))
@@ -229,7 +251,16 @@ class CustomizeDialog(QDialog):
         row.addWidget(close)
         right.addLayout(row)
         root.addLayout(right, 1)
-        self.resize(1100, 680)
+        self.resize(1260, 720)
+
+    def _scene_changed(self) -> None:
+        scene = self.elements.scene
+        self.preview.scene = scene
+        self.preview.update()
+        self.section.set_scene(scene)
+        if self.section.on_scene_edited:
+            import copy
+            self.section.on_scene_edited(copy.deepcopy(scene))
 
     def _changed(self, k, v) -> None:
         key = self.KEYS[self.page]
@@ -257,6 +288,7 @@ class OverlaySection(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.cfg = oc.load()
+        self.on_scene_edited = None          # callback(scene): the Customize dialog's element list changed it
         if not self.cfg.get("screen_height_user"):              # the movement views' scale: this screen
             scr = QApplication.primaryScreen()
             if scr is not None:

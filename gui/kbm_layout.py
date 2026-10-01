@@ -554,9 +554,9 @@ def element_layout(el: dict) -> dict:
     if t == "controller":
         return build_controller_layout()
     if t in MOTION_TYPES:
-        opts = {"el": el.get("id", "")}
+        opts = {"el": el.get("id", ""), "invert_side": bool(el.get("invert_side", False))}
         if t == "comet":
-            opts["center"] = el.get("center", "tail")
+            opts["center"] = el.get("center", "head")
         return motion_layout(t, float(el.get("size", 3.2)), **opts)
     return {"items": [], "w": 1.0, "h": 1.0}
 
@@ -564,7 +564,7 @@ def element_layout(el: dict) -> dict:
 DEFAULT_SCENE = {"elements": [
     {"id": "keyboard", "type": "keyboard", "layout": "tkl", "x": 0.0, "y": 0.0, "scale": 1.0},
     {"id": "mouse", "type": "mouse", "look": "classic", "x": 19.0, "y": 0.35, "scale": 1.0},
-    {"id": "comet", "type": "comet", "center": "tail", "size": 3.2, "x": 18.9, "y": 3.95, "scale": 1.0},
+    {"id": "comet", "type": "comet", "center": "head", "size": 3.2, "x": 18.9, "y": 3.95, "scale": 1.0},
 ]}
 
 
@@ -622,7 +622,7 @@ def default_element(scene: dict, typ: str, x: float = 0.0, y: float = 0.0) -> di
     elif typ in MOTION_TYPES:
         el["size"] = 3.2
         if typ == "comet":
-            el["center"] = "tail"
+            el["center"] = "head"
     return el
 
 
@@ -679,7 +679,7 @@ def _ease(cur, target, dt, tau):
 
 
 def motion_frame(state, kind: str, box: float, style: dict, now: float, view_key: str = "",
-                 center: str = "tail") -> dict:
+                 center: str = "head") -> dict:
     """-> {"trail": [[x, y, width, alpha, macro_share], ...] (oldest first),
            "dot": [x, y, r, macro_share], "held": src | None,
            "rings": [{"r", "alpha", "width", "arcs": [[deg_center, deg_span], ...] | None, "src"}],
@@ -792,10 +792,9 @@ def motion_frame(state, kind: str, box: float, style: dict, now: float, view_key
             out["r"] = dot_r + a * R                           # outward
             if b == "BTN_MIDDLE":
                 out["arcs"] = [[90.0, ARC_SPAN], [270.0, ARC_SPAN]]
-            elif b == "BTN_SIDE":
-                out["arcs"] = [[180.0, ARC_SPAN]]
-            elif b == "BTN_EXTRA":
-                out["arcs"] = [[0.0, ARC_SPAN]]
+            elif b in ("BTN_SIDE", "BTN_EXTRA"):          # back -> left, forward -> right (or inverted)
+                left = (b == "BTN_SIDE") != bool(style.get("invert_side_rings", False))
+                out["arcs"] = [[180.0 if left else 0.0, ARC_SPAN]]
         rings.append(out)
     chevrons = []
     recent = [w for w in state.wheels if 0 <= now - w[0] <= CHEVRON_S

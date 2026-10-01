@@ -162,7 +162,7 @@ function fitArrow(curve, bw, bh, fullDist) {
 }
 
 function drawArrow(ctx, bx, by, bw, bh, style, now) {
-  return drawMotion(ctx, bx, by, bw, bh, style, now, "comet", "arrow", "tail");
+  return drawMotion(ctx, bx, by, bw, bh, style, now, "comet", "arrow", "head");
 }
 
 function drawArrowOld(ctx, bx, by, bw, bh, style, now) {
@@ -332,8 +332,10 @@ function motionFrame(state, kind, box, style, now, viewKey, center) {
     else {
       out.r = dotR + a * R;
       if (b === "BTN_MIDDLE") out.arcs = [[90, ARC_SPAN], [270, ARC_SPAN]];
-      else if (b === "BTN_SIDE") out.arcs = [[180, ARC_SPAN]];
-      else if (b === "BTN_EXTRA") out.arcs = [[0, ARC_SPAN]];
+      else if (b === "BTN_SIDE" || b === "BTN_EXTRA") {     // back -> left, forward -> right (or inverted)
+        const left = (b === "BTN_SIDE") !== !!style.invert_side_rings;
+        out.arcs = [[left ? 180 : 0, ARC_SPAN]];
+      }
     }
     rings.push(out);
   }
@@ -355,7 +357,7 @@ function mixColor(h1, h2, f, alpha) {
 
 function drawMotion(ctx, bx, by, bw, bh, style, now, kind, viewKey, center) {
   const size = Math.min(bw, bh), ox = bx + (bw - size) / 2, oy = by + (bh - size) / 2;
-  const fr = motionFrame(P, kind, size, style, now, viewKey || kind, center || "tail");
+  const fr = motionFrame(P, kind, size, style, now, viewKey || kind, center || "head");
   const real = style.arrow_color || "#e0955aff";
   const macro = style.show_macro_output === false ? real : (style.macro_color || "#5a9ee0ff");
   ctx.save();

@@ -175,6 +175,10 @@ class CpsArea(QWidget):
         if self.on_scene_changed:
             self.on_scene_changed(copy.deepcopy(self.scene))
 
+    def _notify_select(self) -> None:
+        if getattr(self, "on_select", None):
+            self.on_select(self.selected)
+
     def set_editing(self, on: bool) -> None:
         self.editing = on
         self.selected = None
@@ -194,6 +198,7 @@ class CpsArea(QWidget):
         self.scene["elements"].append(el)
         self.selected = el["id"]
         self._scene_changed()
+        self._notify_select()
         return el
 
     def remove_element(self, el_id) -> None:
@@ -226,6 +231,7 @@ class CpsArea(QWidget):
     def _edit_press(self, e) -> None:
         el_id, handle = self._hit(e.position())
         self.selected = el_id
+        self._notify_select()
         if el_id is not None and e.button() == Qt.LeftButton:
             el = self.element(el_id)
             ux, uy = self._units(e.position())
@@ -273,6 +279,7 @@ class CpsArea(QWidget):
         el = self.element(el_id)
         typ = el.get("type")
         menu.addSection(f"{kl.ELEMENT_TYPES.get(typ, typ)} ({el_id})")
+        self._notify_select()
 
         def setter(k, v):
             def go():
@@ -291,18 +298,22 @@ class CpsArea(QWidget):
                 a = sub.addAction(label, setter("look", k))
                 a.setCheckable(True)
                 a.setChecked(el.get("look", "classic") == k)
-        if typ == "comet":
-            sub = menu.addMenu("Keep centered")
-            for k, label in (("tail", "Tail centered"), ("head", "Head centered")):
-                a = sub.addAction(label, setter("center", k))
-                a.setCheckable(True)
-                a.setChecked(el.get("center", "tail") == k)
         if typ in kl.MOTION_TYPES:
-            sub = menu.addMenu("Show as")
+            sub = menu.addMenu("Style")
             for k, label in kl.MOTION_TYPES.items():
                 a = sub.addAction(label, setter("type", k))
                 a.setCheckable(True)
                 a.setChecked(typ == k)
+        if typ == "comet":
+            sub = menu.addMenu("Comet follows")
+            for k, label in (("head", "Head"), ("tail", "Tail")):
+                a = sub.addAction(label, setter("center", k))
+                a.setCheckable(True)
+                a.setChecked(el.get("center", "head") == k)
+        if typ in kl.MOTION_TYPES:
+            a = menu.addAction("Invert side button rings", setter("invert_side", not el.get("invert_side", False)))
+            a.setCheckable(True)
+            a.setChecked(bool(el.get("invert_side", False)))
         menu.addAction("Actual size", setter("scale", 1.0))
         menu.addSeparator()
         menu.addAction("Remove", lambda: self.remove_element(el_id))
@@ -467,16 +478,24 @@ class CpsArea(QWidget):
             f = QFont(self.font())
             f.setPointSizeF(max(7.0, f.pointSizeF() * 0.85))
             p.setFont(f)
+            from element_panel import element_title
+            fm = p.fontMetrics()
+            boxes = []
             for el in self.scene["elements"]:
                 x, y, w, h = kl.element_rect(el)
-                box = QRectF(ox + x * u, oy + y * u, w * u, h * u)
+                boxes.append((el, QRectF(ox + x * u, oy + y * u, w * u, h * u)))
+            for el, box in boxes:
                 sel = el.get("id") == self.selected
                 pen = QPen(acc if sel else contrast_text(fill), 2 if sel else 1, Qt.SolidLine if sel else Qt.DashLine)
                 p.setPen(pen)
                 p.setBrush(Qt.NoBrush)
                 p.drawRect(box)
-                p.drawText(QRectF(box.left(), box.top() - 18, max(box.width(), 220.0), 16), Qt.AlignLeft,
-                           f"{kl.ELEMENT_TYPES.get(el.get('type'), el.get('type'))}  ({el.get('id')})")
+                text = element_title(el)
+                lab = QRectF(box.left(), box.top() - 18, fm.horizontalAdvance(text) + 6, 16)
+                if any(o is not el and lab.intersects(ob) for o, ob in boxes):
+                    lab.moveTop(box.top() + 3)          # no room above: inside the element's own top edge
+                    lab.moveLeft(box.left() + 4)
+                p.drawText(lab, Qt.AlignLeft, text)
                 if sel:
                     p.setBrush(acc)
                     p.drawRect(QRectF(box.right() - 6, box.bottom() - 6, 12, 12))
@@ -591,7 +610,15 @@ class VisualizerPage(PageBase):
 
         self.log = InputLog()
         self.area = CpsArea(self.clicks, self.keys, self._update_held, self.log)
-        self.content_layout.addWidget(self.area)
+        from element_panel import ElementPanel
+        self.panel = ElementPanel(self.area.scene, on_change=self._panel_changed, on_select=self._panel_select)
+        self.panel.setVisible(False)
+        self.area.on_select = self.panel.select
+        self._from_panel = False
+        area_row = QHBoxLayout()
+        area_row.addWidget(self.area, 1)
+        area_row.addWidget(self.panel)
+        self.content_layout.addLayout(area_row)
 
         row = QHBoxLayout()
         self.source_lbl = dim_label("")
@@ -601,20 +628,14 @@ class VisualizerPage(PageBase):
                                  "mouse, controller, and the Comet / Mousepad / Joystick movement views. "
                                  "The same arrangement is what OBS shows.")
         self.edit_btn.toggled.connect(self._toggle_edit)
-        self.add_el_btn = CustomButton("+ Add element")
-        self.add_el_btn.clicked.connect(self._add_menu)
-        self.reset_layout_btn = CustomButton("Reset layout")
-        self.reset_layout_btn.clicked.connect(self.area.reset_scene)
-        for b in (self.add_el_btn, self.reset_layout_btn):
-            b.setVisible(False)
+        self.add_el_btn = self.panel.add_btn            # (in the Edit sidebar)
+        self.reset_layout_btn = self.panel.reset_btn
         self.pad_hint = dim_label("")
         src_row = QHBoxLayout()
         src_row.addWidget(self.source_lbl, 1)
         src_row.addWidget(self.pad_hint)
-        src_row.addWidget(self.add_el_btn)
-        src_row.addWidget(self.reset_layout_btn)
         src_row.addWidget(self.edit_btn)
-        self.content_layout.insertLayout(self.content_layout.indexOf(self.area) + 1, src_row)
+        self.content_layout.insertLayout(self.content_layout.indexOf(area_row) + 1, src_row)
         self.stream = StreamClient(self)
         self.stream.event.connect(self._stream_event)
         self.stream.live.connect(self._stream_live)
@@ -667,7 +688,9 @@ class VisualizerPage(PageBase):
         self.overlay = OverlaySection()
         self.content_layout.addWidget(self.overlay)
         self.area.set_scene(self.overlay.cfg["scene"])
-        self.area.on_scene_changed = self.overlay.set_scene
+        self.panel.set_scene(self.area.scene)
+        self.area.on_scene_changed = self._area_scene_changed
+        self.overlay.on_scene_edited = self._scene_from_customize
         self.content_layout.addStretch(1)
 
         self.timer = QTimer(self)
@@ -691,23 +714,38 @@ class VisualizerPage(PageBase):
         if not kl.scene_has(self.area.scene, "controller"):
             self.pad_hint.setText("Controller detected -- add it with Edit layout.")
 
+    # -- Edit layout: the capture area and the sidebar share one scene dict ------
+    def _area_scene_changed(self, scene: dict) -> None:
+        self.overlay.set_scene(scene)
+        if not self._from_panel:
+            self.panel.set_scene(self.area.scene)
+            self.panel.select(self.area.selected)
+
+    def _panel_changed(self) -> None:
+        self._from_panel = True
+        try:
+            self.area._scene_changed()
+        finally:
+            self._from_panel = False
+
+    def _panel_select(self, el_id) -> None:
+        self.area.selected = el_id
+        self.area.update()
+
+    def _scene_from_customize(self, scene: dict) -> None:
+        """The Customize dialog's element list changed the scene."""
+        self.area.set_scene(scene)
+        self.panel.set_scene(self.area.scene)
+
     def _toggle_edit(self, on: bool) -> None:
         self.area.set_editing(on)
         self.edit_btn.setText("Done" if on else "Edit layout")
-        for b in (self.add_el_btn, self.reset_layout_btn):
-            b.setVisible(on)
+        self.panel.setVisible(on)
+        self.panel.select(None)
         if not on:
             self.overlay.flush()
         if kl.scene_has(self.area.scene, "controller"):
             self.pad_hint.setText("")
-
-    def _add_menu(self) -> None:
-        from PySide6.QtGui import QCursor
-        from PySide6.QtWidgets import QMenu
-        menu = QMenu(self)
-        for typ, label in kl.ELEMENT_TYPES.items():
-            menu.addAction(label, lambda t=typ: self.area.add_element(t))
-        menu.exec(QCursor.pos())
 
     def _stream_live(self, live: bool) -> None:
         self.area.set_stream_live(live)

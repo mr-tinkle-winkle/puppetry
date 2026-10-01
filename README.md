@@ -96,20 +96,24 @@ session to take effect.
 - Held keys in the Input Visualizer show how long they've been held (to the
   millisecond).
 - **Edit layout** (Input Visualizer) arranges what's drawn: drag to move,
-  drag the corner square to resize, right-click for options. **+ Add
+  drag the corner square to resize. A sidebar lists every element; the
+  selected one's options (keyboard size, mouse look, movement style, which
+  end a comet follows, inverted side-button rings, scale) are toggles there.
+  The same list is at the top of the overlay's **Customize…**. **+ Add
   element** adds any number of:
   - keyboards: full size, 80% (TKL), 60%, or the left half for gaming;
   - mice: classic, gaming (extra side buttons), minimal, or buttons only;
   - controllers (Xbox / PlayStation / Nintendo labels);
   - mouse movement views, all square with no background:
-    - *Comet*: a trail behind a dot, centered on the tail (default) or the
-      head;
+    - *Comet*: a trail behind a dot that follows the head (the dot stays
+      centered; default) or the tail;
     - *Mousepad*: the dot moves around a virtual mousepad that re-centers
       after a pause;
     - *Joystick*: the dot leans toward the direction and speed of movement.
     The trail lasts a set time and thins and fades toward its end. Left
     click sends a ring outward, right click inward, middle click two short
-    arcs up and down, side buttons an arc toward their side; scrolling
+    arcs up and down, back and forward an arc to the left and right
+    (*Invert side button rings* swaps them); scrolling
     stacks chevrons above or below the dot. Auto zoom (on by default) zooms
     out when movement would leave the view.
 - **Steam Controller / Steam Deck**: outside games Steam presents these as

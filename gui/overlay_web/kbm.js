@@ -148,7 +148,7 @@ function drawKbm(ctx, layout, st, now, unit, ox, oy) {
     let x = ox + it.x * u, y = oy + it.y * u, w = it.w * u, h = it.h * u;
     if (PAD_KINDS.has(it.kind)) { controllerItem(it, x, y, w, h); continue; }
     if (it.kind === "arrow_box") { if (st.show_arrow !== false) drawArrow(ctx, x, y, w, h, st, now); continue; }
-    if (it.kind === "motion") { drawMotion(ctx, x, y, w, h, st, now, it.mode || "comet", it.el || it.mode, it.center || "tail"); continue; }
+    if (it.kind === "motion") { drawMotion(ctx, x, y, w, h, "invert_side" in it ? Object.assign({}, st, { invert_side_rings: it.invert_side }) : st, now, it.mode || "comet", it.el || it.mode, it.center || "head"); continue; }
     if (it.kind === "mouse_body") {
       roundRect(ctx, x, y, w, h, w * 0.42); ctx.fillStyle = keyC; ctx.fill();
       if (ow > 0) { ctx.strokeStyle = edge; ctx.lineWidth = ow; ctx.stroke(); }

@@ -29,7 +29,7 @@ features. That document's content has been folded into this one
 (see "Prior session" below) rather than kept as a separate file, so
 this is now the single source of truth for project state.
 
-## Start here — current state (Session 19)
+## Start here — current state (Session 20)
 
 **What it is.** A NixOS input-macro system: a C++17 daemon (evdev in,
 `uinput` out; control socket; embedded CPython *or* a built-in interpreter
@@ -214,6 +214,32 @@ separately from profiles.
     `puppetry-daemon --list-devices` prints every node with vendor, kind and
     whether Puppetry would watch it. Not confirmed on the hardware.
 
+- **Session 20: Edit sidebar, follows head, invert side rings.**
+  - `gui/element_panel.py` `ElementPanel`: element list (a touching
+    vertical stack of `SegmentButton`s) plus the selected element's options
+    as touching toggle rows: keyboard size Full / 80% / 60% / Half, mouse
+    look, movement style Comet / Mousepad / Joystick, "Comet follows" Head /
+    Tail, "Invert side button rings", scale, Remove; "+ Add element" and
+    "Reset layout" moved into it. Shown beside the capture area while
+    editing (fixed 340 px) and at the top of the full page's Customize
+    sidebar. It edits the scene dict it was given in place; the capture
+    area and panel share one dict (`VisualizerPage._panel_changed`,
+    `_area_scene_changed`, a `_from_panel` guard so a spin box isn't
+    rebuilt mid-edit); `OverlaySection.on_scene_edited` pushes Customize
+    edits back to the area. The right-click menu has the same options.
+  - Customize sidebar: fixed width `SIDEBAR_WIDTH` 560 (or wider if the form
+    needs it), horizontal scrolling off, labels wrap.
+  - Comet default is now "follows head" (`center: "head"`) everywhere
+    (scene default, new elements, movement page, painters, JS).
+    `overlay_config.DEFAULTS_REV` = 1: configs saved before it get their
+    comets and movement page switched from tail to head once; a later
+    choice of tail is kept.
+  - Invert side button rings: back (BTN_SIDE) arcs left and forward
+    (BTN_EXTRA) right; inverted swaps them. Per element (`invert_side`,
+    carried on the motion item and merged into the style as
+    `invert_side_rings` by both painters) and on the movement page's style.
+    Python/JS parity cases cover it.
+
 **Not verified on real hardware / display.** Everything above ran under
 `QT_QPA_PLATFORM=offscreen`; OBS pages were rendered in headless Chromium
 (the engine behind OBS's browser source). Unchecked: a real OBS (tested
@@ -250,7 +276,7 @@ block; which easing recorded movement should use (`linear` today); whether the O
 `overlay.json` (mode 0600) to a keyring.
 
 **Run the checks.** GUI: `cd gui && QT_QPA_PLATFORM=offscreen python3
-test_app.py` (298 checks), `python3 test_overlay.py` (112 checks: layouts,
+test_app.py` (312 checks), `python3 test_overlay.py` (119 checks: layouts,
 scene, movement-view math, replay file, helper over HTTP/SSE with a fake daemon, fake OBS
 server, renderer + CLI, pieces/controller/source colors, transparency per
 format, align/layer, JS parity; needs ffmpeg, node optional) and

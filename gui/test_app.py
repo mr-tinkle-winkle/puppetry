@@ -1231,10 +1231,30 @@ def main() -> int:
     dlg._reset()
     ov.flush()
     check("overlay: reset to defaults", oc.load()["style"]["unit"] == oc.DEFAULTS["style"]["unit"])
-    for k in ("simple", "movement"):
+    from PySide6.QtWidgets import QScrollArea
+    for k in ("full", "simple", "movement"):
         d2 = CustomizeDialog(ov, k)
+        d2.show()
+        pump(3)
+        sc_ = d2.findChild(QScrollArea)
+        check(f"overlay: the {k} Customize sidebar fits without a horizontal scroll",
+              sc_.horizontalScrollBar().maximum() == 0 and sc_.viewport().width() >= d2.form.sizeHint().width())
         d2.preview.repaint()
         d2.close()
+    d3 = CustomizeDialog(ov, "full")
+    got = []
+    ov.on_scene_edited, old_hook = got.append, ov.on_scene_edited
+    d3.elements.list_buttons["keyboard"].click()
+    d3.elements.widgets["layout"].buttons["half"].click()
+    check("overlay: Customize lists the layout's elements and edits them",
+          ov.cfg["scene"]["elements"][0]["layout"] == "half" and got and got[-1]["elements"][0]["layout"] == "half")
+    ov.on_scene_edited = old_hook
+    if old_hook:
+        old_hook(ov.cfg["scene"])
+    d3.close()
+    mv = oc.MOVEMENT_SCHEMA[0][1]
+    check("overlay: the movement page offers 'Comet follows' (head by default) and 'invert side button rings'",
+          any(o[0] == "center" and o[3] == "head" for o in mv) and any(o[0] == "invert_side_rings" for o in mv))
     ov.split_toggle.setChecked(True)
     ov.flush()
     ids = [e["id"] for e in oc.load()["scene"]["elements"]]
@@ -1303,8 +1323,42 @@ def main() -> int:
         vp.area._scene_changed()
         vp.area.repaint()
     check("edit: every keyboard preset and mouse look draws", True)
-    vp.area.remove_element(pad["id"])
-    check("edit: remove", vp.area.element(pad["id"]) is None)
+    # the Edit sidebar: element list + options of the selected one
+    check("edit: the sidebar shows while editing and lists every element", vp.panel.isVisibleTo(vp)
+          and set(vp.panel.list_buttons) == {e["id"] for e in vp.area.scene["elements"]})
+    vp.panel.list_buttons[pad["id"]].click()
+    check("edit: picking an element in the sidebar selects it in the picture", vp.area.selected == pad["id"])
+    vp.panel.list_buttons["keyboard"].click()
+    vp.panel.widgets["layout"].buttons["60"].click()
+    ov.flush()
+    check("edit: keyboard size toggles (Full / 80% / 60% / Half), saved", vp.area.element("keyboard")["layout"] == "60"
+          and next(e for e in oc.load()["scene"]["elements"] if e["id"] == "keyboard")["layout"] == "60")
+    vp.panel.list_buttons["mouse"].click()
+    vp.panel.widgets["look"].buttons["gaming"].click()
+    check("edit: mouse look toggles", vp.area.element("mouse")["look"] == "gaming")
+    vp.panel.list_buttons["comet"].click()
+    check("edit: a comet follows its head by default", vp.panel.widgets["center"].current() == "head")
+    vp.panel.widgets["center"].buttons["tail"].click()
+    vp.panel.widgets["invert_side"].setChecked(True)
+    check("edit: 'comet follows' and 'invert side button rings' apply", vp.area.element("comet")["center"] == "tail"
+          and vp.area.element("comet")["invert_side"] is True)
+    vp.panel.widgets["type"].buttons["joystick"].click()
+    check("edit: Comet / Mousepad / Joystick toggle switches the view", vp.area.element("comet")["type"] == "joystick"
+          and "center" not in vp.panel.widgets)
+    vp.panel.widgets["scale"].setValue(1.4)
+    check("edit: scale from the sidebar", vp.area.element("comet")["scale"] == 1.4)
+    vp.area.selected = None
+    vp.area.repaint()
+    pump(2)
+    gx, gy, gu = vp.area._geom
+    px_, py_, pw_, ph_ = kl.element_rect(vp.area.element(pad["id"]))
+    at = QPoint(int(gx + (px_ + pw_ / 2) * gu), int(gy + (py_ + ph_ / 2) * gu))
+    QTest.mousePress(vp.area, Qt.LeftButton, Qt.NoModifier, at)
+    QTest.mouseRelease(vp.area, Qt.LeftButton, Qt.NoModifier, at)
+    check("edit: clicking an element in the picture selects it in the sidebar", vp.panel.selected == pad["id"]
+          and vp.panel.list_buttons[pad["id"]].isChecked())
+    vp.panel.widgets["remove"].click()
+    check("edit: remove", vp.area.element(pad["id"]) is None and pad["id"] not in vp.panel.list_buttons)
     vp.area.reset_scene()
     ov.flush()
     check("edit: reset restores the default scene", oc.load()["scene"]["elements"] == kl.DEFAULT_SCENE["elements"])
