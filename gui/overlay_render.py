@@ -143,7 +143,14 @@ class FrameMaker:
         if mode in ("full", "scene") or el is not None:
             self.mode = "picture"
             self.style = dict(cfg["style"])
-            self.layout = kl.build_scene(cfg["scene"], only=el)
+            only = el
+            if mode == "mouse" and el is not None:
+                # the "mouse" piece (by type) is the mouse AND the layout's movement views, arranged
+                # as in the layout -- as it was before movement became its own element. "el:<id>"
+                # still gives the mouse element alone.
+                only = [el] + [e.get("id") for e in cfg["scene"].get("elements", [])
+                               if e.get("type") in kl.MOTION_TYPES]
+            self.layout = kl.build_scene(cfg["scene"], only=only)
             w, h = kl.layout_pixel_size(self.layout, self.style)
         elif mode == "simple":
             self.mode = "simple"

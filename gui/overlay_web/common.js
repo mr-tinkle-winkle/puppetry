@@ -265,7 +265,7 @@ function motionFrame(state, kind, box, style, now, viewKey, center) {
   view.t = now;
   const T = +(style.trail_seconds ?? 1.0);
   const wmax = box * (+(style.trail_width ?? 4.0)) / 100;
-  const dotR = wmax * 1.5, half = box / 2 - dotR - 1;
+  const dotR = wmax * 1.5, half = box / 2 - dotR * 1.75 - 1;  // room for the held-button ring
   const span = (+(style.pad_fraction ?? 80)) / 100 * (+(style.screen_height ?? 1080));
   const scale0 = box / Math.max(span, 1);
   const auto = style.auto_zoom !== false;

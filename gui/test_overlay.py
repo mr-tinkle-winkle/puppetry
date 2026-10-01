@@ -719,6 +719,12 @@ def render_tests():
     check("render: controller piece -- a macro's button press is blue", eb[2] > 150 and eb[2] > eb[0] + 40)
     check("render: controller piece size", (orr.probe(padv)["width"], orr.probe(padv)["height"])[0]
           == kl.layout_pixel_size(kl.build_controller_layout(), style)[0] // 2 * 2)
+    fm_mouse = orr.FrameMaker("mouse", oc.merged({}))
+    fm_el = orr.FrameMaker("el:mouse", oc.merged({}))
+    check("render: the 'mouse' piece includes the layout's movement view (afterglow's mouse piece "
+          "shows movement again); 'el:mouse' is the mouse alone",
+          any(i["kind"] == "motion" for i in fm_mouse.layout["items"])
+          and not any(i["kind"] == "motion" for i in fm_el.layout["items"]) and fm_mouse.h > fm_el.h)
     bare = dict(cfg, scene={"elements": [{"id": "keyboard", "type": "keyboard", "x": 0, "y": 0, "scale": 1}]})
     jv = d / "joy.mov"
     orr.render(d / "pad.jsonl", T2, T2 + 1, jv, mode="mousepad", cfg=bare, fps=10)

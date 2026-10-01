@@ -581,15 +581,16 @@ def element_rect(el: dict) -> tuple:
     return float(el.get("x", 0)), float(el.get("y", 0)), lay["w"] * s, lay["h"] * s
 
 
-def build_scene(scene: dict | None, only: str | None = None, normalize: bool = True) -> dict:
-    """All elements' items in one layout (or just element `only`). Each item
+def build_scene(scene: dict | None, only=None, normalize: bool = True) -> dict:
+    """All elements' items in one layout (or just element `only`: an id, or a
+    collection of ids drawn in their layout arrangement). Each item
     gets "fs" (its element's scale, for text) and "el" (its element id).
     normalize=False keeps scene coordinates (the editor); True moves the
     top-left of what's drawn to (0, 0)."""
     scene = scene or DEFAULT_SCENE
     items = []
     for el in scene.get("elements", []):
-        if only is not None and el.get("id") != only:
+        if only is not None and (el.get("id") != only if isinstance(only, str) else el.get("id") not in only):
             continue
         lay = element_layout(el)
         s = float(el.get("scale", 1.0))
@@ -702,7 +703,7 @@ def motion_frame(state, kind: str, box: float, style: dict, now: float, view_key
     T = float(style.get("trail_seconds", 1.0))
     wmax = box * float(style.get("trail_width", 4.0)) / 100.0
     dot_r = wmax * 1.5
-    half = box / 2.0 - dot_r - 1.0
+    half = box / 2.0 - dot_r * 1.75 - 1.0      # room for the held-button ring around the dot
     span = float(style.get("pad_fraction", 80)) / 100.0 * float(style.get("screen_height", 1080))
     scale0 = box / max(span, 1.0)
     auto = bool(style.get("auto_zoom", True))

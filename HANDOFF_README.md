@@ -29,7 +29,7 @@ features. That document's content has been folded into this one
 (see "Prior session" below) rather than kept as a separate file, so
 this is now the single source of truth for project state.
 
-## Start here — current state (Session 24)
+## Start here — current state (Session 25)
 
 **What it is.** A NixOS input-macro system: a C++17 daemon (evdev in,
 `uinput` out; control socket; embedded CPython *or* a built-in interpreter
@@ -330,6 +330,16 @@ separately from profiles.
     keyboard or mouse is missing, the log lists every visible node with its
     kind and every node it can't open (on the first try and again after
     ~30 s).
+
+- **Session 25: afterglow's `mouse` piece shows movement again.** Since
+  movement views became their own layout elements (Session 19), render mode
+  `mouse` meant the mouse element alone, so afterglow clips captured with
+  `keyboard` + `mouse` lost the movement. `FrameMaker` now builds `mouse`
+  (by type) as the mouse plus every movement element, in their layout
+  arrangement (`build_scene(only=[ids])`); `el:mouse` is still the mouse
+  alone. Also: the movement views keep `half = box/2 - dot_r*1.75 - 1` so
+  the held-button ring around the dot isn't clipped at the view's edge
+  (Python and JS). Prep package v6 documents it.
 
 **Not verified on real hardware / display.** Everything above ran under
 `QT_QPA_PLATFORM=offscreen`; OBS pages were rendered in headless Chromium
