@@ -14,11 +14,11 @@ import json
 import threading
 import time
 
-from PySide6.QtCore import QObject, QRectF, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QPainter
+from PySide6.QtCore import QObject, QRectF, QSize, Qt, QTimer, Signal
+from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter
 from PySide6.QtWidgets import (
     QApplication, QColorDialog, QComboBox, QDialog, QFormLayout, QHBoxLayout, QLabel, QScrollArea,
-    QVBoxLayout, QWidget,
+    QStyle, QStyledItemDelegate, QVBoxLayout, QWidget,
 )
 
 import kbm_layout as kl
@@ -33,7 +33,7 @@ from ui_kit.custom_line_edit import CustomLineEdit
 from ui_kit.custom_spinbox import CustomDoubleSpinBox, CustomSpinBox
 from ui_kit.rounded_rect import rounded_rect_path
 from ui_kit.smooth_scroll_area import SmoothScrollArea
-from ui_kit.theme import Theme
+from ui_kit.theme import Theme, contrast_text
 from widgets import ToggleSwitch, dim_label, label_style, mark_output, section_title
 
 
@@ -85,6 +85,137 @@ class _ColorButton(CustomButton):
             self.changed.emit(self.value)
 
 
+class _FontDelegate(QStyledItemDelegate):
+    """Font picker rows: the name drawn big in its own font, its category
+    small and dim on the right (never truncated -- the popup is sized to fit),
+    and a thin rule for separators."""
+    NAME_PX = 19
+
+    def _is_sep(self, index) -> bool:
+        return index.data(Qt.AccessibleDescriptionRole) == "separator"
+
+    def _name_font(self, index) -> QFont:
+        f = QFont(index.data(Qt.UserRole + 1) or "sans-serif")
+        f.setPixelSize(self.NAME_PX)
+        return f
+
+    def sizeHint(self, option, index) -> QSize:
+        if self._is_sep(index):
+            return QSize(10, 9)
+        fm = QFontMetrics(self._name_font(index))
+        cat = QFontMetrics(QApplication.font()).horizontalAdvance(index.data(Qt.UserRole + 2) or "")
+        return QSize(fm.horizontalAdvance(index.data(Qt.DisplayRole) or "") + cat + 48, max(30, fm.height() + 10))
+
+    def paint(self, p, option, index) -> None:
+        theme = Theme()
+        r = option.rect
+        p.save()
+        if self._is_sep(index):
+            c = QColor(theme.text())
+            c.setAlpha(60)
+            p.setPen(c)
+            p.drawLine(r.left() + 8, r.center().y(), r.right() - 8, r.center().y())
+            p.restore()
+            return
+        if option.state & (QStyle.State_Selected | QStyle.State_MouseOver):
+            p.fillRect(r, theme.accent())
+        text_c = contrast_text(theme.accent()) if option.state & QStyle.State_Selected else theme.text()
+        p.setPen(text_c)
+        p.setFont(self._name_font(index))
+        p.drawText(r.adjusted(10, 0, -10, 0), Qt.AlignVCenter | Qt.AlignLeft, index.data(Qt.DisplayRole) or "")
+        dim = QColor(text_c)
+        dim.setAlpha(140)
+        p.setPen(dim)
+        p.setFont(QApplication.font())             # the UI font, not the picked one
+        p.drawText(r.adjusted(10, 0, -10, 0), Qt.AlignVCenter | Qt.AlignRight, index.data(Qt.UserRole + 2) or "")
+        p.restore()
+
+
+class FontPicker(QComboBox):
+    """The bundled fonts by category (font_catalog.CATALOG), each shown in
+    its own font, plus "Other installed font..." for anything on the system.
+    on_change(family) fires when the choice changes."""
+    OTHER = "__other__"
+
+    def __init__(self, value: str, on_change, parent=None):
+        super().__init__(parent)
+        import font_catalog
+        font_catalog.register_qt_fonts()
+        self._on_change = on_change
+        self.setStyleSheet(combo_box_stylesheet(theme_config.get_settings()))
+        self.setItemDelegate(_FontDelegate(self))
+        self.setMaxVisibleItems(18)
+        last_cat = None
+        for family, cat, _stem, _w in font_catalog.CATALOG:
+            if last_cat is not None and cat != last_cat:
+                self.insertSeparator(self.count())
+            last_cat = cat
+            self._add(font_catalog.SYSTEM_LABELS.get(family, family), family, cat)
+        self.insertSeparator(self.count())
+        self._add("Other installed font\u2026", self.OTHER, "")
+        self._select(value)
+        self.currentIndexChanged.connect(self._picked)
+        opt = _opt(self)
+        widest = max(self.itemDelegate().sizeHint(opt, self.model().index(i, 0)).width() for i in range(self.count()))
+        self.view().setMinimumWidth(widest + 24)
+        self.setMinimumContentsLength(12)
+
+    def _add(self, label, family, cat, at=None) -> None:
+        i = self.count() if at is None else at
+        self.insertItem(i, label, family)
+        self.setItemData(i, family, Qt.UserRole + 1)
+        self.setItemData(i, cat, Qt.UserRole + 2)
+        f = QFont(family if family != self.OTHER else "")
+        self.setItemData(i, f, Qt.FontRole)
+
+    def _select(self, family: str) -> None:
+        i = self.findData(family)
+        if i < 0:                                      # a system font picked earlier: list it
+            i = self.count() - 2
+            self._add(family, family, "Installed", at=i)
+        self.blockSignals(True)
+        self.setCurrentIndex(i)
+        self.blockSignals(False)
+        self._prev = i
+        self._show_in_font(family)
+
+    def _show_in_font(self, family: str) -> None:
+        f = QFont(family)
+        f.setPixelSize(15)
+        self.setFont(f)
+
+    def family(self) -> str:
+        return self.currentData()
+
+    def _picked(self, i: int) -> None:
+        fam = self.itemData(i)
+        if fam == self.OTHER:
+            from PySide6.QtGui import QFontDatabase
+            from PySide6.QtWidgets import QInputDialog
+            fams = sorted(set(QFontDatabase.families()))
+            cur = self.itemData(self._prev) or "sans-serif"
+            name, ok = QInputDialog.getItem(self, "Other font", "Installed fonts (OBS's browser has to have it too):",
+                                            fams, fams.index(cur) if cur in fams else 0, True)
+            if not ok or not name.strip():
+                self.blockSignals(True)
+                self.setCurrentIndex(self._prev)
+                self.blockSignals(False)
+                return
+            self._select(name.strip())
+            fam = name.strip()
+        else:
+            self._prev = i
+            self._show_in_font(fam)
+        self._on_change(fam)
+
+
+def _opt(widget):
+    from PySide6.QtWidgets import QStyleOptionViewItem
+    o = QStyleOptionViewItem()
+    o.initFrom(widget)
+    return o
+
+
 class StyleForm(QWidget):
     """One widget per schema option; calls on_change(key, value)."""
 
@@ -119,6 +250,8 @@ class StyleForm(QWidget):
                     w.setSingleStep(0.5)
                     w.setValue(float(val))
                     w.valueChanged.connect(lambda v, k=key: on_change(k, float(v)))
+                elif typ == "font":
+                    w = FontPicker(str(val), lambda v, k=key: on_change(k, v))
                 elif typ == "choice":
                     w = QComboBox()
                     w.setStyleSheet(css)
@@ -193,7 +326,7 @@ class _Preview(QWidget):
             if bg.alpha():
                 p.fillRect(box, bg)
             from kbm_paint import paint_motion
-            paint_motion(p, box, self.state, self.style_, now, self.style_.get("motion", "comet"), "preview",
+            paint_motion(p, box, self.state, self.style_, now, self.style_.get("motion", "mousepad"), "preview",
                          self.style_.get("center", "head"))
 
 

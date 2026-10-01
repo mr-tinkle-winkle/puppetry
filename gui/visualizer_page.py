@@ -292,6 +292,10 @@ class CpsArea(QWidget):
                 a = sub.addAction(label, setter("layout", k))
                 a.setCheckable(True)
                 a.setChecked(el.get("layout", "tkl") == k)
+            if el.get("layout", "tkl") == "60":
+                a = menu.addAction("Arrow keys", setter("arrows", not el.get("arrows", False)))
+                a.setCheckable(True)
+                a.setChecked(bool(el.get("arrows", False)))
         elif typ == "mouse":
             sub = menu.addMenu("Look")
             for k, label in kl.MOUSE_LOOKS.items():

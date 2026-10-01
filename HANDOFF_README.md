@@ -29,7 +29,7 @@ features. That document's content has been folded into this one
 (see "Prior session" below) rather than kept as a separate file, so
 this is now the single source of truth for project state.
 
-## Start here — current state (Session 20)
+## Start here — current state (Session 21)
 
 **What it is.** A NixOS input-macro system: a C++17 daemon (evdev in,
 `uinput` out; control socket; embedded CPython *or* a built-in interpreter
@@ -240,6 +240,38 @@ separately from profiles.
     `invert_side_rings` by both painters) and on the movement page's style.
     Python/JS parity cases cover it.
 
+- **Session 21: movement fixes, Mousepad default, 60% arrows, fonts.**
+  - Mousepad auto zoom now fits the whole trail (every point in the window
+    plus the head, measured from the pad origin), not only the head; with
+    auto zoom off, points that left the pad are dropped oldest first.
+  - Comet never zooms: it is always drawn at the true scale (pad_fraction %
+    of screen_height), so trail length shows speed; what would leave the
+    view is dropped oldest first (both centers). `auto_zoom` is labelled
+    as a Mousepad option. Python and `common.js` changed together; the
+    parity cases cover both.
+  - Mousepad is the default movement view (DEFAULT_SCENE, the movement
+    page's `motion`, first in `MOTION_TYPES`). Movement elements get ids
+    `movement`, `movement2`, ... (`new_element_id`) so a style switch keeps
+    the id and its `/el/<id>` URL. `DEFAULTS_REV` = 2 turns the old default
+    comet (id `comet`) into a mousepad with id `movement`, and the movement
+    page's comet into mousepad, once.
+  - 60% keyboard option `arrows` (element field; sidebar checkbox and
+    right-click item when the size is 60%): the common arrow variant,
+    1.75u right Shift, Up, `/` on the shift row; Alt, Menu, Left, Down,
+    Right after Space. Rows stay 15u.
+  - Fonts: 21 Google fonts (Fontsource latin subsets, WOFF converted to TTF
+    with fontTools, 400 and 700 where they exist; licenses in
+    `overlay_web/fonts/licenses/`, OFL 1.1 or Apache 2.0) cataloged in
+    `gui/font_catalog.py` by category (System, Comic, Serif, Sans,
+    Typewriter, Script, Novelty). Qt: `register_qt_fonts()` in
+    `MainWindow` and the renderer. Pages: the server serves `/fonts.css`
+    (generated `@font-face`) and whitelisted `/fonts/<file>.ttf`; pages
+    link the CSS, `fontStack()` quotes names for canvas, and
+    `document.fonts` load events redraw. `FontPicker` (schema type `font`):
+    each name drawn in its own font, category on the right in the UI
+    font, separators between categories, popup sized so nothing
+    truncates, and "Other installed font..." for system fonts.
+
 **Not verified on real hardware / display.** Everything above ran under
 `QT_QPA_PLATFORM=offscreen`; OBS pages were rendered in headless Chromium
 (the engine behind OBS's browser source). Unchecked: a real OBS (tested
@@ -276,7 +308,7 @@ block; which easing recorded movement should use (`linear` today); whether the O
 `overlay.json` (mode 0600) to a keyring.
 
 **Run the checks.** GUI: `cd gui && QT_QPA_PLATFORM=offscreen python3
-test_app.py` (312 checks), `python3 test_overlay.py` (119 checks: layouts,
+test_app.py` (318 checks), `python3 test_overlay.py` (124 checks: layouts,
 scene, movement-view math, replay file, helper over HTTP/SSE with a fake daemon, fake OBS
 server, renderer + CLI, pieces/controller/source colors, transparency per
 format, align/layer, JS parity; needs ffmpeg, node optional) and

@@ -126,6 +126,8 @@ class FrameMaker:
     def __init__(self, mode: str, cfg: dict, scale: float = 1.0):
         from PySide6.QtGui import QGuiApplication, QImage
         self._app = QGuiApplication.instance() or QGuiApplication([])
+        import font_catalog
+        font_catalog.register_qt_fonts()
         self.mode, self.cfg, self.scale = mode, cfg, scale
         if mode == "mouse_arrow":           # (pre-Session-18 name for "movement")
             mode = self.mode = "movement"
@@ -195,7 +197,7 @@ class FrameMaker:
             if bg.alpha():
                 p.fillRect(QRectF(0, 0, w, h), bg)
             from kbm_paint import paint_motion
-            paint_motion(p, QRectF(0, 0, w, h), state, self.style, t, self.style.get("motion", "comet"),
+            paint_motion(p, QRectF(0, 0, w, h), state, self.style, t, self.style.get("motion", "mousepad"),
                          "movement", self.style.get("center", "head"))
         else:
             self._paint_simple(p, state, t, w, h)

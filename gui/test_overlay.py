@@ -21,6 +21,7 @@ import sys
 import tempfile
 import threading
 import time
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -99,7 +100,18 @@ def layout_tests():
     check("scene: movement views are motion items", any(i["kind"] == "motion" and i["mode"] == "joystick"
                                                        for i in whole["items"]))
     check("scene: new ids don't collide", kl.new_element_id(sc, "keyboard") == "keyboard"
-          and kl.new_element_id({"elements": [{"id": "comet"}]}, "comet") == "comet2")
+          and kl.new_element_id({"elements": [{"id": "mouse"}]}, "mouse") == "mouse2"
+          and kl.new_element_id({"elements": [{"id": "movement"}]}, "comet") == "movement2")
+    k60 = {i["name"]: i for i in kl.keyboard_layout("60", arrows=True)["items"]}
+    rows60 = {}
+    for i in kl.keyboard_layout("60", arrows=True)["items"]:
+        rows60.setdefault(round(i["y"], 3), []).append(i)
+    check("keyboard: 60% with arrow keys -- every row still 15 keys wide, Up above Down",
+          all(abs(max(i["x"] + i["w"] for i in r) - 15) < 1e-9 for r in rows60.values())
+          and k60["KEY_UP"]["x"] == k60["KEY_DOWN"]["x"] and "KEY_LEFT" in k60 and "KEY_RIGHT" in k60
+          and "KEY_UP" not in {i["name"] for i in kl.keyboard_layout("60")["items"]}
+          and "KEY_UP" in {i["name"] for i in kl.element_layout({"type": "keyboard", "layout": "60",
+                                                                 "arrows": True})["items"]})
 
     # movement views
     st = kl.KbmState()
@@ -111,7 +123,7 @@ def layout_tests():
         st.move(-10, 0, t)
         t += 0.01
     style = {"screen_height": 1000, "pad_fraction": 80}
-    f = kl.motion_frame(st, "comet", 200, style, t, "c1", "tail")
+    f = kl.motion_frame(st, "comet", 200, dict(style, pad_fraction=200), t, "c1", "tail")   # (a view it fits in)
     xs = [p[0] for p in f["trail"]]
     check("comet: tail centered -- the oldest point sits in the middle", abs(f["trail"][0][0] - 100) < 1e-6
           and abs(f["trail"][0][1] - 100) < 1e-6)
@@ -129,13 +141,31 @@ def layout_tests():
     for i in range(60):
         big.move(200, 0, i * 0.01)           # far bigger than the view
     fz = kl.motion_frame(big, "comet", 200, style, 0.6, "z", "tail")
-    check("comet: auto zoom keeps the whole trail on screen", all(0 <= p[0] <= 200 for p in fz["trail"])
-          and len(fz["trail"]) > 50)
     fc = kl.motion_frame(big, "comet", 200, dict(style, auto_zoom=False), 0.6, "nz", "tail")
-    check("comet: without auto zoom, old points are dropped so the head stays on screen",
-          len(fc["trail"]) < len(fz["trail"]) and 0 <= fc["dot"][0] <= 200)
-    fz2 = kl.motion_frame(big, "comet", 200, style, 0.65, "z", "tail")
-    check("comet: zooming back in is gradual", big.views["z"]["z"] <= 1.0)
+    check("comet: never zooms (auto zoom or not) -- old points are dropped so it stays on screen",
+          json.dumps(fz) == json.dumps(fc) and all(0 <= p[0] <= 200 for p in fz["trail"]) and len(fz["trail"]) < 50)
+    slow, fast = kl.KbmState(), kl.KbmState()
+    for i in range(50):
+        slow.move(2, 0, i * 0.01)
+        fast.move(6, 0, i * 0.01)
+    fs_ = kl.motion_frame(slow, "comet", 200, style, 0.5, "s", "head")
+    ff_ = kl.motion_frame(fast, "comet", 200, style, 0.5, "f", "head")
+    length = lambda fr: fr["dot"][0] - fr["trail"][0][0]
+    check("comet: speed shows -- the same time at 3x the speed is a ~3x longer trail",
+          2.5 < length(ff_) / length(fs_) < 3.5)
+    pad = kl.KbmState()
+    for i in range(60):
+        pad.move(-200, 0, i * 0.01)
+    for i in range(30):
+        pad.move(0, 150, 0.6 + i * 0.01)
+    fp = None
+    for k in range(10):
+        fp = kl.motion_frame(pad, "mousepad", 200, style, 0.9 + k * 0.016, "pz", "head")
+    check("mousepad: auto zoom keeps the whole trail (tail too) on screen",
+          len(fp["trail"]) > 50 and all(-1 <= p[0] <= 201 and -1 <= p[1] <= 201 for p in fp["trail"]))
+    fpc = kl.motion_frame(pad, "mousepad", 200, dict(style, auto_zoom=False), 0.9, "pc", "head")
+    check("mousepad: without auto zoom, what left the pad is dropped",
+          all(-1 <= p[0] <= 201 and -1 <= p[1] <= 201 for p in fpc["trail"]) and len(fpc["trail"]) < len(fp["trail"]))
     mp = kl.KbmState()
     for i in range(20):
         mp.move(5, 0, i * 0.01)
@@ -171,8 +201,16 @@ def layout_tests():
     inv_arcs = [r["arcs"][0][0] for r in fi["rings"] if r["arcs"] and len(r["arcs"]) == 1]
     check("clicks: back goes left and forward right; 'invert side button rings' swaps them",
           side_arcs == [180.0, 0.0] and inv_arcs == [0.0, 180.0])
-    check("comet follows its head by default", kl.DEFAULT_SCENE["elements"][2]["center"] == "head"
-          and kl.default_element({"elements": []}, "comet")["center"] == "head"
+    check("mousepad is the default movement view", kl.DEFAULT_SCENE["elements"][2]["type"] == "mousepad"
+          and oc.DEFAULTS["movement_style"]["motion"] == "mousepad" and list(kl.MOTION_TYPES)[0] == "mousepad")
+    m2 = oc.merged({"defaults_rev": 1, "scene": {"elements": [{"id": "comet", "type": "comet", "center": "head",
+                                                               "x": 18.9, "y": 3.95}]},
+                    "movement_style": {"motion": "comet"}})
+    check("saved configs with the old default comet switch to mousepad once (id 'movement')",
+          m2["scene"]["elements"][0]["type"] == "mousepad" and m2["scene"]["elements"][0]["id"] == "movement"
+          and m2["movement_style"]["motion"] == "mousepad"
+          and oc.merged(dict(m2, movement_style={"motion": "comet"}))["movement_style"]["motion"] == "comet")
+    check("comet follows its head by default", kl.default_element({"elements": []}, "comet")["center"] == "head"
           and oc.DEFAULTS["movement_style"]["center"] == "head")
     old = oc.merged({"scene": {"elements": [{"id": "c", "type": "comet", "center": "tail", "x": 0, "y": 0}]},
                      "movement_style": {"center": "tail"}})
@@ -312,6 +350,16 @@ def hub_tests():
           st_el == 200 and b"drawKbm" in body_el and cc["piece"] == "pad"
           and any(i["kind"] == "stick" for i in cc["layout"]["items"])
           and not any(i["kind"] == "key" for i in cc["layout"]["items"]) and cc["pad_labels"]["BTN_SOUTH"] == "A")
+    _s, fctype, fcss = _get("http://127.0.0.1:18480/fonts.css")
+    _s2, tctype, ttf = _get("http://127.0.0.1:18480/fonts/bangers-400.ttf")
+    try:
+        _get("http://127.0.0.1:18480/fonts/..%2F..%2Foverlay_server.py")
+        sneaky = True
+    except urllib.error.HTTPError:
+        sneaky = False
+    check("hub: bundled fonts served (@font-face css + ttf, whitelisted)", b'font-family: "Bangers"' in fcss
+          and fctype.startswith("text/css") and ttf[:4] == b"\x00\x01\x00\x00" and not sneaky
+          and b"/fonts.css" in _get("http://127.0.0.1:18481/")[2])
     check("hub: scripts served", b"motionFrame" in _get("http://127.0.0.1:18482/common.js")[2]
           and b"drawKbm" in _get("http://127.0.0.1:18480/kbm.js")[2])
 
@@ -705,7 +753,7 @@ def render_tests():
           and (srcs[0]["width"], srcs[0]["height"]) == kl.layout_pixel_size(kl.build_scene(None), oc.DEFAULTS["style"]))
     srcs2 = overlay_cli.obs_sources(oc.merged({"full": {"enabled": True, "split": True}, "controller": {"enabled": True}}))
     check("cli: old split + controller settings -> one source per element (controller added to the scene)",
-          [s["name"] for s in srcs2] == ["Puppetry: keyboard", "Puppetry: mouse", "Puppetry: comet",
+          [s["name"] for s in srcs2] == ["Puppetry: keyboard", "Puppetry: mouse", "Puppetry: movement",
                                          "Puppetry: controller"]
           and srcs2[3]["url"].endswith("/el/controller"))
     try:

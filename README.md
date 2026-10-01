@@ -101,21 +101,26 @@ session to take effect.
   end a comet follows, inverted side-button rings, scale) are toggles there.
   The same list is at the top of the overlay's **Customize…**. **+ Add
   element** adds any number of:
-  - keyboards: full size, 80% (TKL), 60%, or the left half for gaming;
+  - keyboards: full size, 80% (TKL), 60% (with or without arrow keys), or
+    the left half for gaming;
   - mice: classic, gaming (extra side buttons), minimal, or buttons only;
   - controllers (Xbox / PlayStation / Nintendo labels);
   - mouse movement views, all square with no background:
+    - *Mousepad* (default): the dot moves around a virtual mousepad that
+      re-centers after a pause; auto zoom (on by default) zooms out so the
+      whole trail stays in view;
     - *Comet*: a trail behind a dot that follows the head (the dot stays
-      centered; default) or the tail;
-    - *Mousepad*: the dot moves around a virtual mousepad that re-centers
-      after a pause;
+      centered; default) or the tail, always at the same scale, so a
+      longer trail means faster movement;
     - *Joystick*: the dot leans toward the direction and speed of movement.
     The trail lasts a set time and thins and fades toward its end. Left
     click sends a ring outward, right click inward, middle click two short
     arcs up and down, back and forward an arc to the left and right
     (*Invert side button rings* swaps them); scrolling
-    stacks chevrons above or below the dot. Auto zoom (on by default) zooms
-    out when movement would leave the view.
+    stacks chevrons above or below the dot.
+- The overlay's font picker shows 21 bundled fonts by category, each in its
+  own lettering (they work in OBS without installing anything), plus any
+  installed font.
 - **Steam Controller / Steam Deck**: outside games Steam presents these as
   its own keyboard and mouse. Their input is watched by default (*Watch
   Steam Controller / Steam Deck input*, Settings > Devices), and *Watch
@@ -188,3 +193,7 @@ on KDE Plasma, or `kdotool` isn't finding KWin's D-Bus interface. Confirm
 ## License
 
 MIT -- see [LICENSE](LICENSE).
+
+The bundled overlay fonts in `gui/overlay_web/fonts/` keep their own
+licenses (SIL Open Font License 1.1 or Apache 2.0), included in
+`gui/overlay_web/fonts/licenses/`.

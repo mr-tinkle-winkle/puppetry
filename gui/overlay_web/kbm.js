@@ -12,9 +12,9 @@ function roundRect(ctx, x, y, w, h, r) {
 function fitText(ctx, text, x, y, w, h, px, family, bold, color) {
   if (!text) return;
   const weight = bold ? "bold " : "";
-  ctx.font = `${weight}${px}px ${family || "sans-serif"}`;
+  ctx.font = `${weight}${px}px ${fontStack(family)}`;
   const tw = ctx.measureText(text).width;
-  if (tw > w * 0.9 && tw > 0) ctx.font = `${weight}${Math.max(4, px * w * 0.9 / tw)}px ${family || "sans-serif"}`;
+  if (tw > w * 0.9 && tw > 0) ctx.font = `${weight}${Math.max(4, px * w * 0.9 / tw)}px ${fontStack(family)}`;
   ctx.fillStyle = color; ctx.textAlign = "center"; ctx.textBaseline = "middle";
   ctx.fillText(text, x + w / 2, y + h / 2 + 0.5);
 }

@@ -55,6 +55,8 @@ def apply_window_palette(widget: QWidget, theme: Theme) -> None:
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
+        import font_catalog
+        font_catalog.register_qt_fonts()          # the overlay's bundled fonts (picker, previews, visualizer)
         self.setWindowTitle("Puppetry")
         self.setWindowIcon(QIcon.fromTheme("puppetry"))
         theme = Theme()

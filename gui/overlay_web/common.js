@@ -76,6 +76,22 @@ function applySnapshot(s) {
   P.dirty = true;
 }
 
+// A CSS font-family list for a font name (font_catalog.css_stack's twin): quoted, so names
+// like "Press Start 2P" parse, with a generic fallback.
+const GENERIC_FONTS = new Set(["sans-serif", "serif", "monospace", "cursive", "fantasy", "system-ui"]);
+function fontStack(family) {
+  family = (family || "sans-serif").trim();
+  return GENERIC_FONTS.has(family) ? family : `"${family.replace(/"/g, "")}", sans-serif`;
+}
+// bundled fonts (/fonts.css) load on first use: redraw once they arrive
+if (typeof document !== "undefined" && document.fonts) {
+  document.fonts.addEventListener("loadingdone", () => { P.dirty = true; if (P.onfonts) P.onfonts(); });
+}
+function loadFont(st) {
+  if (typeof document === "undefined" || !document.fonts || !st) return;
+  for (const b of ["", "bold "]) document.fonts.load(`${b}16px ${fontStack(st.font_family)}`).then(() => { P.dirty = true; if (P.onfonts) P.onfonts(); }, () => {});
+}
+
 function connect() {
   const m = location.pathname.match(/^\/el\/([^/]+)/);       // an element page: /el/<id>
   const es = new EventSource("/events" + (m ? "?el=" + encodeURIComponent(decodeURIComponent(m[1])) : ""));
@@ -83,6 +99,7 @@ function connect() {
     const c = JSON.parse(m.data);
     P.style = c.style || {}; P.layout = c.layout || null; P.labels = c.labels || {};
     P.padLabels = c.pad_labels || {};
+    loadFont(P.style);
     P.dirty = true;
     if (P.onconfig) P.onconfig();
   });
@@ -190,7 +207,7 @@ function drawArrowOld(ctx, bx, by, bw, bh, style, now) {
   ctx.lineTo(bxh - nx * head * 0.55, byh - ny * head * 0.55); ctx.closePath(); ctx.fill();
   if (style.show_move_text) {
     ctx.fillStyle = cssColor(style.text_color || "#ffffffff");
-    ctx.font = `${Math.max(9, bh * 0.12)}px ${style.font_family || "sans-serif"}`;
+    ctx.font = `${Math.max(9, bh * 0.12)}px ${fontStack(style.font_family)}`;
     ctx.textAlign = "center"; ctx.textBaseline = "middle";
     ctx.fillText(`${Math.round(curve.mag)} px`, bx + bw / 2, by + bh * 0.92);
   }
@@ -281,25 +298,28 @@ function motionFrame(state, kind, box, style, now, viewKey, center) {
       }
       view.ox = ox; view.oy = oy;
       cx = ox; cy = oy;
-      need = Math.max(Math.abs(ax - ox), Math.abs(ay - oy)) * scale0;
-    } else {
-      const c0 = center === "head" ? pts[pts.length - 1] : pts[0];
-      cx = c0[1]; cy = c0[2];
-      need = Math.max(...pts.map((p) => Math.max(Math.abs(p[1] - cx), Math.abs(p[2] - cy)))) * scale0;
-      if (!auto) {
+      // auto zoom keeps the WHOLE trail in view (not just the head)
+      need = Math.max(...pts.concat([[0, ax, ay, "r"]]).map((p) => Math.max(Math.abs(p[1] - ox), Math.abs(p[2] - oy)))) * scale0;
+      if (!auto) {                                  // fixed scale: drop what has left the pad
         let i = 0;
-        while (i < pts.length - 1) {
-          const c = center !== "head" ? pts[i] : pts[pts.length - 1];
-          if (pts.slice(i).every((p) => Math.max(Math.abs(p[1] - c[1]), Math.abs(p[2] - c[2])) * scale0 <= half)) break;
-          i++;
-        }
+        while (i < pts.length - 1 && pts.slice(i).some((p) => Math.max(Math.abs(p[1] - ox), Math.abs(p[2] - oy)) * scale0 > half)) i++;
         pts = pts.slice(i);
-        const c = center !== "head" ? pts[0] : pts[pts.length - 1];
-        cx = c[1]; cy = c[2];
       }
+    } else {
+      // comet: always at the true scale, so a trail's length shows speed; what would
+      // leave the view is dropped, oldest first
+      let i = 0;
+      while (i < pts.length - 1) {
+        const c = center !== "head" ? pts[i] : pts[pts.length - 1];
+        if (pts.slice(i).every((p) => Math.max(Math.abs(p[1] - c[1]), Math.abs(p[2] - c[2])) * scale0 <= half)) break;
+        i++;
+      }
+      pts = pts.slice(i);
+      const c = center !== "head" ? pts[0] : pts[pts.length - 1];
+      cx = c[1]; cy = c[2];
     }
     let z = view.z ?? 1.0;
-    if (auto) {
+    if (auto && kind === "mousepad") {
       const target = need > 1e-9 ? Math.min(1, half / need) : 1;
       z = target < z ? target : easeTo(z, target, dt, 0.6);
     } else z = 1.0;

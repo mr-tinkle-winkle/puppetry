@@ -298,6 +298,15 @@ class PageServer:
                     return self._send(200, "text/html; charset=utf-8", (WEB_DIR / "full.html").read_bytes())
                 if path in ("/", "/index.html"):
                     return self._send(200, "text/html; charset=utf-8", (WEB_DIR / f"{PAGE_FILE[page_ref]}.html").read_bytes())
+                if path == "/fonts.css":
+                    import font_catalog
+                    return self._send(200, "text/css; charset=utf-8", font_catalog.font_face_css().encode())
+                if path.startswith("/fonts/"):
+                    import font_catalog
+                    name = path[len("/fonts/"):]
+                    if name in font_catalog.font_files():          # whitelist: no path tricks
+                        return self._send(200, "font/ttf", (font_catalog.FONT_DIR / name).read_bytes())
+                    return self._send(404, "text/plain", b"not found")
                 if path in STATIC:
                     return self._send(200, STATIC[path], (WEB_DIR / path.lstrip("/")).read_bytes())
                 if path == "/config":

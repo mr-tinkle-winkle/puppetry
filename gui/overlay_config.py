@@ -25,7 +25,7 @@ from puppetry_config import CONFIG_DIR  # noqa: E402  (one definition of the con
 MOTION_OPTIONS = [
     ("trail_seconds", "Trail length (seconds)", "float", 1.0, (0.1, 10.0)),
     ("trail_width", "Trail thickness (% of the view)", "float", 4.0, (0.5, 20.0)),
-    ("auto_zoom", "Auto zoom (zoom out instead of cutting the trail short)", "bool", True, None),
+    ("auto_zoom", "Mousepad: auto zoom (zoom out so the whole trail stays in view)", "bool", True, None),
     ("pad_fraction", "View covers this much of your screen height (%)", "int", 80, (5, 500)),
     ("screen_height", "Screen height (px)", "int", 1080, (240, 8640)),
     ("recenter_s", "Mousepad: re-center after resting (seconds)", "float", 1.0, (0.1, 30.0)),
@@ -53,7 +53,7 @@ STYLE_SCHEMA = [
         ("arrow_color", "Mouse movement (your input)", "color", "#e0955aff", None),
     ]),
     ("Text", [
-        ("font_family", "Font", "text", "sans-serif", None),
+        ("font_family", "Font", "font", "sans-serif", None),
         ("font_scale", "Text size (% of a key)", "int", 32, (10, 80)),
         ("bold", "Bold", "bool", False, None),
         ("label_mode", "Key labels", "choice", "label",
@@ -74,7 +74,7 @@ STYLE_SCHEMA = [
 
 SIMPLE_SCHEMA = [
     ("Simple input list", [
-        ("font_family", "Font", "text", "sans-serif", None),
+        ("font_family", "Font", "font", "sans-serif", None),
         ("font_px", "Text size (px)", "int", 36, (8, 300)),
         ("bold", "Bold", "bool", True, None),
         ("text_color", "Text", "color", "#ffffffff", None),
@@ -101,7 +101,7 @@ SIMPLE_SCHEMA = [
 
 MOVEMENT_SCHEMA = [
     ("Mouse movement page", [
-        ("motion", "Style", "choice", "comet", [("comet", "Comet"), ("mousepad", "Mousepad"), ("joystick", "Joystick")]),
+        ("motion", "Style", "choice", "mousepad", [("mousepad", "Mousepad"), ("comet", "Comet"), ("joystick", "Joystick")]),
         ("center", "Comet follows", "choice", "head", [("head", "Follows head (the pointer stays centered)"),
                                                         ("tail", "Follows tail (the trail's end stays centered)")]),
         ("invert_side_rings", "Invert side button rings (back goes right, forward left)", "bool", False, None),
@@ -161,7 +161,7 @@ def status_file() -> Path:
     return runtime_dir() / "overlay_status.json"
 
 
-DEFAULTS_REV = 1     # bump when a default changes in a way saved configs should pick up
+DEFAULTS_REV = 2     # bump when a default changes in a way saved configs should pick up
 
 
 def merged(data: dict) -> dict:
@@ -174,6 +174,16 @@ def merged(data: dict) -> dict:
         ms = data.get("movement_style") or data.get("mouse_style")
         if isinstance(ms, dict) and ms.get("center") == "tail":
             ms["center"] = "head"
+    if rev < 2:     # Session 21: Mousepad is the default movement view (the default comet becomes one)
+        scene = data.get("scene") if isinstance(data.get("scene"), dict) else {}
+        for el in scene.get("elements", []):
+            if isinstance(el, dict) and el.get("id") == "comet" and el.get("type") == "comet":
+                el["type"] = "mousepad"
+                if not any(e.get("id") == "movement" for e in scene["elements"] if isinstance(e, dict)):
+                    el["id"] = "movement"
+        ms = data.get("movement_style") or data.get("mouse_style")
+        if isinstance(ms, dict) and ms.get("motion") == "comet":
+            ms["motion"] = "mousepad"
     if "mouse_style" in data and "movement_style" not in data:     # renamed (Session 18)
         data["movement_style"] = data.pop("mouse_style")
     data.pop("mouse_style", None)

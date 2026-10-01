@@ -234,6 +234,12 @@ class ElementPanel(QWidget):
             self.opts.addWidget(self._caption("Size"))
             self.widgets["layout"] = _Toggles(KEYBOARD_SHORT, el.get("layout", "tkl"), lambda k: self._set("layout", k))
             self.opts.addWidget(self.widgets["layout"])
+            if el.get("layout", "tkl") == "60":
+                cb = CustomCheckBox("Arrow keys (60% boards that have them)")
+                cb.setChecked(bool(el.get("arrows", False)))
+                cb.toggled.connect(lambda v: self._set("arrows", bool(v), rebuild=False))
+                self.widgets["arrows"] = cb
+                self.opts.addWidget(cb)
         elif typ == "mouse":
             self.opts.addWidget(self._caption("Look"))
             self.widgets["look"] = _Toggles(MOUSE_SHORT, el.get("look", "classic"), lambda k: self._set("look", k))

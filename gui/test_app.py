@@ -1252,6 +1252,24 @@ def main() -> int:
     if old_hook:
         old_hook(ov.cfg["scene"])
     d3.close()
+    from overlay_settings import FontPicker
+    import font_catalog
+    fd = CustomizeDialog(ov, "full")
+    fp = fd.form.widgets["font_family"]
+    fams = [fp.itemData(i) for i in range(fp.count())]
+    check("font picker: every bundled font, by category, plus 'other'",
+          all(f[0] in fams for f in font_catalog.CATALOG) and fams[-1] == FontPicker.OTHER
+          and fp.itemData(fp.findData("Bangers"), Qt.UserRole + 2) == "Comic")
+    from PySide6.QtGui import QFontDatabase
+    check("font picker: the bundled fonts are installed for Qt",
+          {"Bangers", "Press Start 2P", "Comic Neue"} <= set(QFontDatabase.families()))
+    fp.setCurrentIndex(fp.findData("Press Start 2P"))
+    ov.flush()
+    check("font picker: choosing a font saves it", oc.load()["style"]["font_family"] == "Press Start 2P")
+    fd.preview.repaint()
+    fp.setCurrentIndex(fp.findData("sans-serif"))
+    ov.flush()
+    fd.close()
     mv = oc.MOVEMENT_SCHEMA[0][1]
     check("overlay: the movement page offers 'Comet follows' (head by default) and 'invert side button rings'",
           any(o[0] == "center" and o[3] == "head" for o in mv) and any(o[0] == "invert_side_rings" for o in mv))
@@ -1330,23 +1348,30 @@ def main() -> int:
     check("edit: picking an element in the sidebar selects it in the picture", vp.area.selected == pad["id"])
     vp.panel.list_buttons["keyboard"].click()
     vp.panel.widgets["layout"].buttons["60"].click()
+    check("edit: a 60% keyboard offers arrow keys", "arrows" in vp.panel.widgets)
+    vp.panel.widgets["arrows"].setChecked(True)
+    check("edit: ... and turning them on draws them", vp.area.element("keyboard")["arrows"] is True
+          and any(i["name"] == "KEY_UP" for i in vp.area.layout_["items"]))
     ov.flush()
     check("edit: keyboard size toggles (Full / 80% / 60% / Half), saved", vp.area.element("keyboard")["layout"] == "60"
           and next(e for e in oc.load()["scene"]["elements"] if e["id"] == "keyboard")["layout"] == "60")
     vp.panel.list_buttons["mouse"].click()
     vp.panel.widgets["look"].buttons["gaming"].click()
     check("edit: mouse look toggles", vp.area.element("mouse")["look"] == "gaming")
-    vp.panel.list_buttons["comet"].click()
-    check("edit: a comet follows its head by default", vp.panel.widgets["center"].current() == "head")
+    vp.panel.list_buttons["movement"].click()
+    check("edit: the movement view is a Mousepad by default (no 'follows' option)",
+          vp.panel.widgets["type"].current() == "mousepad" and "center" not in vp.panel.widgets)
+    vp.panel.widgets["type"].buttons["comet"].click()
+    check("edit: switched to Comet, it follows its head by default", vp.panel.widgets["center"].current() == "head")
     vp.panel.widgets["center"].buttons["tail"].click()
     vp.panel.widgets["invert_side"].setChecked(True)
-    check("edit: 'comet follows' and 'invert side button rings' apply", vp.area.element("comet")["center"] == "tail"
-          and vp.area.element("comet")["invert_side"] is True)
+    check("edit: 'comet follows' and 'invert side button rings' apply", vp.area.element("movement")["center"] == "tail"
+          and vp.area.element("movement")["invert_side"] is True)
     vp.panel.widgets["type"].buttons["joystick"].click()
-    check("edit: Comet / Mousepad / Joystick toggle switches the view", vp.area.element("comet")["type"] == "joystick"
+    check("edit: Comet / Mousepad / Joystick toggle switches the view", vp.area.element("movement")["type"] == "joystick"
           and "center" not in vp.panel.widgets)
     vp.panel.widgets["scale"].setValue(1.4)
-    check("edit: scale from the sidebar", vp.area.element("comet")["scale"] == 1.4)
+    check("edit: scale from the sidebar", vp.area.element("movement")["scale"] == 1.4)
     vp.area.selected = None
     vp.area.repaint()
     pump(2)

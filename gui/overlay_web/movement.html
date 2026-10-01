@@ -3,6 +3,7 @@
 <head>
 <meta charset="utf-8">
 <title>Puppetry mouse movement</title>
+<link rel="stylesheet" href="/fonts.css">
 <style>
   html, body { margin: 0; padding: 0; background: transparent; overflow: hidden; }
   canvas { display: block; }
@@ -33,7 +34,7 @@ function frame() {
     ctx.clearRect(0, 0, side, side);
     const bg = cssColor(P.style.background);
     if (bg !== "rgba(0,0,0,0)") { ctx.fillStyle = bg; ctx.fillRect(0, 0, side, side); }
-    drawMotion(ctx, 0, 0, side, side, P.style, now, P.style.motion || "comet", "movement", P.style.center || "head");
+    drawMotion(ctx, 0, 0, side, side, P.style, now, P.style.motion || "mousepad", "movement", P.style.center || "head");
   }
   requestAnimationFrame(frame);
 }

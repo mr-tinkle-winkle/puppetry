@@ -3,6 +3,7 @@
 <head>
 <meta charset="utf-8">
 <title>Puppetry input list</title>
+<link rel="stylesheet" href="/fonts.css">
 <style>
   html, body { margin: 0; padding: 0; background: transparent; overflow: hidden; }
   #list { white-space: pre; padding: 4px 8px; }
@@ -20,7 +21,7 @@ let lastText = null;
 function applyStyle() {
   const s = P.style;
   document.body.style.background = cssColor(s.background);
-  el.style.fontFamily = s.font_family || "sans-serif";
+  el.style.fontFamily = fontStack(s.font_family);
   el.style.fontSize = (s.font_px || 36) + "px";
   el.style.fontWeight = s.bold ? "bold" : "normal";
   el.style.color = cssColor(s.text_color);

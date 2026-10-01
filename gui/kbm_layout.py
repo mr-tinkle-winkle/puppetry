@@ -439,7 +439,7 @@ KEYBOARD_PRESETS = {"full": "Full size (with numpad)", "tkl": "80% (tenkeyless)"
                     "half": "Half (left side, for games)"}
 MOUSE_LOOKS = {"classic": "Classic", "gaming": "Gaming (big side buttons, DPI)", "minimal": "Minimal",
                "buttons": "Buttons only"}
-MOTION_TYPES = {"comet": "Comet", "mousepad": "Mousepad", "joystick": "Joystick"}
+MOTION_TYPES = {"mousepad": "Mousepad", "comet": "Comet", "joystick": "Joystick"}
 ELEMENT_TYPES = {"keyboard": "Keyboard", "mouse": "Mouse", "controller": "Controller", **MOTION_TYPES}
 
 
@@ -447,10 +447,11 @@ def _key_item(k, x, y, w=None, h=1.0):
     return {"kind": "key", "name": k[1], "label": k[2], "x": x, "y": y, "w": w if w is not None else k[3], "h": h}
 
 
-def keyboard_layout(preset: str = "tkl") -> dict:
+def keyboard_layout(preset: str = "tkl", arrows: bool = False) -> dict:
     """Keyboard items at the origin. full = 80% + numpad, tkl = the main
     block + print-screen row + nav cluster + arrows, 60 = main block only
-    (Esc where ` is), half = the left side gamers use (Esc F1-F4, `-5, Tab-T,
+    (Esc where ` is; with `arrows`, the common arrow variant: a 1.75u right
+    Shift, Up, then /, and Alt Menu Left Down Right after Space), half = the left side gamers use (Esc F1-F4, `-5, Tab-T,
     Caps-G, Shift-B, Ctrl Meta Alt and part of Space)."""
     items = []
     if preset == "half":
@@ -468,6 +469,11 @@ def keyboard_layout(preset: str = "tkl") -> dict:
         if preset == "60":
             rows = rows[1:]
             rows[0] = [_k(1, "KEY_ESC", "Esc")] + rows[0][1:]
+            if arrows:
+                up, left, down, right = (k for _r, _c, k in ARROW_KEYS)
+                rows[3] = rows[3][:-2] + [_k(54, "KEY_RIGHTSHIFT", "Shift", 1.75), up, _k(53, "KEY_SLASH", "/")]
+                rows[4] = rows[4][:4] + [_k(100, "KEY_RIGHTALT", "Alt", 1.0), _k(127, "KEY_COMPOSE", "Menu", 1.0),
+                                         left, down, right]
     first = 0 if (preset != "60") else 1
     for ri, row in enumerate(rows):
         x = 0.0
@@ -548,7 +554,7 @@ def _normalized(items: list) -> dict:
 def element_layout(el: dict) -> dict:
     t = el.get("type")
     if t == "keyboard":
-        return keyboard_layout(el.get("layout", "tkl"))
+        return keyboard_layout(el.get("layout", "tkl"), bool(el.get("arrows", False)))
     if t == "mouse":
         return mouse_layout(el.get("look", "classic"))
     if t == "controller":
@@ -564,7 +570,7 @@ def element_layout(el: dict) -> dict:
 DEFAULT_SCENE = {"elements": [
     {"id": "keyboard", "type": "keyboard", "layout": "tkl", "x": 0.0, "y": 0.0, "scale": 1.0},
     {"id": "mouse", "type": "mouse", "look": "classic", "x": 19.0, "y": 0.35, "scale": 1.0},
-    {"id": "comet", "type": "comet", "center": "head", "size": 3.2, "x": 18.9, "y": 3.95, "scale": 1.0},
+    {"id": "movement", "type": "mousepad", "size": 3.2, "x": 18.9, "y": 3.95, "scale": 1.0},
 ]}
 
 
@@ -602,6 +608,10 @@ def build_scene(scene: dict | None, only: str | None = None, normalize: bool = T
 
 
 def new_element_id(scene: dict, typ: str) -> str:
+    """"keyboard", "mouse2", ...; movement views are all "movement<n>" so an
+    element keeps its id (and its OBS URL) when its style is switched."""
+    if typ in MOTION_TYPES:
+        typ = "movement"
     ids = {e.get("id") for e in scene.get("elements", [])}
     if typ not in ids:
         return typ
@@ -733,26 +743,28 @@ def motion_frame(state, kind: str, box: float, style: dict, now: float, view_key
                     oy = ay + hs
             view["ox"], view["oy"] = ox, oy
             cx, cy = ox, oy
-            need = max(abs(ax - ox), abs(ay - oy)) * scale0
-        else:                                               # comet
-            if center == "head":
-                cx, cy = pts[-1][1], pts[-1][2]
-            else:
-                cx, cy = pts[0][1], pts[0][2]
-            need = max(max(abs(p[1] - cx), abs(p[2] - cy)) for p in pts) * scale0
-            if not auto:
-                # drop the oldest points until everything left fits (faster fade)
+            # auto zoom keeps the WHOLE trail in view (not just the head)
+            need = max(max(abs(p[1] - ox), abs(p[2] - oy)) for p in pts + [(0, ax, ay, "r")]) * scale0
+            if not auto:                                    # fixed scale: drop what has left the pad
                 i = 0
-                while i < len(pts) - 1:
-                    c = pts[i] if center != "head" else pts[-1]
-                    if all(max(abs(p[1] - c[1]), abs(p[2] - c[2])) * scale0 <= half for p in pts[i:]):
-                        break
+                while i < len(pts) - 1 and any(max(abs(p[1] - ox), abs(p[2] - oy)) * scale0 > half
+                                               for p in pts[i:]):
                     i += 1
                 pts = pts[i:]
-                c = pts[0] if center != "head" else pts[-1]
-                cx, cy = c[1], c[2]
+        else:
+            # comet: always at the true scale, so a trail's length shows speed. What
+            # would leave the view is dropped, oldest first (the trail fades sooner).
+            i = 0
+            while i < len(pts) - 1:
+                c = pts[i] if center != "head" else pts[-1]
+                if all(max(abs(p[1] - c[1]), abs(p[2] - c[2])) * scale0 <= half for p in pts[i:]):
+                    break
+                i += 1
+            pts = pts[i:]
+            c = pts[0] if center != "head" else pts[-1]
+            cx, cy = c[1], c[2]
         z = view.get("z", 1.0)
-        if auto:
+        if auto and kind == "mousepad":
             target = min(1.0, half / need) if need > 1e-9 else 1.0
             z = target if target < z else _ease(z, target, dt, 0.6)
         else:
