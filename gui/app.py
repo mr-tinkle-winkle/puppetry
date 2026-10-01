@@ -58,7 +58,13 @@ class MainWindow(QMainWindow):
         import font_catalog
         font_catalog.register_qt_fonts()          # the overlay's bundled fonts (picker, previews, visualizer)
         self.setWindowTitle("Puppetry")
-        self.setWindowIcon(QIcon.fromTheme("puppetry"))
+        icon = QIcon.fromTheme("puppetry")
+        if icon.isNull():                          # not installed (running from the source tree): the logo file
+            from pathlib import Path
+            logo = Path(__file__).resolve().parent.parent / "assets" / "puppetry_small_logo.png"
+            if logo.exists():
+                icon = QIcon(str(logo))
+        self.setWindowIcon(icon)
         theme = Theme()
         apply_window_palette(self, theme)
         install_wheel_guard(QApplication.instance())

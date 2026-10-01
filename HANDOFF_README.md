@@ -29,7 +29,7 @@ features. That document's content has been folded into this one
 (see "Prior session" below) rather than kept as a separate file, so
 this is now the single source of truth for project state.
 
-## Start here — current state (Session 22)
+## Start here — current state (Session 23)
 
 **What it is.** A NixOS input-macro system: a C++17 daemon (evdev in,
 `uinput` out; control socket; embedded CPython *or* a built-in interpreter
@@ -285,6 +285,12 @@ separately from profiles.
     (`CpsArea.set_overlay_style(cfg["style"])`, padding 0), refreshed by
     `OverlaySection.on_style_changed` on every Customize edit, so it shows
     what OBS and afterglow get. The Dictionary keeps the app-themed style.
+
+- **Session 23: new logo.** A wooden puppet hand on strings (orange, blue
+  and purple fingers). `assets/puppetry_logo.png` is the original artwork;
+  `assets/puppetry_small_logo.png` is it trimmed to the hand and centered on
+  a 1024x1024 transparent square for the icon sizes. `MainWindow` falls back
+  to that file when the `puppetry` theme icon isn't installed.
 
 **Not verified on real hardware / display.** Everything above ran under
 `QT_QPA_PLATFORM=offscreen`; OBS pages were rendered in headless Chromium

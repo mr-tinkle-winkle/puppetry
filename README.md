@@ -154,11 +154,13 @@ session to take effect.
 
 ## Icon / logo
 
-`assets/puppetry_small_logo.png` is the source for the app icon (taskbar,
-search menu, alt-tab, etc.) -- it's resized at build time into the standard
-`hicolor` icon-theme sizes (16px through 256px). `assets/puppetry_logo.png`
-is the full detailed version, kept in the repo but not currently wired into
-anything (nothing in this project needs a large logo yet).
+The logo is a wooden puppet hand on strings. `assets/puppetry_small_logo.png`
+(1024x1024, transparent, the hand centered) is the source for the app icon
+(taskbar, search menu, alt-tab, etc.) -- it's resized at build time into the
+standard `hicolor` icon-theme sizes (16px through 256px), and the window uses
+it directly when running from the source tree. `assets/puppetry_logo.png` is
+the original artwork (845x1024, transparent), kept in the repo but not
+currently wired into anything.
 
 To update either: replace the file at that same path, commit, push,
 rebuild. Nothing else needs to change.
