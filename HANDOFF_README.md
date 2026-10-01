@@ -29,7 +29,7 @@ features. That document's content has been folded into this one
 (see "Prior session" below) rather than kept as a separate file, so
 this is now the single source of truth for project state.
 
-## Start here — current state (Session 23)
+## Start here — current state (Session 24)
 
 **What it is.** A NixOS input-macro system: a C++17 daemon (evdev in,
 `uinput` out; control socket; embedded CPython *or* a built-in interpreter
@@ -291,6 +291,25 @@ separately from profiles.
   `assets/puppetry_small_logo.png` is it trimmed to the hand and centered on
   a 1024x1024 transparent square for the icon sizes. `MainWindow` falls back
   to that file when the `puppetry` theme icon isn't installed.
+
+- **Session 24: daemon no longer exits into a restart loop.** Reported
+  after a reboot: `restart counter is at 5`, macros and the visualizer
+  dead. The log wasn't available when this was written, so the cause is
+  unconfirmed; every startup exit path that a reboot can trigger now
+  waits instead of exiting:
+  - `/dev/uinput` not ready: retries every 2 s (`PUPPETRY_NO_WAIT=1`
+    restores the old exit); `UinputDevice::create` closes its fd on
+    failure so `ok()` is accurate.
+  - Keyboard/mouse not found: keeps looking every 2 s.
+  - Keyboard/mouse lost while running (`watch_device` returning): the
+    `keep_watching` loop re-resolves and reopens (same name preferred for
+    ~10 s before accepting another device); `watch_device` clears
+    `watched_keyboard/mouse` and its grab flag on the way out. Previously
+    `main` returned here while detached threads still used `rt`.
+  - Device choice: `device_fits(kind, path)` -- a remembered path is reused
+    only if it still is that kind of device (eventN numbers move between
+    boots); among same-named nodes the keyboard pick is the one with the
+    most letter keys and the mouse pick the one with REL_X/REL_Y.
 
 **Not verified on real hardware / display.** Everything above ran under
 `QT_QPA_PLATFORM=offscreen`; OBS pages were rendered in headless Chromium

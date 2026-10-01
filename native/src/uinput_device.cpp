@@ -54,7 +54,10 @@ void UinputDevice::create(const std::string& name, const std::vector<int>& key_c
         throw std::runtime_error("UI_DEV_SETUP failed: " + std::string(strerror(errno)));
     }
     if (ioctl(fd_, UI_DEV_CREATE) < 0) {
-        throw std::runtime_error("UI_DEV_CREATE failed: " + std::string(strerror(errno)));
+        std::string why = strerror(errno);
+        ::close(fd_);
+        fd_ = -1;                 // not created: ok() stays false, create() can be retried
+        throw std::runtime_error("UI_DEV_CREATE failed: " + why);
     }
 }
 

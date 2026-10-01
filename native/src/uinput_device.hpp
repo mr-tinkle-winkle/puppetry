@@ -40,6 +40,7 @@ public:
     // EV_REL for REL_X/REL_Y/REL_WHEEL. Throws std::runtime_error on
     // failure (missing /dev/uinput, no permission, etc.).
     void create(const std::string& name, const std::vector<int>& key_codes, bool with_rel);
+    bool ok() const { return fd_ >= 0; }   // created
 
     // A controller: the Xbox-style button set, two sticks, two triggers
     // and a d-pad hat (the usual evdev layout games expect). Created only

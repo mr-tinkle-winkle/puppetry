@@ -257,6 +257,14 @@ void watch_device(Runtime& rt, MacroRegistry& registry, std::vector<std::unique_
             }
         }
     }
+    if (primary) {   // the device went away: nothing may grab or forward through it any more
+        std::lock_guard<std::mutex> lock(rt.grab_mutex);
+        InputDevice*& slot = (kind == "keyboard" ? rt.watched_keyboard : rt.watched_mouse);
+        if (slot == &dev) {
+            slot = nullptr;
+            (kind == "keyboard" ? rt.keyboard_grabbed : rt.mouse_grabbed) = false;
+        }
+    }
 }
 
 } // namespace puppetry

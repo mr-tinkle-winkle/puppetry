@@ -73,6 +73,10 @@ struct ResolvedDevice {
 // exists somewhere else (renumbered), (3) fresh capability-based
 // auto-detect. Never returns one of our own virtual output devices,
 // even if state.json has one saved from a stale/bad detection.
+// Whether `path` still looks like a `kind` device ("keyboard": at least 20
+// letter keys, "mouse": BTN_LEFT + REL_X/REL_Y, "controller": BTN_SOUTH + ABS_X).
+bool device_fits(const std::string& kind, const std::string& path);
+
 ResolvedDevice resolve_device(const std::string& kind, // "keyboard", "mouse" or "controller"
                                const std::optional<std::string>& saved_path,
                                const std::optional<std::string>& saved_name);

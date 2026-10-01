@@ -272,27 +272,40 @@ int main(int argc, char** argv) {
     }
 
     Runtime rt;
-    try {
-        rt.ui_keyboard.create(kVirtualKeyboardName, keyboard_key_codes(), false);
-        rt.ui_mouse.create(kVirtualMouseName, mouse_button_codes(), true);
-    } catch (const std::exception& exc) {
-        std::fprintf(stderr, "Failed to create virtual input devices: %s\n", exc.what());
-        return 1;
+    // /dev/uinput can lag behind login (module loading, udev permissions):
+    // wait for it instead of exiting into a systemd restart loop.
+    for (int tries = 0;; ++tries) {
+        try {
+            if (!rt.ui_keyboard.ok()) rt.ui_keyboard.create(kVirtualKeyboardName, keyboard_key_codes(), false);
+            if (!rt.ui_mouse.ok()) rt.ui_mouse.create(kVirtualMouseName, mouse_button_codes(), true);
+            break;
+        } catch (const std::exception& exc) {
+            if (tries == 0 || tries % 30 == 0)
+                std::fprintf(stderr, "Failed to create virtual input devices: %s -- retrying every 2 s (is the "
+                                      "uinput module loaded and are you in the uinput/input group?)\n", exc.what());
+            if (std::getenv("PUPPETRY_NO_WAIT")) return 1;
+            std::this_thread::sleep_for(std::chrono::seconds(2));
+        }
     }
 
-    if (keyboard.how != ResolveHow::NotFound) {
-        std::printf("Keyboard: %s (%s)\n", keyboard.path.c_str(), keyboard.name.c_str());
-    }
-    if (mouse.how != ResolveHow::NotFound) {
-        std::printf("Mouse: %s (%s)\n", mouse.path.c_str(), mouse.name.c_str());
-    }
     std::printf("Abort hotkey code: %d\n", abort_code);
 
-    if (keyboard.how == ResolveHow::NotFound || mouse.how == ResolveHow::NotFound) {
-        std::fprintf(stderr, "Could not determine keyboard/mouse device, automatically or from "
-                              "state.json -- set them manually via the GUI's Detect buttons, or "
-                              "state.json directly.\n");
-        return 1;
+    // Not there yet (devices still coming up at login, a wireless receiver
+    // asleep...): keep looking rather than exiting -- exiting only made systemd
+    // restart us in a loop.
+    for (int tries = 0; keyboard.how == ResolveHow::NotFound || mouse.how == ResolveHow::NotFound; ++tries) {
+        if (tries == 0) {
+            std::fprintf(stderr, "Could not find the %s yet -- will keep looking every 2 s (set them with the "
+                                  "GUI's Detect buttons if this never resolves).\n",
+                         keyboard.how == ResolveHow::NotFound && mouse.how == ResolveHow::NotFound ? "keyboard or mouse"
+                         : keyboard.how == ResolveHow::NotFound ? "keyboard" : "mouse");
+        }
+        std::this_thread::sleep_for(std::chrono::seconds(2));
+        if (keyboard.how == ResolveHow::NotFound) keyboard = resolve_device("keyboard", kb_saved_path, kb_saved_name);
+        if (mouse.how == ResolveHow::NotFound) mouse = resolve_device("mouse", mouse_saved_path, mouse_saved_name);
+        if (keyboard.how != ResolveHow::NotFound && mouse.how != ResolveHow::NotFound)
+            std::printf("Found them: keyboard %s (%s), mouse %s (%s)\n", keyboard.path.c_str(), keyboard.name.c_str(),
+                        mouse.path.c_str(), mouse.name.c_str());
     }
 
     state["keyboard_path"] = keyboard.path;
@@ -509,16 +522,38 @@ int main(int argc, char** argv) {
         }
     }
 
-    InputDevice keyboard_dev, mouse_dev;
-    if (!keyboard_dev.open(keyboard.path) || !mouse_dev.open(mouse.path)) {
-        std::fprintf(stderr, "Failed to open resolved input devices for reading.\n");
-        return 1;
-    }
-
-    std::thread kb_thread(watch_device, std::ref(rt), std::ref(registry), std::ref(macros),
-                          std::ref(keyboard_dev), "keyboard", abort_code);
-    std::thread mouse_thread(watch_device, std::ref(rt), std::ref(registry), std::ref(macros),
-                             std::ref(mouse_dev), "mouse", abort_code);
+    // The main keyboard and mouse: watched for good. If one goes away (unplugged,
+    // a receiver re-enumerating at login, a dock), look for it again and carry on
+    // -- the daemon used to exit here, and systemd restarted it in a loop.
+    auto keep_watching = [&rt, &registry, &macros, abort_code](std::string kind, ResolvedDevice first,
+                                                               std::optional<std::string> saved_name) {
+        ResolvedDevice cur = first;
+        int misses = 0;
+        while (true) {
+            InputDevice dev;
+            if (cur.how != ResolveHow::NotFound && dev.open(cur.path)) {
+                std::printf("%s: %s (%s)\n", kind == "keyboard" ? "Keyboard" : "Mouse", cur.path.c_str(),
+                            cur.name.c_str());
+                watch_device(rt, registry, macros, dev, kind, abort_code);
+                std::fprintf(stderr, "Lost the %s (%s) -- looking for it again\n", kind.c_str(), cur.path.c_str());
+                saved_name = cur.name;
+            } else if (cur.how != ResolveHow::NotFound) {
+                std::fprintf(stderr, "Couldn't open the %s %s (%s) -- retrying\n", kind.c_str(), cur.path.c_str(),
+                             strerror(errno));
+            }
+            std::this_thread::sleep_for(std::chrono::seconds(1));
+            cur = resolve_device(kind, std::nullopt, saved_name);
+            // give the same device ~10 s to come back before settling for another one
+            if (cur.how != ResolveHow::NotFound && saved_name && cur.name != *saved_name && ++misses < 10)
+                cur = {"", "", ResolveHow::NotFound};
+            else if (cur.how != ResolveHow::NotFound)
+                misses = 0;
+        }
+    };
+    std::thread kb_thread(keep_watching, std::string("keyboard"), keyboard, kb_saved_name.has_value()
+                          ? kb_saved_name : std::optional<std::string>(keyboard.name));
+    std::thread mouse_thread(keep_watching, std::string("mouse"), mouse, mouse_saved_name.has_value()
+                             ? mouse_saved_name : std::optional<std::string>(mouse.name));
 
     kb_thread.join();
     mouse_thread.join();

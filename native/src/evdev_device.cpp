@@ -154,9 +154,12 @@ std::optional<DeviceInfo> find_best_keyboard(const std::optional<std::string>& p
     if (candidates.empty()) return std::nullopt;
 
     if (preferred_name) {
-        for (auto& c : candidates) {
-            if (c.info.name == *preferred_name) return c.info;
-        }
+        // several nodes can share a name (a keyboard's main node + its media-keys
+        // node): the one with the most letter keys is the keyboard
+        const Candidate* pick = nullptr;
+        for (auto& c : candidates)
+            if (c.info.name == *preferred_name && (!pick || c.score > pick->score)) pick = &c;
+        if (pick) return pick->info;
     }
 
     auto best = std::max_element(candidates.begin(), candidates.end(),
@@ -178,15 +181,36 @@ std::optional<DeviceInfo> find_best_mouse(const std::optional<std::string>& pref
     if (candidates.empty()) return std::nullopt;
 
     if (preferred_name) {
-        for (auto& c : candidates) {
-            if (c.info.name == *preferred_name) return c.info;
-        }
+        // same-name nodes: prefer the one that actually moves (REL_X/REL_Y)
+        const Candidate* pick = nullptr;
+        for (auto& c : candidates)
+            if (c.info.name == *preferred_name && (!pick || (c.has_rel && !pick->has_rel))) pick = &c;
+        if (pick) return pick->info;
     }
 
     for (auto& c : candidates) {
         if (c.has_rel) return c.info; // real relative-motion mouse -- best match
     }
     return candidates.front().info;
+}
+
+bool device_fits(const std::string& kind, const std::string& path) {
+    if (kind == "keyboard") {
+        int fd = ::open(path.c_str(), O_RDONLY | O_NONBLOCK);
+        if (fd < 0) return false;
+        unsigned char keybits[(KEY_MAX / 8) + 1] = {0};
+        bool ok = ioctl(fd, EVIOCGBIT(EV_KEY, sizeof(keybits)), keybits) >= 0;
+        ::close(fd);
+        if (!ok) return false;
+        int score = 0;
+        for (int c = KEY_A; c <= KEY_Z; ++c) if (has_bit(keybits, c)) ++score;
+        return score >= 20;
+    }
+    if (kind == "mouse") {
+        return device_has_key(path, BTN_LEFT) && device_has_rel(path, REL_X) && device_has_rel(path, REL_Y);
+    }
+    if (kind == "controller") return device_has_key(path, BTN_SOUTH) && device_has_abs(path, ABS_X);
+    return true;
 }
 
 ResolvedDevice resolve_device(const std::string& kind,
@@ -202,7 +226,8 @@ ResolvedDevice resolve_device(const std::string& kind,
 
     if (saved_path && fs::exists(*saved_path)) {
         std::string current_name = device_name(*saved_path);
-        bool current_ok = !current_name.empty() && !is_our_virtual_device_name(current_name);
+        bool current_ok = !current_name.empty() && !is_our_virtual_device_name(current_name)
+                          && device_fits(kind, *saved_path);   // after a reboot the same path can be another node
         if (current_ok && (!saved_name || current_name == *saved_name)) {
             return {*saved_path, current_name, ResolveHow::Remembered};
         }
