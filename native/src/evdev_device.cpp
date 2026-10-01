@@ -51,6 +51,22 @@ std::vector<DeviceInfo> list_input_devices() {
     return result;
 }
 
+std::vector<std::pair<std::string, std::string>> unreadable_input_devices() {
+    std::vector<std::pair<std::string, std::string>> out;
+    const fs::path input_dir = "/dev/input";
+    std::error_code ec;
+    if (!fs::exists(input_dir, ec)) return out;
+    for (const auto& entry : fs::directory_iterator(input_dir, ec)) {
+        auto name = entry.path().filename().string();
+        if (name.rfind("event", 0) != 0) continue;
+        int fd = ::open(entry.path().c_str(), O_RDONLY | O_NONBLOCK);
+        if (fd < 0) out.push_back({entry.path().string(), strerror(errno)});
+        else ::close(fd);
+    }
+    std::sort(out.begin(), out.end());
+    return out;
+}
+
 std::string device_name(const std::string& path) {
     int fd = ::open(path.c_str(), O_RDONLY | O_NONBLOCK);
     if (fd < 0) return "";
@@ -85,6 +101,41 @@ bool device_has_rel(const std::string& path, int code) {
     return ok && has_bit(relbits, code);
 }
 
+const std::vector<int>& letter_key_codes() {
+    // The 26 letters. NOT the range KEY_A..KEY_Z: evdev numbers keys along the
+    // QWERTY rows (Q..P = 16..25, A..L = 30..38, Z..M = 44..50), and that range
+    // holds only 10 letters -- a "20 letters" test over it can never pass.
+    static const std::vector<int> codes = {
+        KEY_A, KEY_B, KEY_C, KEY_D, KEY_E, KEY_F, KEY_G, KEY_H, KEY_I, KEY_J, KEY_K, KEY_L, KEY_M,
+        KEY_N, KEY_O, KEY_P, KEY_Q, KEY_R, KEY_S, KEY_T, KEY_U, KEY_V, KEY_W, KEY_X, KEY_Y, KEY_Z};
+    return codes;
+}
+
+static int letter_score(const unsigned char* keybits) {
+    int n = 0;
+    for (int c : letter_key_codes()) if (has_bit(keybits, c)) ++n;
+    return n;
+}
+
+int device_bustype(const std::string& path) {
+    int fd = ::open(path.c_str(), O_RDONLY | O_NONBLOCK);
+    if (fd < 0) return -1;
+    struct input_id id = {};
+    bool ok = ioctl(fd, EVIOCGID, &id) >= 0;
+    ::close(fd);
+    return ok ? id.bustype : -1;
+}
+
+int device_rank_penalty(const std::string& path) {
+    // Auto-detect prefers real hardware: a Steam Controller (Valve, 0x28de)
+    // presents its own keyboard and mouse in desktop mode, and other software
+    // (StreamController, remappers) creates virtual ones -- both often declare
+    // every key, so on letter count alone they'd tie with the real keyboard.
+    if (device_vendor(path) == 0x28de) return 2;
+    if (device_bustype(path) == BUS_VIRTUAL) return 1;
+    return 0;
+}
+
 int device_vendor(const std::string& path) {
     int fd = ::open(path.c_str(), O_RDONLY | O_NONBLOCK);
     if (fd < 0) return -1;
@@ -98,7 +149,7 @@ std::string describe_device(const std::string& path) {
     std::string kinds;
     auto add = [&](const char* k) { if (!kinds.empty()) kinds += ","; kinds += k; };
     int letters = 0;
-    for (int c = KEY_A; c <= KEY_Z; ++c) letters += device_has_key(path, c);
+    for (int c : letter_key_codes()) letters += device_has_key(path, c);
     if (letters >= 20) add("keyboard");
     else if (device_has_key(path, KEY_ENTER) || device_has_key(path, KEY_ESC)) add("keys");
     if (device_has_key(path, BTN_LEFT) && device_has_rel(path, REL_X)) add("mouse");
@@ -132,10 +183,7 @@ std::optional<DeviceInfo> find_best_controller(const std::optional<std::string>&
 }
 
 std::optional<DeviceInfo> find_best_keyboard(const std::optional<std::string>& preferred_name) {
-    std::vector<int> alpha_codes;
-    for (int c = KEY_A; c <= KEY_Z; ++c) alpha_codes.push_back(c);
-
-    struct Candidate { DeviceInfo info; int score; };
+    struct Candidate { DeviceInfo info; int score; int penalty; };
     std::vector<Candidate> candidates;
 
     for (const auto& dev : list_input_devices()) {
@@ -147,8 +195,8 @@ std::optional<DeviceInfo> find_best_keyboard(const std::optional<std::string>& p
         ::close(fd);
         if (!ok) continue;
         int score = 0;
-        for (int c : alpha_codes) if (has_bit(keybits, c)) ++score;
-        if (score >= 20) candidates.push_back({dev, score});
+        score = letter_score(keybits);
+        if (score >= 20) candidates.push_back({dev, score, device_rank_penalty(dev.path)});
     }
 
     if (candidates.empty()) return std::nullopt;
@@ -162,8 +210,11 @@ std::optional<DeviceInfo> find_best_keyboard(const std::optional<std::string>& p
         if (pick) return pick->info;
     }
 
-    auto best = std::max_element(candidates.begin(), candidates.end(),
-                                  [](const Candidate& a, const Candidate& b) { return a.score < b.score; });
+    // real hardware first, then the most letter keys; ties keep the lowest eventN
+    auto best = std::max_element(candidates.begin(), candidates.end(), [](const Candidate& a, const Candidate& b) {
+        if (a.penalty != b.penalty) return a.penalty > b.penalty;
+        return a.score < b.score;
+    });
     return best->info;
 }
 
@@ -188,9 +239,9 @@ std::optional<DeviceInfo> find_best_mouse(const std::optional<std::string>& pref
         if (pick) return pick->info;
     }
 
-    for (auto& c : candidates) {
-        if (c.has_rel) return c.info; // real relative-motion mouse -- best match
-    }
+    for (int penalty = 0; penalty <= 2; ++penalty)        // real hardware before Steam / virtual mice
+        for (auto& c : candidates)
+            if (c.has_rel && device_rank_penalty(c.info.path) == penalty) return c.info;
     return candidates.front().info;
 }
 
@@ -202,9 +253,7 @@ bool device_fits(const std::string& kind, const std::string& path) {
         bool ok = ioctl(fd, EVIOCGBIT(EV_KEY, sizeof(keybits)), keybits) >= 0;
         ::close(fd);
         if (!ok) return false;
-        int score = 0;
-        for (int c = KEY_A; c <= KEY_Z; ++c) if (has_bit(keybits, c)) ++score;
-        return score >= 20;
+        return letter_score(keybits) >= 20;
     }
     if (kind == "mouse") {
         return device_has_key(path, BTN_LEFT) && device_has_rel(path, REL_X) && device_has_rel(path, REL_Y);

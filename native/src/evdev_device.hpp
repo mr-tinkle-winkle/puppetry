@@ -8,6 +8,7 @@
 #include <linux/input.h>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace puppetry {
@@ -30,6 +31,17 @@ int device_vendor(const std::string& path);
 std::string describe_device(const std::string& path);
 // True if this device declares EV_ABS for `code`.
 bool device_has_abs(const std::string& path, int code);
+
+// The 26 letter key codes (evdev numbers them by QWERTY row, so KEY_A..KEY_Z
+// is NOT the alphabet -- see the .cpp).
+const std::vector<int>& letter_key_codes();
+int device_bustype(const std::string& path);
+// 0 real hardware, 1 virtual (BUS_VIRTUAL), 2 Valve / Steam Controller.
+int device_rank_penalty(const std::string& path);
+
+// /dev/input/event* nodes this process can't open, with the reason
+// (list_input_devices() leaves them out silently).
+std::vector<std::pair<std::string, std::string>> unreadable_input_devices();
 
 std::string device_name(const std::string& path);
 

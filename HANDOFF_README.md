@@ -310,6 +310,26 @@ separately from profiles.
     only if it still is that kind of device (eventN numbers move between
     boots); among same-named nodes the keyboard pick is the one with the
     most letter keys and the mouse pick the one with REL_X/REL_Y.
+  - Root cause (found from the device list): keyboard detection counted
+    `for (c = KEY_A; c <= KEY_Z; ++c)`, but evdev numbers keys along the
+    QWERTY rows, so that range (30..44) holds only 10 letters and the
+    "20+ letters" test could never pass. Auto-detect had never worked; only
+    the remembered path did. A new device enumerating first (a Steam
+    Controller Puck) shifted the keyboard's eventN, the remembered path
+    stopped matching, and detection fell through to the broken test. Fixed
+    with `letter_key_codes()` (the 26 letters) in `find_best_keyboard`,
+    `device_fits` and `describe_device`; `test_core` checks it.
+  - Auto-detect now ranks real hardware first (`device_rank_penalty`: Valve
+    vendor 0x28de = 2, BUS_VIRTUAL = 1): Steam Controller "Puck Keyboard"
+    nodes and virtual devices (StreamController's uinput device) declare
+    letter keys too and enumerate earlier.
+  - Earlier note, kept for the diagnostics: `list_input_devices()` silently drops nodes it
+    can't open, so a permission problem on the keyboard node looks like
+    "no keyboard". Diagnostics added: `unreadable_input_devices()`;
+    `--list-devices` includes unreadable nodes with the error; while the
+    keyboard or mouse is missing, the log lists every visible node with its
+    kind and every node it can't open (on the first try and again after
+    ~30 s).
 
 **Not verified on real hardware / display.** Everything above ran under
 `QT_QPA_PLATFORM=offscreen`; OBS pages were rendered in headless Chromium

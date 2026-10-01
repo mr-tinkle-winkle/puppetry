@@ -9,7 +9,9 @@
 #include <cstdio>
 #include <memory>
 #include <thread>
+#include <set>
 #include <cmath>
+#include <linux/input.h>
 #include "dispatch.hpp"
 #include "evdev_device.hpp"
 #include "keycodes.hpp"
@@ -303,6 +305,17 @@ int main() {
     test_act_as_held_key_transition();
     test_act_as_abort_clears_everything();
     test_arguments_extraction();
+    // keyboard detection counts the 26 real letters (evdev codes follow QWERTY
+    // rows, so the range KEY_A..KEY_Z holds only 10 -- the reboot bug)
+    {
+        const auto& L = letter_key_codes();
+        std::set<int> u(L.begin(), L.end());
+        CHECK(L.size() == 26 && u.size() == 26);
+        CHECK(u.count(KEY_Q) && u.count(KEY_P) && u.count(KEY_M) && u.count(KEY_A) && u.count(KEY_Z));
+        int in_old_range = 0;
+        for (int c : L) in_old_range += (c >= KEY_A && c <= KEY_Z);
+        CHECK(in_old_range == 10);
+    }
     // controller axis normalization (sticks, triggers, d-pad)
     CHECK(normalize_abs_range(-32768, 32767, -32768) == -1.0);
     CHECK(normalize_abs_range(-32768, 32767, 32767) == 1.0);

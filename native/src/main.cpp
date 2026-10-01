@@ -160,6 +160,8 @@ int main(int argc, char** argv) {
             out.push_back({{"path", d.path}, {"name", d.name}, {"vendor", vend},
                            {"kind", describe_device(d.path)}, {"ours", is_our_virtual_device_name(d.name)}});
         }
+        for (const auto& [path, why] : unreadable_input_devices())
+            out.push_back({{"path", path}, {"unreadable", why}});
         std::printf("%s\n", out.dump(2).c_str());
         return 0;
     }
@@ -294,11 +296,20 @@ int main(int argc, char** argv) {
     // asleep...): keep looking rather than exiting -- exiting only made systemd
     // restart us in a loop.
     for (int tries = 0; keyboard.how == ResolveHow::NotFound || mouse.how == ResolveHow::NotFound; ++tries) {
-        if (tries == 0) {
+        if (tries == 0 || tries == 15) {
             std::fprintf(stderr, "Could not find the %s yet -- will keep looking every 2 s (set them with the "
-                                  "GUI's Detect buttons if this never resolves).\n",
+                                  "GUI's Detect buttons if this never resolves). What this process can see:\n",
                          keyboard.how == ResolveHow::NotFound && mouse.how == ResolveHow::NotFound ? "keyboard or mouse"
                          : keyboard.how == ResolveHow::NotFound ? "keyboard" : "mouse");
+            for (const auto& d : list_input_devices())
+                std::fprintf(stderr, "  %s  %-40s  %s\n", d.path.c_str(), d.name.c_str(), describe_device(d.path).c_str());
+            auto blocked = unreadable_input_devices();
+            for (const auto& [path, why] : blocked)
+                std::fprintf(stderr, "  %s  CAN'T OPEN: %s\n", path.c_str(), why.c_str());
+            if (!blocked.empty())
+                std::fprintf(stderr, "  -> %zu input device(s) can't be opened: permissions. The daemon's user needs "
+                                      "to be in the 'input' group (log out and back in after adding it).\n",
+                             blocked.size());
         }
         std::this_thread::sleep_for(std::chrono::seconds(2));
         if (keyboard.how == ResolveHow::NotFound) keyboard = resolve_device("keyboard", kb_saved_path, kb_saved_name);
