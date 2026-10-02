@@ -95,6 +95,23 @@ session to take effect.
   keyboard (hover for every alias).
 - Held keys in the Input Visualizer show how long they've been held (to the
   millisecond).
+- **Block the input visualizer** (Input Visualizer page) stops everything
+  it shows, sends to OBS or keeps for afterglow, until unblocked:
+  - by hand: the Block now button, a keybind, or `puppetry-overlay block`
+    (`toggle`, `on`, `off`, `status`);
+  - automatically, for **ignored apps**: while one of them is focused, or
+    while it has any window open (pick it from the open windows, or type
+    part of its name or of a window title).
+- **On-screen overlay**: the visualizer drawn on the screen itself,
+  click-through and above other windows, with its own position, monitor,
+  size and opacity. Show on screen, a keybind, or `puppetry-overlay screen
+  toggle` (`show`, `hide`, `stop`, `status`).
+- **Show it to viewers only**: a monitor share captures what the monitor
+  shows, so this can't be done on the monitor itself. In OBS the overlay
+  is already a source only OBS shows. For Discord or a call, **Open share
+  window** (or a keybind, or `puppetry-overlay share`) opens OBS's program
+  output in its own window, with the overlay added to OBS's scene; share
+  that window instead of the screen.
 - The Input Visualizer's picture uses the overlay's look from
   **Customize…**, so it matches what OBS and afterglow show.
 - **Edit layout** (Input Visualizer) arranges what's drawn: drag to move,

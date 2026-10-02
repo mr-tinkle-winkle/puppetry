@@ -1287,6 +1287,42 @@ def main() -> int:
     ov.flush()
     check("overlay: everything off again", not oc.helper_wanted(oc.load()))
 
+    # ---- Privacy & on-screen overlay
+    import privacy_screen as ps
+    pv = vp.privacy
+    pv.add_app("keepassxc")
+    pv.add_app("Bitwarden", match="title")
+    pv.app_rows[1]["when"].setCurrentIndex(pv.app_rows[1]["when"].findData("open"))
+    ov.flush()
+    saved_apps = oc.load()["ignored_apps"]
+    check("privacy: ignored apps are saved (app id or window title; while focused or while open)",
+          saved_apps == [{"match": "class", "value": "keepassxc", "when": "focused"},
+                         {"match": "title", "value": "Bitwarden", "when": "open"}])
+    pv.app_rows[0]["remove"].click()
+    ov.flush()
+    check("privacy: remove an ignored app", [r["value"] for r in oc.load()["ignored_apps"]] == ["Bitwarden"]
+          and len(pv.app_rows) == 1)
+    check("privacy: status text for each state",
+          ps.describe_block({"blocked": True, "manual": True}).startswith("BLOCKED (turned off by hand)")
+          and "keepassxc" in ps.describe_block({"blocked": True, "app": "keepassxc", "why": "focused"})
+          and ps.describe_block({"blocked": False, "watching": True}) == "Live."
+          and "kdotool" in ps.describe_block({"blocked": False, "watching": False, "rules": 1})
+          and "isn't running" in ps.describe_block({}))
+    pv._toggle_block()
+    check("privacy: the block button says so when the daemon isn't there", "daemon" in pv.block_status.text().lower())
+    sig0 = ov._restart_sig()
+    pv._set_hotkey("screen", ["KEY_LEFTCTRL", "KEY_F9"])
+    check("keybinds: changing one needs a daemon restart (they're compiled at start)", ov._restart_sig() != sig0)
+    pv.size_spin.setValue(85)
+    pv.position.setCurrentIndex(pv.position.findData("top-left"))
+    ov.flush()
+    saved_all = oc.load()
+    check("screen overlay: keybind and settings saved", saved_all["hotkeys"]["screen"] == ["KEY_LEFTCTRL", "KEY_F9"]
+          and saved_all["screen"]["scale"] == 85 and saved_all["screen"]["position"] == "top-left")
+    pv._set_hotkey("screen", [])
+    pv.app_rows[0]["remove"].click()
+    ov.flush()
+
     # in-app picture from the daemon's stream: real = input color, macro = output color, controller
     vp._stream_live(True)
     now = time.perf_counter()

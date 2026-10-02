@@ -383,6 +383,7 @@ class Hub:
         self.clients: dict = {p: set() for p in PAGES}
         self.servers: dict = {}
         self.state = kl.KbmState()          # epoch-second times
+        self.blocked = False                # the daemon blocked the visualizer (privacy)
         self.stopping = False
         self.code_names = load_code_names()
         self.buffer_path = buffer_path or oc.buffer_file()
@@ -498,7 +499,7 @@ class Hub:
         self.write_status()
 
     def write_status(self) -> None:
-        st = {"pid": os.getpid(), "updated": time.time(), "daemon_connected": self.source.connected,
+        st = {"pid": os.getpid(), "updated": time.time(), "daemon_connected": self.source.connected, "blocked": self.blocked,
               "pages": {p: f"http://127.0.0.1:{s.port}/" for p, s in self.servers.items()},
               "elements": [{"id": e.get("id"), "type": e.get("type")} for e in self.cfg["scene"].get("elements", [])],
               "element_urls": oc.element_urls(self.cfg),
@@ -616,6 +617,22 @@ class Hub:
             self.broadcast_all("ev", ev)
             if self.replay:
                 self.replay.add(ev)
+        elif typ == "p":
+            # the daemon blocked the input visualizer (an ignored app / the toggle): it sends
+            # nothing until unblocked, so let go of everything shown as held -- pages and the
+            # replay buffer would otherwise keep those keys down for the whole gap
+            changed = self.blocked != bool(a)
+            self.blocked = bool(a)
+            if changed:
+                threading.Thread(target=self.write_status, daemon=True).start()   # tell the GUI now
+            if a:
+                for nm in list(self.state.held):
+                    self._on_event("r", t, "k", 0, 0, nm)
+                for nm in list(self.state.out_held):
+                    self._on_event("m", t, "k", 0, 0, nm)
+                for (ax, v) in list(getattr(self.state, "axes", {}).items()):
+                    if v:
+                        self._on_event("r", t, "a", 0, 0, ax)
 
     def _flush_page_move(self) -> None:
         pm = self._pending_move

@@ -11,6 +11,8 @@
 #include <thread>
 #include <unistd.h>
 #include "event_stream.hpp"
+#include "privacy.hpp"
+#include <regex>
 #include "runtime.hpp"
 #include "uinput_device.hpp"
 
@@ -68,6 +70,44 @@ int main() {
     CHECK(out.find(" k 48 1\n") != std::string::npos && out[0] == 'm');
     CHECK(out.find(" m 5 0\n") != std::string::npos);
     CHECK(out.find(" w -2 0\n") != std::string::npos);
+
+    // blocked (an ignored app / the manual toggle): one "s ... p 1 0" line, then
+    // NOTHING -- real input and macro output alike -- until "p 0"
+    es.set_paused(true);
+    es.set_paused(true);                       // no duplicate line
+    CHECK(read_lines(fd, 1).find(" p 1 0\n") != std::string::npos);
+    es.publish('r', 5, 'k', 30, 1);
+    sink.key_frame(31, 1);
+    {
+        // a client connecting while blocked gets an empty hello + the pause line
+        int fd2 = socket(AF_UNIX, SOCK_STREAM, 0);
+        CHECK(connect(fd2, (struct sockaddr*)&addr, sizeof(addr)) == 0);
+        std::string h2 = read_lines(fd2, 2);
+        CHECK(h2.find(" 30") == std::string::npos && h2.find("s ") != std::string::npos && h2.find(" p 1 0") != std::string::npos);
+        close(fd2);
+    }
+    es.set_paused(false);
+    es.publish('r', 6, 'k', 32, 1);
+    std::string after = read_lines(fd, 2);
+    CHECK(after.find(" p 0 0\n") != std::string::npos && after.find("r 6 k 32 1\n") != std::string::npos
+          && after.find(" 31 ") == std::string::npos && after.find("r 5 ") == std::string::npos);
+
+    // ignored-app rules
+    {
+        json ov = json::parse(R"({"ignored_apps": [{"match": "class", "value": " KeePassXC ", "when": "focused"},
+                                                     {"match": "title", "value": "Bitwarden", "when": "open"},
+                                                     {"value": ""}, "junk"]})");
+        auto rules = parse_ignored_apps(ov);
+        CHECK(rules.size() == 2 && rules[0].value == "keepassxc" && !rules[0].when_open && rules[1].when_open
+              && rules[1].match == "title");
+        CHECK(ignored_app_matches(rules[0], "org.keepassxc.KeePassXC", "x"));
+        CHECK(!ignored_app_matches(rules[0], "firefox", "KeePassXC in the title only"));
+        CHECK(ignored_app_matches(rules[1], "firefox", "Vault - Bitwarden - Mozilla Firefox"));
+        std::string re = icase_substring_regex("Key.X+");
+        CHECK(std::regex_match(std::string("org.keY.x+Pass"), std::regex(re)));
+        CHECK(!std::regex_match(std::string("keyAx+"), std::regex(re)));    // the dot is literal
+        CHECK(parse_ignored_apps(json::object()).empty());
+    }
 
     // a vanished client is dropped, never blocks
     close(fd);

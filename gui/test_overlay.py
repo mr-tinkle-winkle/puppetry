@@ -420,6 +420,24 @@ def hub_tests():
           and status["element_urls"]["pad"] == "http://127.0.0.1:18480/el/pad"
           and status["replay"]["length_source"] == "fallback"
           and status["replay"]["length_s"] == 20)
+    # blocking (an ignored app / the toggle): the daemon sends `s <t> p 1 0` and then nothing
+    t_b = int(time.time() * 1e6)
+    fake.send(f"s {t_b} p 1 0")
+    t0 = time.time()
+    while not hub.blocked and time.time() - t0 < 3:
+        time.sleep(0.02)
+    time.sleep(0.3)
+    blines = oc.buffer_file().read_text().splitlines()
+    check("hub: blocked -> everything shown as held is released (pages + replay buffer), status says so",
+          hub.blocked and not hub.state.held and not hub.state.out_held
+          and any('"e":"ku","k":"KEY_A"' in ln for ln in blines)
+          and any('"e":"ku","k":"KEY_B","s":"m"' in ln for ln in blines)
+          and json.loads(oc.status_file().read_text()).get("blocked") is True)
+    fake.send(f"s {t_b + 1000} p 0 0")
+    t0 = time.time()
+    while hub.blocked and time.time() - t0 < 3:
+        time.sleep(0.02)
+    check("hub: unblocked again", not hub.blocked)
     hub.poll_obs()
     check("hub: an unreachable OBS falls back to the configured length", hub.replay_length == 20
           and "no OBS here" in hub.obs_status)
@@ -868,8 +886,47 @@ def js_parity_tests():
     check("js: layout survives JSON (what the page receives)", lay == kl.build_scene(None))
 
 
+def privacy_screen_tests():
+    import stream_client
+    import screen_overlay as so
+    k = kl.KbmState()
+    stream_client.apply_stream_event(k, "r", "k", "KEY_A", 1, 0, 1.0)
+    stream_client.apply_stream_event(k, "s", "p", "", 1, 0, 1.1)
+    check("stream: a block line releases everything held", not k.held)
+    check("screen overlay: corner placement inside the monitor (with margin, multi-monitor offset)",
+          so.placement((1920, 0, 2560, 1440), 400, 100, "bottom-right", 24) == (1920 + 2560 - 424, 1440 - 124)
+          and so.placement((0, 0, 1920, 1080), 400, 100, "top-center", 10) == (760, 10)
+          and so.placement((0, 0, 1920, 1080), 400, 100, "center", 0) == (760, 490))
+    m = oc.merged({"ignored_apps": [{"match": "class", "value": "keepassxc", "when": "open"}],
+                   "hotkeys": {"screen": ["KEY_F9"]}, "screen": {"scale": 80}})
+    check("config: ignored apps, keybinds and screen settings survive a load (defaults filled in)",
+          m["ignored_apps"][0]["when"] == "open" and m["hotkeys"]["screen"] == ["KEY_F9"]
+          and m["hotkeys"]["block"] == [] and m["screen"]["scale"] == 80 and m["screen"]["position"] == "bottom-right")
+    # the overlay process for real (offscreen): start by `show`, then hide / toggle / stop over its socket
+    env_backup = dict(os.environ)
+    os.environ.update(QT_QPA_PLATFORM="offscreen", PUPPETRY_SCREEN_NO_SYSTEMD="1",
+                      PUPPETRY_OVERLAY_CMD="")
+    try:
+        r1 = so.control("show")
+        r2 = so.control("hide")
+        r3 = so.control("toggle")
+        r4 = so.control("status")
+        r5 = so.control("stop")
+        time.sleep(0.5)
+        r6 = so.control("status")
+    finally:
+        os.environ.clear()
+        os.environ.update(env_backup)
+    check("screen overlay: `show` starts the process and shows it (click-through window)",
+          r1.get("running") and r1.get("visible") and r1.get("started") == "process" and r1["geometry"][2] > 10)
+    check("screen overlay: hide / toggle / status over its socket", r2.get("visible") is False
+          and r3.get("visible") is True and r4.get("visible") is True)
+    check("screen overlay: stop ends it", r5.get("running") is False and r6.get("running") is False)
+
+
 def main() -> int:
     layout_tests()
+    privacy_screen_tests()
     replay_tests()
     obs_tests()
     hub_tests()

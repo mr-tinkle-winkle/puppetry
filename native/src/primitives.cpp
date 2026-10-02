@@ -499,7 +499,7 @@ static double ease(double t, Easing style) {
 // deadline. False on any failure (not installed, timed out, nonzero
 // exit) -- shared by every kdotool-backed query below, all of which fail
 // open (treat "couldn't ask" the same as "no" rather than blocking).
-static bool run_kdotool(const std::vector<std::string>& args, std::string& output, double timeout_s) {
+bool run_kdotool(const std::vector<std::string>& args, std::string& output, double timeout_s) {
     // argv is built BEFORE fork(): the daemon is multithreaded, and after
     // fork() only async-signal-safe calls are legal in the child. A
     // std::vector push_back there can block forever on the malloc lock if

@@ -16,6 +16,13 @@ puppetry-overlay -- the overlay helper and its tools.
                                             burn several pieces on, each placed/sized (fractions of the clip)
     puppetry-overlay add-to-obs             create/update Browser Sources for the enabled pages
     puppetry-overlay obs-replay-length      what OBS reports as its replay buffer length
+    puppetry-overlay screen show|hide|toggle|stop|status
+                                            the input overlay on the real screen (click-through, on top)
+    puppetry-overlay block toggle|on|off|status
+                                            block the input visualizer: nothing shown, sent to OBS or
+                                            recorded (ignored apps do the same automatically)
+    puppetry-overlay share                  open OBS's program output in a window (with the overlay
+                                            source added) -- the window to share in Discord etc.
 
 Every command prints one JSON object on stdout; on failure it prints
 {"error": "..."} and exits 1. Times are Unix seconds.
@@ -97,6 +104,12 @@ def main(argv=None) -> int:
 
     sub.add_parser("add-to-obs")
     sub.add_parser("obs-replay-length")
+    scp = sub.add_parser("screen")
+    scp.add_argument("action", choices=["show", "hide", "toggle", "stop", "status", "run"])
+    scp.add_argument("--show", action="store_true", help="(run) start visible")
+    bp = sub.add_parser("block")
+    bp.add_argument("action", nargs="?", default="toggle", choices=["toggle", "on", "off", "status"])
+    sub.add_parser("share")
     a = ap.parse_args(argv)
 
     import overlay_config as oc
@@ -144,6 +157,24 @@ def main(argv=None) -> int:
                 _print(orr.apply(a.clip, a.overlay, a.out, position=a.position, scale_frac=a.scale_frac,
                                  margin=a.margin, crf=a.crf, clip_end=a.clip_end, overlay_start=a.overlay_start))
             return 0
+        if a.cmd == "screen":
+            import screen_overlay
+            if a.action == "run":
+                return screen_overlay.run(show=a.show)
+            _print(screen_overlay.control(a.action))
+            return 0
+        if a.cmd == "block":
+            state = {"on": "block", "off": "unblock"}.get(a.action, a.action)
+            resp = daemon_request({"cmd": "VISUALIZER", "state": state})
+            if not resp.get("ok"):
+                raise RuntimeError(resp.get("error", "the daemon refused"))
+            resp.pop("ok", None)
+            resp.update({k: v for k, v in oc.read_privacy().items() if k in ("app", "why", "watching")})
+            _print(resp)
+            return 0
+        if a.cmd == "share":
+            _print(share())
+            return 0
         if a.cmd in ("add-to-obs", "obs-replay-length"):
             from obs_client import ObsClient
             cfg = oc.load()
@@ -158,6 +189,49 @@ def main(argv=None) -> int:
         _print({"error": str(e)})
         return 1
     return 0
+
+
+def share() -> dict:
+    """The "viewers only" route: make sure the overlay's Browser Sources are in OBS's
+    current scene, then open a windowed projector of OBS's program output. Share THAT
+    window (Discord, a call...) and viewers see screen + overlay while your own screen
+    stays clean. Needs OBS running with its WebSocket server on."""
+    import overlay_config as oc
+    from obs_client import ObsClient
+    cfg = oc.load()
+    if not cfg["full"].get("enabled"):
+        raise RuntimeError('turn on "Expose Input Visualizer to OBS" first (Input Visualizer page)')
+    o = cfg["obs"]
+    with ObsClient(o["host"], o["port"], o.get("password", "")) as c:
+        added = c.add_browser_sources(obs_sources(cfg))
+        c.request("OpenVideoMixProjector", {"videoMixType": "OBS_WEBSOCKET_VIDEO_MIX_TYPE_PROGRAM"})
+    return {"sources": added, "projector": "program (windowed)"}
+
+
+def daemon_request(payload: dict, timeout: float = 3.0) -> dict:
+    """One JSON request on the daemon's control socket; its whole JSON reply."""
+    import socket
+    import overlay_config as oc
+    path = oc.CONFIG_DIR / "control.sock"
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.settimeout(timeout)
+    try:
+        s.connect(str(path))
+        s.sendall((json.dumps(payload) + "\n").encode())
+        buf = b""
+        while not buf.endswith(b"\n"):
+            chunk = s.recv(65536)
+            if not chunk:
+                break
+            buf += chunk
+    except OSError as e:
+        return {"ok": False, "error": f"the Puppetry daemon isn't running ({e})"}
+    finally:
+        s.close()
+    try:
+        return json.loads(buf.decode() or "{}")
+    except ValueError:
+        return {"ok": False, "error": "no answer from the daemon"}
 
 
 SOURCE_NAMES = {"full": "Puppetry Input Overlay", "simple": "Puppetry Input List",

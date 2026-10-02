@@ -1,4 +1,5 @@
 #include "control_socket.hpp"
+#include "privacy.hpp"
 #include "primitives.hpp"
 #include <cstdio>
 #include <cstring>
@@ -102,6 +103,14 @@ std::string ControlSocketServer::handle_line(const std::string& line) {
     } else if (cmd == "RESUME") {
         rt_.external_pause.store(false);
         resp = {{"ok", true}};
+    } else if (cmd == "VISUALIZER") {
+        // block / unblock the input visualizer: {"cmd": "VISUALIZER", "state": "toggle"|"block"|"unblock"|"status"}
+        std::string st = json_str(payload, "state", "status");
+        if (st == "toggle") privacy_set_manual(rt_, -1);
+        else if (st == "block" || st == "on") privacy_set_manual(rt_, 1);
+        else if (st == "unblock" || st == "off") privacy_set_manual(rt_, 0);
+        resp = {{"ok", true}, {"blocked", rt_.visualizer_blocked.load() || rt_.app_blocked.load()},
+                {"manual", rt_.visualizer_blocked.load()}, {"app_blocked", rt_.app_blocked.load()}};
     } else if (cmd == "FIRE") {
         std::string name = json_str(payload, "name", "");
         std::vector<std::string> args;

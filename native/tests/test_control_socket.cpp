@@ -77,6 +77,19 @@ int main() {
     CHECK(r3["ok"] == true);
     CHECK(rt.external_pause.load() == false);
 
+    // VISUALIZER: the block toggle (`puppetry-overlay block`, its keybind, the GUI button).
+    // The state file goes to $XDG_RUNTIME_DIR/puppetry -- point that at the temp dir.
+    setenv("XDG_RUNTIME_DIR", tmp && *tmp ? tmp : "/tmp", 1);
+    auto v1 = send_request(sock_path, {{"cmd", "VISUALIZER"}, {"state", "toggle"}});
+    CHECK(v1["ok"] == true && rt.visualizer_blocked.load() == true);
+    auto v2 = send_request(sock_path, {{"cmd", "VISUALIZER"}, {"state", "toggle"}});
+    CHECK(v2["ok"] == true && rt.visualizer_blocked.load() == false);
+    auto v3 = send_request(sock_path, {{"cmd", "VISUALIZER"}, {"state", "on"}});
+    auto v4 = send_request(sock_path, {{"cmd", "VISUALIZER"}, {"state", "on"}});     // idempotent
+    CHECK(v3["ok"] == true && v4["ok"] == true && rt.visualizer_blocked.load() == true);
+    send_request(sock_path, {{"cmd", "VISUALIZER"}, {"state", "off"}});
+    CHECK(rt.visualizer_blocked.load() == false);
+
     // Malformed JSON.
     {
         int fd = socket(AF_UNIX, SOCK_STREAM, 0);

@@ -23,6 +23,7 @@ from PySide6.QtWidgets import QApplication, QGridLayout, QHBoxLayout, QLabel, QP
 import kbm_layout as kl
 from input_transcript import InputLog
 from kbm_paint import layout_for, needs_animation, paint_kbm, picture_size, theme_style
+from stream_client import StreamClient, apply_stream_event
 from ui_kit.custom_button import CustomButton
 from ui_kit.custom_checkbox import CustomCheckBox
 from ui_kit.rounded_rect import rounded_rect_path
@@ -513,79 +514,6 @@ class CpsArea(QWidget):
                     p.drawRect(QRectF(box.right() - 6, box.bottom() - 6, 12, 12))
 
 
-class StreamClient(QThread):
-    """Reads the daemon's live event stream (every real input, and what
-    macros send, marked) for the picture. Reconnects on its own; `live`
-    says whether it's connected. Times are perf_counter at receipt."""
-
-    event = Signal(str, str, str, float, float)   # src, type, name, a, b
-    live = Signal(bool)
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self._stop = False
-
-    def stop(self) -> None:
-        self._stop = True
-
-    def run(self) -> None:
-        import socket as _socket
-        import overlay_config as oc
-        from overlay_server import load_code_names
-        names = load_code_names()
-        was = None
-        while not self._stop:
-            sock = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
-            try:
-                sock.connect(str(oc.event_socket()))
-            except OSError:
-                sock.close()
-                if was is not False:
-                    self.live.emit(False)
-                    was = False
-                for _ in range(20):
-                    if self._stop:
-                        return
-                    self.msleep(100)
-                continue
-            sock.settimeout(0.3)
-            self.live.emit(True)
-            was = True
-            buf = b""
-            while not self._stop:
-                try:
-                    chunk = sock.recv(65536)
-                except _socket.timeout:
-                    continue
-                except OSError:
-                    break
-                if not chunk:
-                    break
-                buf += chunk
-                *lines, buf = buf.split(b"\n")
-                for ln in lines:
-                    parts = ln.split()
-                    try:
-                        if parts[0] == b"h":
-                            for c in parts[2:]:
-                                self.event.emit("r", "k", names.get(int(c), f"CODE_{int(c)}"), 1, 0)
-                        elif len(parts) == 5:
-                            src, typ, a, b = parts[0].decode(), parts[2].decode(), int(parts[3]), int(parts[4])
-                            if typ == "k":
-                                self.event.emit(src, "k", names.get(a, f"CODE_{a}"), float(b), 0)
-                            elif typ == "a":
-                                ax = kl.AXIS_NAMES.get(a)
-                                if ax:
-                                    self.event.emit(src, "a", ax, b / 10000.0, 0)
-                            else:
-                                self.event.emit(src, typ, "", float(a), float(b))
-                    except (ValueError, IndexError):
-                        pass
-            sock.close()
-            self.live.emit(False)
-            was = False
-
-
 class VisualizerPage(PageBase):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -699,6 +627,9 @@ class VisualizerPage(PageBase):
         from overlay_settings import OverlaySection
         self.overlay = OverlaySection()
         self.content_layout.addWidget(self.overlay)
+        from privacy_screen import PrivacyScreenSection
+        self.privacy = PrivacyScreenSection(self.overlay)
+        self.content_layout.addWidget(self.privacy)
         self.area.set_scene(self.overlay.cfg["scene"])
         self.panel.set_scene(self.area.scene)
         self.area.on_scene_changed = self._area_scene_changed
@@ -762,7 +693,13 @@ class VisualizerPage(PageBase):
             self.pad_hint.setText("")
 
     def _stream_live(self, live: bool) -> None:
+        if not live:
+            self._stream_blocked = False
         self.area.set_stream_live(live)
+        if live and getattr(self, "_stream_blocked", False):
+            self.source_lbl.setText("Input visualizer BLOCKED -- nothing is shown, sent to OBS or recorded "
+                                    "(an ignored app, or the block toggle; see Privacy below).")
+            return
         self.source_lbl.setText(
             "Showing all input from the daemon -- yours in the input color, macros' in the output color."
             if live else "Showing this window's input only (the daemon isn't running). Colors, controller and "
@@ -771,18 +708,14 @@ class VisualizerPage(PageBase):
     def _stream_event(self, src, typ, name, a, b) -> None:
         k = self.area.kbm
         now = time.perf_counter()
-        if typ == "k":
-            k.key(name, a == 1, now, src)
-            if src == "r" and name in kl.PAD_BUTTONS:
-                self._controller_seen()
-        elif typ == "m":
-            k.move(a, b, now, src)
-        elif typ == "w":
-            k.wheel(a, now, src)
-        elif typ == "a":
-            k.axis(name, a, now, src)
-            if src == "r" and abs(a) > 0.5:
-                self._controller_seen()
+        apply_stream_event(k, src, typ, name, a, b, now)
+        if typ == "k" and src == "r" and name in kl.PAD_BUTTONS:
+            self._controller_seen()
+        elif typ == "a" and src == "r" and abs(a) > 0.5:
+            self._controller_seen()
+        elif typ == "p":
+            self._stream_blocked = bool(a)
+            self._stream_live(True)
         self.area.dirty = True
 
     def reset(self) -> None:

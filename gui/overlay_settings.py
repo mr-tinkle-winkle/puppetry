@@ -661,7 +661,9 @@ class OverlaySection(QWidget):
     # -- saving -------------------------------------------------------------------
     def _restart_sig(self):
         c = self.cfg
-        return (tuple(sorted(oc.pages(c).items())), c["replay"]["enabled"])
+        hk = c.get("hotkeys", {})
+        return (tuple(sorted(oc.pages(c).items())), c["replay"]["enabled"],
+                tuple((k, tuple(hk.get(k) or ())) for k in sorted(hk)))      # keybinds: compiled at daemon start
 
     def _set(self, section, key, value, restart=True) -> None:
         self.cfg[section][key] = value

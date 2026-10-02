@@ -16,11 +16,16 @@
 //           w = wheel        a = vertical notches, b = horizontal notches
 //           a = controller axis  a = ABS_* code, b = value x 10000, normalized
 //                            (-10000..10000 sticks and d-pad, 0..10000 triggers)
+//   s = system: type p = paused, a = 1 paused / 0 resumed (b = 0). While
+//       paused (an ignored app is focused or open -- privacy_watch), NO
+//       input lines are sent at all; a client should release everything it
+//       shows as held when it sees `s <t> p 1 0`.
 // Controller buttons arrive as ordinary k lines (BTN_SOUTH etc.).
 // On connect the client first receives
 //     h <time_us> <code> <code> ...
 // listing every real key/button held at that moment, then an `a` line for
-// every controller axis that isn't at rest.
+// every controller axis that isn't at rest -- or, while paused, an empty
+// hello followed by `s <t> p 1 0`.
 //
 // A client that stops reading loses lines (sends are non-blocking); it is
 // never allowed to stall an input thread.
@@ -44,6 +49,9 @@ public:
 
     bool active() const { return clients_.load(std::memory_order_relaxed) > 0; }
     void publish(char src, long long time_us, char type, int a, int b);
+    // Ignored apps: while paused nothing is published (see the wire format).
+    void set_paused(bool paused);
+    bool paused() const { return paused_.load(std::memory_order_relaxed); }
 
 private:
     void accept_loop();
@@ -55,6 +63,7 @@ private:
     std::thread thread_;
     std::atomic<bool> running_{false};
     std::atomic<int> clients_{0};
+    std::atomic<bool> paused_{false};
     std::mutex mutex_;
     std::vector<int> fds_;
 };

@@ -26,6 +26,7 @@
 #include "native_vm.hpp"
 #include <unordered_map>
 #include "pointer_accel.hpp"
+#include "privacy.hpp"
 #include "python_embed.hpp"
 #include "runtime.hpp"
 #include "simplified_names.hpp"
@@ -402,6 +403,43 @@ int main(int argc, char** argv) {
         }
     }
 
+    // Built-in keybinds (overlay.json "hotkeys": {"screen": [...], "block": [...],
+    // "share": [...]}, key names): each is a macro that runs a puppetry-overlay
+    // subcommand, so it goes through the same combo matching as the user's own.
+    {
+        json ov = load_overlay_config();
+        const char* env = std::getenv("PUPPETRY_OVERLAY_CMD");
+        std::string tool = (env && *env) ? env : "puppetry-overlay";
+        struct Builtin { const char* key; const char* name; const char* args; };
+        for (const Builtin& b : {Builtin{"screen", "Puppetry: toggle the on-screen overlay", "screen toggle"},
+                                 Builtin{"block", "Puppetry: block / unblock the input visualizer", "block toggle"},
+                                 Builtin{"share", "Puppetry: open the OBS share window", "share"}}) {
+            if (!ov.contains("hotkeys") || !ov["hotkeys"].is_object() || !ov["hotkeys"].contains(b.key) ||
+                !ov["hotkeys"][b.key].is_array() || ov["hotkeys"][b.key].empty())
+                continue;
+            auto m = std::make_unique<Macro>();
+            m->id = std::string("__builtin_") + b.key;
+            m->name = b.name;
+            m->enabled = true;
+            m->repeat_mode = parse_repeat_mode("none");
+            m->trigger_edge = parse_trigger_edge("down");
+            for (const auto& k : ov["hotkeys"][b.key]) {
+                int code;
+                if (k.is_string() && resolve_key_name(k.get<std::string>(), code)) m->combo.push_back(code);
+            }
+            if (m->combo.empty()) continue;
+            json def = {{"id", m->id}, {"name", m->name}, {"python_on", false},
+                        {"code", "command(\"'" + tool + "' " + b.args + "\")"}};
+            try {
+                m->func = compile_macro_body(def, registry, all_macro_names);
+                std::printf("Keybind: %s\n", b.name);
+                macros.push_back(std::move(m));
+            } catch (const std::exception& exc) {
+                std::fprintf(stderr, "Keybind '%s' skipped: %s\n", b.name, exc.what());
+            }
+        }
+    }
+
     ControlSocketServer control(rt, registry, macros);
     try {
         control.start(control_socket_path().string());
@@ -413,6 +451,9 @@ int main(int argc, char** argv) {
     // Live event stream for the overlay helper (inert with no clients).
     static EventStream event_stream;
     if (event_stream.start(event_socket_path().string(), &rt)) g_event_stream.store(&event_stream);
+    // Blocking the input visualizer: the manual toggle (survives restarts) and ignored apps.
+    privacy_load_manual(rt);
+    std::thread([&rt] { run_privacy_watch(rt); }).detach();
     if (overlay_wanted(load_overlay_config())) {
         std::thread(run_overlay_helper).detach();
         std::printf("Overlay helper: starting (overlay.json)\n");

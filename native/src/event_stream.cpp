@@ -73,12 +73,14 @@ void EventStream::accept_loop() {
         if (fd < 0) continue;
         // hello: what's held right now
         std::string hello = "h " + std::to_string(realtime_us());
-        if (rt_) {
+        const bool paused_now = paused_.load();
+        if (rt_ && !paused_now) {
             std::lock_guard<std::mutex> lock(rt_->held_mutex);
             for (int code : rt_->held) hello += " " + std::to_string(code);
         }
         hello += "\n";
-        if (rt_) {                                  // controller axes that aren't at rest
+        if (paused_now) hello += "s " + std::to_string(realtime_us()) + " p 1 0\n";
+        if (rt_ && !paused_now) {                   // controller axes that aren't at rest
             std::lock_guard<std::mutex> lock(rt_->axes_mutex);
             long long now = realtime_us();
             for (auto& [code, v] : rt_->axes)
@@ -107,7 +109,15 @@ void EventStream::send_all(const char* buf, size_t n) {
     clients_ = (int)fds_.size();
 }
 
+void EventStream::set_paused(bool paused) {
+    if (paused_.exchange(paused) == paused) return;
+    char buf[64];
+    int n = std::snprintf(buf, sizeof(buf), "s %lld p %d 0\n", realtime_us(), paused ? 1 : 0);
+    if (n > 0) send_all(buf, (size_t)n);
+}
+
 void EventStream::publish(char src, long long time_us, char type, int a, int b) {
+    if (paused_.load(std::memory_order_relaxed)) return;    // an ignored app: nothing leaves the daemon
     char buf[96];
     int n = std::snprintf(buf, sizeof(buf), "%c %lld %c %d %d\n", src, time_us, type, a, b);
     if (n > 0) send_all(buf, (size_t)n);

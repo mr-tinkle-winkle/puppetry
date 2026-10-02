@@ -52,6 +52,9 @@ bool get_cursor_pos_kde(int& x, int& y, double timeout_s = 1.0);
 // (never suppress) if kdotool isn't installed or the query fails, same
 // fail-open philosophy as get_cursor_pos_kde.
 bool active_window_is_puppetry(double timeout_s = 1.0);
+// Runs `kdotool <args...>` (KWin), stdout into `output`, killed after
+// timeout_s. False if kdotool is missing, times out or fails.
+bool run_kdotool(const std::vector<std::string>& args, std::string& output, double timeout_s);
 
 // what: "keyboard" | "mouse" | "mouse_buttons" | "mouse_movement".
 // Throws std::invalid_argument for anything else, same as the Python

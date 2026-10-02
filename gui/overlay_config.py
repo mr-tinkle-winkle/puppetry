@@ -136,7 +136,37 @@ DEFAULTS = {
     "style": schema_defaults(STYLE_SCHEMA),
     "simple_style": schema_defaults(SIMPLE_SCHEMA),
     "movement_style": schema_defaults(MOVEMENT_SCHEMA),
+    # Blocking the input visualizer (the daemon's privacy.cpp): while one of these is focused
+    # (or, with "when": "open", has any window open) nothing is shown, sent to OBS or recorded.
+    # [{"match": "class"|"title", "value": "keepassxc", "when": "focused"|"open"}]
+    "ignored_apps": [],
+    # Built-in keybinds (lists of key names; empty = none): the on-screen overlay, the
+    # block toggle, and the OBS share window. Changing them restarts the daemon.
+    "hotkeys": {"screen": [], "block": [], "share": []},
+    # The on-screen overlay (puppetry-overlay screen ...): a click-through window over
+    # everything, showing the same layout and look as OBS.
+    "screen": {"content": "full", "position": "bottom-right", "margin": 24, "scale": 60, "opacity": 100,
+               "monitor": "primary"},
 }
+SCREEN_POSITIONS = [("bottom-right", "Bottom right"), ("bottom-left", "Bottom left"), ("bottom-center", "Bottom center"),
+                    ("top-right", "Top right"), ("top-left", "Top left"), ("top-center", "Top center"),
+                    ("center", "Center")]
+HOTKEY_NAMES = {"screen": "Show / hide the on-screen overlay", "block": "Block / unblock the input visualizer",
+                "share": "Open the OBS share window"}
+
+
+def privacy_file() -> Path:
+    """The daemon's blocking state (privacy.cpp): {"blocked", "manual", "app", "why", "watching", "rules"}."""
+    return runtime_dir() / "privacy.json"
+
+
+def read_privacy() -> dict:
+    try:
+        return json.loads(privacy_file().read_text())
+    except (OSError, ValueError):
+        return {}
+
+
 MOUSE_SCHEMA = MOVEMENT_SCHEMA            # old name
 
 

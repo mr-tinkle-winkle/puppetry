@@ -218,6 +218,10 @@ public:
 
     // ---- external pause (GUI recording a combo) ----
     std::atomic<bool> external_pause{false};
+    // Input visualizer blocking (privacy.hpp): the user's toggle, and "an
+    // ignored app is focused / open". Either one stops the event stream.
+    std::atomic<bool> visualizer_blocked{false};
+    std::atomic<bool> app_blocked{false};
 
     // ---- actAs ----
     std::mutex act_as_mutex;

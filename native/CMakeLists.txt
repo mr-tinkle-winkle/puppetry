@@ -78,6 +78,7 @@ set(CORE_SOURCES
     src/control_socket.cpp
     src/dispatch.cpp
     src/event_stream.cpp
+    src/privacy.cpp
     src/evdev_device.cpp
     src/macro.cpp
     src/native_vm.cpp

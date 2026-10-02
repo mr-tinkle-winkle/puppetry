@@ -29,7 +29,7 @@ features. That document's content has been folded into this one
 (see "Prior session" below) rather than kept as a separate file, so
 this is now the single source of truth for project state.
 
-## Start here — current state (Session 25)
+## Start here — current state (Session 26)
 
 **What it is.** A NixOS input-macro system: a C++17 daemon (evdev in,
 `uinput` out; control socket; embedded CPython *or* a built-in interpreter
@@ -341,6 +341,60 @@ separately from profiles.
   the held-button ring around the dot isn't clipped at the view's edge
   (Python and JS). Prep package v6 documents it.
 
+- **Session 26: blocking the visualizer, ignored apps, on-screen overlay,
+  viewers-only share window, keybinds.** (Built across two sessions; the
+  second found the first's work on disk, reviewed it and completed it.)
+  - *Blocking* (`native/src/privacy.{hpp,cpp}`): `EventStream::set_paused`
+    -- while paused nothing is published, one gate for every consumer (OBS
+    pages, replay buffer, in-app picture, on-screen overlay). Wire format:
+    `s <t> p 1 0` / `s <t> p 0 0`; the hello of a client connecting while
+    paused is empty plus that line. Sources: the manual toggle (control
+    socket `{"cmd": "VISUALIZER", "state": "toggle"|"on"|"off"|"status"}`;
+    kept in `$XDG_RUNTIME_DIR/puppetry/visualizer_blocked` so a daemon
+    restart doesn't unblock) and ignored apps (overlay.json `ignored_apps`:
+    `{"match": "class"|"title", "value", "when": "focused"|"open"}`,
+    case-insensitive substring; `run_privacy_watch` polls every 0.5 s via
+    kdotool -- active window class + title, and `search --class/--name`
+    with `icase_substring_regex` for "open"; fails open when kdotool can't
+    answer, reported as `watching: false`). State for the GUI:
+    `$XDG_RUNTIME_DIR/puppetry/privacy.json`.
+  - Consumers: the hub releases everything held on a block (ku / zero
+    axes into pages and the replay buffer) and writes its status at once;
+    `gui/stream_client.py` (shared by the in-app picture and the on-screen
+    overlay) clears its `KbmState`.
+  - *On-screen overlay* (`gui/screen_overlay.py`): one long-lived process,
+    socket `$XDG_RUNTIME_DIR/puppetry/screen-overlay.sock` (show / hide /
+    toggle / quit / status -> JSON). `puppetry-overlay screen
+    show|hide|toggle|stop|status` starts it when needed through
+    `systemd-run --user --unit=puppetry-screen-overlay` (outside the
+    daemon's cgroup, with the session's display variables; falls back to a
+    detached process with `systemctl --user show-environment` imported).
+    Runs on XWayland (`QT_QPA_PLATFORM=xcb`) as a Qt.ToolTip +
+    BypassWindowManagerHint + WindowTransparentForInput window, i.e.
+    override-redirect and click-through, so it can sit above fullscreen
+    windows; native Wayland fallback has only the stays-on-top hint.
+    Settings: overlay.json `screen` (content full|simple, position, monitor,
+    scale %, opacity %, margin), re-read every second.
+  - *Viewers only*: drawing on the monitor but hiding it from the person
+    is impossible (monitor capture = what the monitor shows). Offered
+    instead: `puppetry-overlay share` (`overlay_cli.share()`): ensures the
+    Browser Sources in OBS's current scene and opens a windowed projector
+    of the program output (`OpenVideoMixProjector`), to share in Discord
+    instead of the screen.
+  - *Keybinds*: overlay.json `hotkeys` {screen, block, share} (key-name
+    lists). `main.cpp` compiles each into a built-in macro
+    (`__builtin_<key>`, native code `command("'<PUPPETRY_OVERLAY_CMD>'
+    <subcommand>")`), so they use the normal combo matching. Part of
+    `_restart_sig` (changing one restarts the daemon).
+  - GUI: `gui/privacy_screen.py` `PrivacyScreenSection` on the Input
+    Visualizer page (block status + button, ignored apps list with "+ Add
+    app" from the open windows, on-screen overlay controls, share window,
+    a `KeybindRow` per keybind using `ComboRecorder`).
+  - Not verified on a real desktop: KWin stacking of the XWayland
+    override-redirect window over fullscreen games, kdotool's
+    `getwindowclassname` / `search` output on the installed version, the
+    projector request against a real OBS.
+
 **Not verified on real hardware / display.** Everything above ran under
 `QT_QPA_PLATFORM=offscreen`; OBS pages were rendered in headless Chromium
 (the engine behind OBS's browser source). Unchecked: a real OBS (tested
@@ -377,7 +431,7 @@ block; which easing recorded movement should use (`linear` today); whether the O
 `overlay.json` (mode 0600) to a keyring.
 
 **Run the checks.** GUI: `cd gui && QT_QPA_PLATFORM=offscreen python3
-test_app.py` (319 checks), `python3 test_overlay.py` (126 checks: layouts,
+test_app.py` (325 checks), `python3 test_overlay.py` (135 checks: layouts,
 scene, movement-view math, replay file, helper over HTTP/SSE with a fake daemon, fake OBS
 server, renderer + CLI, pieces/controller/source colors, transparency per
 format, align/layer, JS parity; needs ffmpeg, node optional) and
