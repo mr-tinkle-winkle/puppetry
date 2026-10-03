@@ -107,11 +107,13 @@ session to take effect.
   size and opacity. Show on screen, a keybind, or `puppetry-overlay screen
   toggle` (`show`, `hide`, `stop`, `status`).
 - **Show it to viewers only**: a monitor share captures what the monitor
-  shows, so this can't be done on the monitor itself. In OBS the overlay
-  is already a source only OBS shows. For Discord or a call, **Open share
-  window** (or a keybind, or `puppetry-overlay share`) opens OBS's program
-  output in its own window, with the overlay added to OBS's scene; share
-  that window instead of the screen.
+  shows, so this overlay lives in OBS instead. **Show to viewers** (or a
+  keybind, or `puppetry-overlay share toggle`) puts the on-screen overlay
+  into OBS's current scene with the on-screen overlay's settings (what to
+  show, where, size, opacity), so streams and recordings get it and the
+  monitor doesn't; changing those settings moves it in OBS too. For Discord
+  or a call, **Open share window** (`puppetry-overlay share window`) opens
+  OBS's output in its own window to share instead of the screen.
 - The Input Visualizer's picture uses the overlay's look from
   **Customize…**, so it matches what OBS and afterglow show.
 - **Edit layout** (Input Visualizer) arranges what's drawn: drag to move,

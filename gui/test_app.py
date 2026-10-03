@@ -1319,6 +1319,15 @@ def main() -> int:
     saved_all = oc.load()
     check("screen overlay: keybind and settings saved", saved_all["hotkeys"]["screen"] == ["KEY_LEFTCTRL", "KEY_F9"]
           and saved_all["screen"]["scale"] == 85 and saved_all["screen"]["position"] == "top-left")
+    pv._share_done({"visible": True, "scene": "Game", "_action": "toggle", "_quiet": False})
+    check("viewers only: the button follows the state", pv.share_btn.text() == "Hide from viewers"
+          and "Game" in pv.share_status.text())
+    pv.margin.setValue(30)
+    check("viewers only: changing an on-screen setting while shown re-places it in OBS",
+          pv._share_timer.isActive())
+    pv._share_timer.stop()
+    pv._share_done({"visible": False, "scene": "Game", "_action": "toggle", "_quiet": False})
+    check("viewers only: hidden again", pv.share_btn.text() == "Show to viewers" and not pv._share_visible)
     pv._set_hotkey("screen", [])
     pv.app_rows[0]["remove"].click()
     ov.flush()

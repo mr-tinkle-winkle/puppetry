@@ -29,7 +29,7 @@ features. That document's content has been folded into this one
 (see "Prior session" below) rather than kept as a separate file, so
 this is now the single source of truth for project state.
 
-## Start here — current state (Session 26)
+## Start here — current state (Session 27)
 
 **What it is.** A NixOS input-macro system: a C++17 daemon (evdev in,
 `uinput` out; control socket; embedded CPython *or* a built-in interpreter
@@ -395,6 +395,26 @@ separately from profiles.
     `getwindowclassname` / `search` output on the installed version, the
     projector request against a real OBS.
 
+- **Session 27: "viewers only" uses the on-screen overlay's settings.**
+  `gui/viewers_share.py` replaces `overlay_cli.share()`, which added every
+  enabled OBS page (full, simple, movement, per-element sources) unscaled
+  at the canvas origin, never added an existing input to a scene that
+  lacked it, and opened another projector on every press. Now:
+  - one Browser Source, `Puppetry: Viewers only`, showing the full or
+    simple page per `screen.content`; `plan(cfg, canvas_w, canvas_h)` maps
+    the on-screen settings onto OBS's canvas (scale and margin x canvas
+    height / `style.screen_height`, `screen_overlay.placement` for the
+    corner, opacity as page CSS); `place()` creates or updates the input,
+    adds a scene item if the current program scene lacks one, sets the
+    transform (top-left alignment) and moves it to the top.
+  - `puppetry-overlay share [toggle|show|hide|update|window|status]`; the
+    built-in keybind runs `share toggle`; `window` (the projector) is its own
+    action. `ensure_page` switches the needed page on (and restarts the
+    daemon) when it's off, then waits for it to answer.
+  - GUI: Show to viewers / Hide from viewers, Open share window; changing an
+    on-screen setting while shown re-places it (`update`, debounced 0.7 s).
+  - Tested against a fake OBS that records requests; not against a real OBS.
+
 **Not verified on real hardware / display.** Everything above ran under
 `QT_QPA_PLATFORM=offscreen`; OBS pages were rendered in headless Chromium
 (the engine behind OBS's browser source). Unchecked: a real OBS (tested
@@ -431,7 +451,7 @@ block; which easing recorded movement should use (`linear` today); whether the O
 `overlay.json` (mode 0600) to a keyring.
 
 **Run the checks.** GUI: `cd gui && QT_QPA_PLATFORM=offscreen python3
-test_app.py` (325 checks), `python3 test_overlay.py` (135 checks: layouts,
+test_app.py` (328 checks), `python3 test_overlay.py` (147 checks: layouts,
 scene, movement-view math, replay file, helper over HTTP/SSE with a fake daemon, fake OBS
 server, renderer + CLI, pieces/controller/source colors, transparency per
 format, align/layer, JS parity; needs ffmpeg, node optional) and

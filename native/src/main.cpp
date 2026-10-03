@@ -413,7 +413,7 @@ int main(int argc, char** argv) {
         struct Builtin { const char* key; const char* name; const char* args; };
         for (const Builtin& b : {Builtin{"screen", "Puppetry: toggle the on-screen overlay", "screen toggle"},
                                  Builtin{"block", "Puppetry: block / unblock the input visualizer", "block toggle"},
-                                 Builtin{"share", "Puppetry: open the OBS share window", "share"}}) {
+                                 Builtin{"share", "Puppetry: show / hide the overlay for viewers (OBS)", "share toggle"}}) {
             if (!ov.contains("hotkeys") || !ov["hotkeys"].is_object() || !ov["hotkeys"].contains(b.key) ||
                 !ov["hotkeys"][b.key].is_array() || ov["hotkeys"][b.key].empty())
                 continue;

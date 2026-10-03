@@ -924,8 +924,137 @@ def privacy_screen_tests():
     check("screen overlay: stop ends it", r5.get("running") is False and r6.get("running") is False)
 
 
+def viewers_share_tests():
+    import viewers_share as vsh
+    from obs_client import ObsError
+    cfg = oc.merged({"full": {"enabled": True}, "screen": {"position": "bottom-right", "scale": 50, "margin": 20,
+                                                           "opacity": 70}})
+    cfg["style"]["screen_height"] = 1080
+    w, h = vsh.page_size(cfg, "full")
+    p = vsh.plan(cfg, 1920, 1080)
+    check("viewers only: placed with the on-screen overlay's settings (corner, size, margin, opacity)",
+          p["page"] == "full" and p["url"] == "http://127.0.0.1:17380/" and abs(p["scale"] - 0.5) < 1e-9
+          and p["x"] == 1920 - round(w * 0.5) - 20 and p["y"] == 1080 - round(h * 0.5) - 20
+          and "opacity: 0.7" in p["css"])
+    p4k = vsh.plan(cfg, 3840, 2160)
+    check("viewers only: a bigger OBS canvas than the screen scales it to look the same",
+          abs(p4k["scale"] - 1.0) < 1e-9 and p4k["x"] == 3840 - w - 40)
+    simple = vsh.plan(dict(cfg, screen=dict(cfg["screen"], content="simple")), 1920, 1080)
+    check("viewers only: 'Simple input list' uses the simple page", simple["page"] == "simple"
+          and simple["url"].endswith(":17381/"))
+
+    class FakeObs:
+        def __init__(self):
+            self.inputs, self.items, self.calls, self.next_id = set(), {}, [], 1
+            self.projectors = 0
+
+        def __call__(self, _cfg):
+            return self
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            pass
+
+        def request(self, t, d=None):
+            self.calls.append((t, d))
+            if t == "GetCurrentProgramScene":
+                return {"currentProgramSceneName": "Game"}
+            if t == "GetVideoSettings":
+                return {"baseWidth": 1920, "baseHeight": 1080}
+            if t == "GetInputList":
+                return {"inputs": [{"inputName": n} for n in self.inputs]}
+            if t == "CreateInput":
+                self.inputs.add(d["inputName"])
+                self.items[d["inputName"]] = {"id": self.next_id, "enabled": d["sceneItemEnabled"]}
+                self.next_id += 1
+                return {"sceneItemId": self.items[d["inputName"]]["id"]}
+            if t == "GetSceneItemId":
+                if d["sourceName"] not in self.items:
+                    raise ObsError("GetSceneItemId failed: 600")
+                return {"sceneItemId": self.items[d["sourceName"]]["id"]}
+            if t == "CreateSceneItem":
+                self.items[d["sourceName"]] = {"id": self.next_id, "enabled": d["sceneItemEnabled"]}
+                self.next_id += 1
+                return {"sceneItemId": self.items[d["sourceName"]]["id"]}
+            if t in ("GetSceneItemEnabled", "SetSceneItemEnabled"):
+                it = next(v for v in self.items.values() if v["id"] == d["sceneItemId"])
+                if t == "SetSceneItemEnabled":
+                    it["enabled"] = d["sceneItemEnabled"]
+                return {"sceneItemEnabled": it["enabled"]}
+            if t == "GetSceneItemList":
+                return {"sceneItems": [{} for _ in range(3)]}
+            if t == "OpenVideoMixProjector":
+                self.projectors += 1
+            return {}
+    fake = FakeObs()
+    real_ensure = vsh.ensure_page
+    vsh.ensure_page = lambda c: c
+    try:
+        r1 = vsh.share("toggle", cfg, fake)
+        tf = [d for t, d in fake.calls if t == "SetSceneItemTransform"][-1]["sceneItemTransform"]
+        r2 = vsh.share("toggle", cfg, fake)
+        r3 = vsh.share("show", cfg, fake)
+        n_inputs = len([1 for t, _d in fake.calls if t == "CreateInput"])
+        st = vsh.share("status", cfg, fake)
+        cfg2 = oc.merged(dict(cfg, screen=dict(cfg["screen"], position="top-left")))
+        cfg2["style"]["screen_height"] = 1080
+        r4 = vsh.share("update", cfg2, fake)
+        tf2 = [d for t, d in fake.calls if t == "SetSceneItemTransform"][-1]["sceneItemTransform"]
+        del fake.items[vsh.SOURCE]                       # the source exists but not in this scene
+        r5 = vsh.share("show", cfg, fake)
+        vsh.share("window", cfg, fake)
+        vsh.share("window", cfg, fake)
+        r6 = vsh.share("hide", cfg, fake)
+    finally:
+        vsh.ensure_page = real_ensure
+    check("viewers only: toggle shows it, toggle again hides it, show shows it",
+          r1["visible"] is True and r2["visible"] is False and r3["visible"] is True and st["visible"] is True)
+    check("viewers only: ONE source, created once and reused (no stacking of every OBS page)",
+          n_inputs == 1 and fake.inputs == {vsh.SOURCE})
+    check("viewers only: OBS transform = the planned spot, top-left aligned, on top",
+          tf["positionX"] == r1["x"] and tf["scaleX"] == r1["scale"] == round(p["scale"], 4) and tf["alignment"] == 5
+          and any(t == "SetSceneItemIndex" and d["sceneItemIndex"] == 2 for t, d in fake.calls))
+    check("viewers only: update re-places it after a settings change, visibility unchanged",
+          r4["visible"] is True and tf2["positionX"] == 20 and tf2["positionY"] == 20)
+    check("viewers only: a source that's missing from the current scene is added to it",
+          r5["visible"] is True and any(t == "CreateSceneItem" for t, _d in fake.calls))
+    check("viewers only: the share window is its own action; hide hides", fake.projectors == 2
+          and r6["visible"] is False)
+    try:
+        vsh.share("sideways", cfg, fake)
+        bad = False
+    except ValueError:
+        bad = True
+    check("viewers only: unknown action is an error", bad)
+    # the page it shows must be served: turned on (+ daemon restart) when it's off
+    import http.server
+    import puppetry_config as cfg_mod
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), http.server.SimpleHTTPRequestHandler)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    off = oc.merged({"full": {"enabled": False, "port": srv.server_address[1]}})
+    restarted = []
+    real_restart = cfg_mod.restart_daemon_service
+    cfg_mod.restart_daemon_service = lambda: restarted.append(1) or (True, "")
+    try:
+        got = vsh.ensure_page(off, wait_s=3)
+    finally:
+        cfg_mod.restart_daemon_service = real_restart
+        srv.shutdown()
+    check("viewers only: a page that's off is switched on, saved, and the daemon restarted",
+          got["full"]["enabled"] and oc.load()["full"]["enabled"] and restarted == [1])
+    try:
+        vsh.ensure_page(oc.merged({"full": {"enabled": True, "port": 1}}), wait_s=0.5)
+        down = False
+    except RuntimeError as e:
+        down = "isn't up" in str(e)
+    check("viewers only: a page that never comes up is a clear error", down)
+
+
 def main() -> int:
     layout_tests()
+    viewers_share_tests()
     privacy_screen_tests()
     replay_tests()
     obs_tests()

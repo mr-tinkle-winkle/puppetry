@@ -7,7 +7,9 @@
     overlay);
   * the on-screen overlay (screen_overlay.py: click-through, over
     everything);
-  * "viewers only": the OBS share window (overlay_cli.share);
+  * "viewers only": the same overlay as one OBS source placed with the
+    on-screen overlay's settings, and OBS's output as a window to share
+    (viewers_share.py);
   * a keybind for each of the three (overlay.json "hotkeys"; the daemon
     compiles them into built-in macros at start, so changing one restarts it).
 
@@ -217,19 +219,28 @@ class PrivacyScreenSection(QWidget):
         # -- viewers only --------------------------------------------------------------
         lay.addWidget(section_title("Show it to viewers only"))
         lay.addWidget(dim_label(
-            "A screen share or recording of your monitor captures exactly what your monitor shows, so an "
-            "overlay that viewers see but you don't can't be drawn on the monitor itself. Two ways to get "
-            "it anyway: in OBS, the overlay is already a source only OBS shows (Expose Input Visualizer to "
-            "OBS). For Discord or a call, Open share window opens OBS's program output (your screen plus "
-            "the overlay) in its own window: share that window instead of your screen, and keep it on "
-            "another virtual desktop. OBS needs a screen capture source and its WebSocket server on."))
+            "A screen share captures exactly what your monitor shows, so an overlay that only viewers see "
+            "has to live in OBS instead. Show to viewers puts the on-screen overlay into OBS's current "
+            "scene, with the settings above (what to show, where, size, opacity), mapped onto OBS's "
+            "canvas: your stream and recordings get it, your monitor doesn't. For Discord or a call, Open "
+            "share window opens OBS's output in its own window: share that window instead of your screen "
+            "(keep it on another virtual desktop). Needs OBS running with a screen capture source and its "
+            "WebSocket server on (connection settings above)."))
         row = QHBoxLayout()
-        self.share_btn = CustomButton("Open share window")
-        self.share_btn.clicked.connect(self._share)
+        self.share_btn = CustomButton("Show to viewers")
+        self.share_btn.clicked.connect(lambda: self._share("toggle"))
+        self.share_window_btn = CustomButton("Open share window")
+        self.share_window_btn.clicked.connect(lambda: self._share("window"))
         self.share_status = dim_label("")
         row.addWidget(self.share_btn)
+        row.addWidget(self.share_window_btn)
         row.addWidget(self.share_status, 1)
         lay.addLayout(row)
+        self._share_visible = False
+        self._share_timer = QTimer(self)                 # settings changed while shown: re-place it in OBS
+        self._share_timer.setSingleShot(True)
+        self._share_timer.setInterval(700)
+        self._share_timer.timeout.connect(lambda: self._share("update", quiet=True))
         self.share_key = self._keybind_row(lay, "share")
 
         self.timer = QTimer(self)
@@ -368,6 +379,8 @@ class PrivacyScreenSection(QWidget):
     def _screen_set(self, key: str, value) -> None:
         self.cfg["screen"][key] = value
         self.section.changed(restart=False)         # the overlay re-reads overlay.json by itself
+        if self._share_visible:
+            self._share_timer.start()               # ... and OBS's copy is re-placed
 
     def _screen(self, action: str) -> None:
         self.section.flush()                         # so it starts with the current settings
@@ -383,18 +396,48 @@ class PrivacyScreenSection(QWidget):
         threading.Thread(target=work, daemon=True).start()
 
     # -- share -----------------------------------------------------------------------------
-    def _share(self) -> None:
-        self.section.flush()
-        self.share_btn.setEnabled(False)
-        self.share_status.setText("Asking OBS...")
+    def _share(self, action: str, quiet: bool = False) -> None:
+        self.section.flush()                         # OBS gets the current settings
+        if not quiet:
+            for b in (self.share_btn, self.share_window_btn):
+                b.setEnabled(False)
+            self.share_status.setText("Asking OBS...")
 
         def work():
             try:
-                import overlay_cli
-                self.relay.done.emit("share", overlay_cli.share())
+                import viewers_share
+                res = viewers_share.share(action)
             except Exception as e:  # noqa: BLE001
-                self.relay.done.emit("share", {"error": str(e)})
+                res = {"error": str(e)}
+            res["_action"], res["_quiet"] = action, quiet
+            self.relay.done.emit("share", res)
         threading.Thread(target=work, daemon=True).start()
+
+    def _share_done(self, res: dict) -> None:
+        for b in (self.share_btn, self.share_window_btn):
+            b.setEnabled(True)
+        if res.get("error"):
+            if not res.get("_quiet"):
+                self.share_status.setText(res["error"])
+            return
+        if res.get("_action") == "window":
+            self.share_status.setText("Opened OBS's output as a window: share that window.")
+            return
+        self._share_visible = bool(res.get("visible"))
+        self.share_btn.setText("Hide from viewers" if self._share_visible else "Show to viewers")
+        if not res.get("_quiet"):
+            self.share_status.setText(f"Viewers see it (OBS scene \"{res.get('scene')}\")." if self._share_visible
+                                      else "Hidden from viewers.")
+        # a page that had to be switched on: the section's switches follow overlay.json
+        fresh = oc.load()
+        for page, toggle in (("full", self.section.full_toggle), ("simple", self.section.simple_toggle)):
+            if fresh[page].get("enabled") and not self.cfg[page].get("enabled"):
+                self.cfg[page]["enabled"] = True
+                toggle.blockSignals(True)
+                toggle.setChecked(True)
+                toggle.blockSignals(False)
+        self.section._saved_sig = self.section._restart_sig()
+        self.section._sync_urls()
 
     def _async_done(self, what: str, res) -> None:
         if what == "windows":
@@ -408,5 +451,4 @@ class PrivacyScreenSection(QWidget):
                 self.screen_btn.setText("Hide from screen" if vis else "Show on screen")
                 self.screen_status.setText("On screen." if vis else "Hidden.")
         elif what == "share":
-            self.share_btn.setEnabled(True)
-            self.share_status.setText(res.get("error") or "Opened OBS's share window: share that window.")
+            self._share_done(res)

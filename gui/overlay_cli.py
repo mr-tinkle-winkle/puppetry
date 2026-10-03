@@ -21,8 +21,10 @@ puppetry-overlay -- the overlay helper and its tools.
     puppetry-overlay block toggle|on|off|status
                                             block the input visualizer: nothing shown, sent to OBS or
                                             recorded (ignored apps do the same automatically)
-    puppetry-overlay share                  open OBS's program output in a window (with the overlay
-                                            source added) -- the window to share in Discord etc.
+    puppetry-overlay share [toggle|show|hide|update|window|status]
+                                            the overlay for viewers only: one OBS source placed with the
+                                            on-screen overlay's settings (toggle = the keybind); `window`
+                                            opens OBS's output as a window to share in Discord etc.
 
 Every command prints one JSON object on stdout; on failure it prints
 {"error": "..."} and exits 1. Times are Unix seconds.
@@ -109,7 +111,9 @@ def main(argv=None) -> int:
     scp.add_argument("--show", action="store_true", help="(run) start visible")
     bp = sub.add_parser("block")
     bp.add_argument("action", nargs="?", default="toggle", choices=["toggle", "on", "off", "status"])
-    sub.add_parser("share")
+    shp = sub.add_parser("share")
+    shp.add_argument("action", nargs="?", default="toggle",
+                     choices=["toggle", "show", "hide", "update", "window", "status"])
     a = ap.parse_args(argv)
 
     import overlay_config as oc
@@ -173,7 +177,8 @@ def main(argv=None) -> int:
             _print(resp)
             return 0
         if a.cmd == "share":
-            _print(share())
+            import viewers_share
+            _print(viewers_share.share(a.action))
             return 0
         if a.cmd in ("add-to-obs", "obs-replay-length"):
             from obs_client import ObsClient
@@ -189,23 +194,6 @@ def main(argv=None) -> int:
         _print({"error": str(e)})
         return 1
     return 0
-
-
-def share() -> dict:
-    """The "viewers only" route: make sure the overlay's Browser Sources are in OBS's
-    current scene, then open a windowed projector of OBS's program output. Share THAT
-    window (Discord, a call...) and viewers see screen + overlay while your own screen
-    stays clean. Needs OBS running with its WebSocket server on."""
-    import overlay_config as oc
-    from obs_client import ObsClient
-    cfg = oc.load()
-    if not cfg["full"].get("enabled"):
-        raise RuntimeError('turn on "Expose Input Visualizer to OBS" first (Input Visualizer page)')
-    o = cfg["obs"]
-    with ObsClient(o["host"], o["port"], o.get("password", "")) as c:
-        added = c.add_browser_sources(obs_sources(cfg))
-        c.request("OpenVideoMixProjector", {"videoMixType": "OBS_WEBSOCKET_VIDEO_MIX_TYPE_PROGRAM"})
-    return {"sources": added, "projector": "program (windowed)"}
 
 
 def daemon_request(payload: dict, timeout: float = 3.0) -> dict:

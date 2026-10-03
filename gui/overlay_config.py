@@ -152,7 +152,7 @@ SCREEN_POSITIONS = [("bottom-right", "Bottom right"), ("bottom-left", "Bottom le
                     ("top-right", "Top right"), ("top-left", "Top left"), ("top-center", "Top center"),
                     ("center", "Center")]
 HOTKEY_NAMES = {"screen": "Show / hide the on-screen overlay", "block": "Block / unblock the input visualizer",
-                "share": "Open the OBS share window"}
+                "share": "Show / hide the overlay for viewers (OBS)"}
 
 
 def privacy_file() -> Path:
