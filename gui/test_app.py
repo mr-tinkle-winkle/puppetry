@@ -1321,11 +1321,17 @@ def main() -> int:
           and saved_all["screen"]["scale"] == 85 and saved_all["screen"]["position"] == "top-left")
     pv._share_done({"visible": True, "scene": "Game", "_action": "toggle", "_quiet": False})
     check("viewers only: the button follows the state", pv.share_btn.text() == "Hide from viewers"
-          and "Game" in pv.share_status.text())
+          and "not in clips" in pv.share_status.text())
     pv.margin.setValue(30)
     check("viewers only: changing an on-screen setting while shown re-places it in OBS",
           pv._share_timer.isActive())
     pv._share_timer.stop()
+    pv._share_done({"projector": "x", "_action": "projector", "_quiet": False})
+    check("viewers only: Open Projector says it's the plain output and leaves the toggle alone",
+          "no overlay" in pv.share_status.text() and pv.share_btn.text() == "Hide from viewers")
+    pv._share_done({"visible": True, "scene": "Puppetry: Share", "window": "x", "_action": "window",
+                    "_quiet": False})
+    check("viewers only: Open share window names the scene to share", "Puppetry: Share" in pv.share_status.text())
     pv._share_done({"visible": False, "scene": "Game", "_action": "toggle", "_quiet": False})
     check("viewers only: hidden again", pv.share_btn.text() == "Show to viewers" and not pv._share_visible)
     pv._set_hotkey("screen", [])

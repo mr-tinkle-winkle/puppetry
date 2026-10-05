@@ -1,21 +1,30 @@
 """
-"Show it to viewers only": the on-screen overlay's twin inside OBS.
+"Show it to viewers only": the on-screen overlay's twin inside OBS -- in a
+scene of its own, so OBS's clips, recordings and stream never get it.
 
 A screen share captures what the monitor shows, so an overlay only viewers
-see can't live on the monitor. It lives in OBS instead, as ONE Browser
-Source ("Puppetry: Viewers only") placed with the on-screen overlay's own
-settings (overlay.json "screen": content, position, size, opacity, distance
-from the edge), mapped from screen pixels onto OBS's canvas. Viewers of
-OBS's output -- a stream, a recording, or OBS's projector window shared in
-Discord -- see it; your monitor doesn't.
+see can't live on the monitor. It lives in OBS instead, in the scene
+"Puppetry: Share": your current program scene nested at the bottom (so it
+shows whatever OBS shows) and ONE Browser Source ("Puppetry: Viewers only")
+on top, placed with the on-screen overlay's own settings (overlay.json
+"screen": content, position, size, opacity, distance from the edge), mapped
+from screen pixels onto OBS's canvas. OBS records/streams/clips its PROGRAM
+scene only, so the share scene stays out of all of them; a projector window
+of it is what gets shared (Discord, a call).
 
-    puppetry-overlay share [toggle|show|hide|update|window|status]
+    puppetry-overlay share [toggle|show|hide|update|window|projector|status]
 
-  toggle / show / hide   the source's visibility in the current program scene
-                         (placed / re-placed first). The keybind is `toggle`.
-  update                 re-place it, visibility unchanged (after a settings change)
-  window                 open OBS's program output as a window (to share in Discord)
+  toggle / show / hide   the overlay's visibility in the share scene (re-synced
+                         and re-placed first). The keybind is `toggle`.
+  update                 re-sync + re-place, visibility unchanged (settings changed)
+  window                 a projector window of the share scene (the overlay is
+                         placed first if it never was; nothing is ever added twice)
+  projector              a projector window of OBS's program output, nothing else
   status                 {"exists", "visible", ...}
+
+Everything is idempotent: the scene, the source and its scene item are each
+created once and updated after that. A "Puppetry: Viewers only" item left in
+a program scene (Session 27 put it there) is removed, so clips stay clean.
 
 The page it shows (the full layout or the simple list) must be served by the
 overlay helper; when it's off, `show` turns it on and restarts the daemon
@@ -29,6 +38,7 @@ import urllib.request
 import overlay_config as oc
 
 SOURCE = "Puppetry: Viewers only"
+SHARE_SCENE = "Puppetry: Share"
 _CSS = ("body {{ background-color: rgba(0, 0, 0, 0); margin: 0px auto; overflow: hidden; "
         "opacity: {opacity}; }}")
 
@@ -107,73 +117,115 @@ def _scene(c) -> str:
     return s.get("currentProgramSceneName") or s.get("sceneName")
 
 
-def _item_id(c, scene: str):
-    from obs_client import ObsError
-    try:
-        return c.request("GetSceneItemId", {"sceneName": scene, "sourceName": SOURCE})["sceneItemId"]
-    except (ObsError, KeyError):
-        return None
+def _items(c, scene: str) -> list:
+    return c.request("GetSceneItemList", {"sceneName": scene}).get("sceneItems", [])
+
+
+def _item_id(c, scene: str, source: str = SOURCE):
+    for it in _items(c, scene):
+        if it.get("sourceName") == source:
+            return it.get("sceneItemId")
+    return None
+
+
+def _is_visible(c, scene: str, item) -> bool:
+    return bool(item is not None and c.request("GetSceneItemEnabled", {
+        "sceneName": scene, "sceneItemId": item}).get("sceneItemEnabled"))
+
+
+def sync_scene(c) -> str:
+    """The share scene exists and shows the current program scene underneath (only
+    that one; a stale nested scene from before a scene switch is replaced). Any
+    overlay item in the program scene is removed (clips must stay clean).
+    -> the program scene's name."""
+    program = _scene(c)
+    if program == SHARE_SCENE:
+        raise RuntimeError(f'OBS is showing "{SHARE_SCENE}" live -- switch OBS back to your normal scene '
+                           "(that one is for the share window only)")
+    scenes = {s.get("sceneName") for s in c.request("GetSceneList").get("scenes", [])}
+    if SHARE_SCENE not in scenes:
+        c.request("CreateScene", {"sceneName": SHARE_SCENE})
+    stray = _item_id(c, program, SOURCE)
+    if stray is not None:
+        c.request("RemoveSceneItem", {"sceneName": program, "sceneItemId": stray})
+    have_base = False
+    for it in _items(c, SHARE_SCENE):
+        name = it.get("sourceName")
+        if name == SOURCE:
+            continue
+        if name == program and not have_base:
+            have_base = True
+            continue
+        c.request("RemoveSceneItem", {"sceneName": SHARE_SCENE, "sceneItemId": it["sceneItemId"]})
+    if not have_base:
+        base = c.request("CreateSceneItem", {"sceneName": SHARE_SCENE, "sourceName": program,
+                                             "sceneItemEnabled": True})["sceneItemId"]
+        c.request("SetSceneItemIndex", {"sceneName": SHARE_SCENE, "sceneItemId": base, "sceneItemIndex": 0})
+    return program
 
 
 def place(c, cfg: dict) -> tuple:
-    """Create or update the source and its scene item in the current program scene,
-    on top, at the planned spot. -> (scene, item id, plan)."""
+    """Create or update the overlay source and its item in the share scene, on top,
+    at the planned spot. Never creates a second one. -> (item id, plan)."""
     vs = c.request("GetVideoSettings")
     p = plan(cfg, int(vs.get("baseWidth", 1920)), int(vs.get("baseHeight", 1080)))
-    scene = _scene(c)
     settings = {"url": p["url"], "width": p["width"], "height": p["height"], "css": p["css"],
                 "shutdown": False, "restart_when_active": False}
     inputs = {i.get("inputName") for i in c.request("GetInputList").get("inputs", [])}
     if SOURCE in inputs:
         c.request("SetInputSettings", {"inputName": SOURCE, "inputSettings": settings, "overlay": True})
     else:
-        c.request("CreateInput", {"sceneName": scene, "inputName": SOURCE, "inputKind": "browser_source",
+        c.request("CreateInput", {"sceneName": SHARE_SCENE, "inputName": SOURCE, "inputKind": "browser_source",
                                   "inputSettings": settings, "sceneItemEnabled": False})
-    item = _item_id(c, scene)
-    if item is None:                     # the source exists, just not in this scene
-        item = c.request("CreateSceneItem", {"sceneName": scene, "sourceName": SOURCE,
+    item = _item_id(c, SHARE_SCENE)
+    if item is None:                     # the source exists, just not in the share scene
+        item = c.request("CreateSceneItem", {"sceneName": SHARE_SCENE, "sourceName": SOURCE,
                                              "sceneItemEnabled": False})["sceneItemId"]
-    c.request("SetSceneItemTransform", {"sceneName": scene, "sceneItemId": item, "sceneItemTransform": {
+    c.request("SetSceneItemTransform", {"sceneName": SHARE_SCENE, "sceneItemId": item, "sceneItemTransform": {
         "positionX": float(p["x"]), "positionY": float(p["y"]), "scaleX": p["scale"], "scaleY": p["scale"],
         "rotation": 0.0, "alignment": 5, "boundsType": "OBS_BOUNDS_NONE",
         "cropLeft": 0, "cropRight": 0, "cropTop": 0, "cropBottom": 0}})
-    n = len(c.request("GetSceneItemList", {"sceneName": scene}).get("sceneItems", []))
-    c.request("SetSceneItemIndex", {"sceneName": scene, "sceneItemId": item, "sceneItemIndex": max(0, n - 1)})
-    return scene, item, p
+    n = len(_items(c, SHARE_SCENE))
+    c.request("SetSceneItemIndex", {"sceneName": SHARE_SCENE, "sceneItemId": item, "sceneItemIndex": max(0, n - 1)})
+    return item, p
 
 
 def share(action: str = "toggle", cfg: dict | None = None, client_factory=None) -> dict:
     cfg = cfg or oc.load()
     client_factory = client_factory or _client
-    if action == "window":
+    if action not in ("toggle", "show", "hide", "update", "window", "projector", "status"):
+        raise ValueError(f"unknown share action {action!r}")
+    if action == "projector":
         with client_factory(cfg) as c:
             c.request("OpenVideoMixProjector", {"videoMixType": "OBS_WEBSOCKET_VIDEO_MIX_TYPE_PROGRAM"})
-        return {"window": "OBS program output (windowed projector)"}
+        return {"projector": "OBS program output"}
     if action == "status":
         with client_factory(cfg) as c:
-            scene = _scene(c)
-            item = _item_id(c, scene)
-            vis = bool(item is not None and c.request("GetSceneItemEnabled", {
-                "sceneName": scene, "sceneItemId": item}).get("sceneItemEnabled"))
-        return {"exists": item is not None, "visible": vis, "scene": scene}
-    if action not in ("toggle", "show", "hide", "update"):
-        raise ValueError(f"unknown share action {action!r}")
-    if action != "hide":
+            scenes = {s.get("sceneName") for s in c.request("GetSceneList").get("scenes", [])}
+            item = _item_id(c, SHARE_SCENE) if SHARE_SCENE in scenes else None
+            return {"exists": item is not None, "visible": _is_visible(c, SHARE_SCENE, item),
+                    "scene": SHARE_SCENE}
+    if action in ("toggle", "show", "update", "window"):
         cfg = ensure_page(cfg)
     with client_factory(cfg) as c:
-        scene = _scene(c)
-        item = _item_id(c, scene)
-        was = bool(item is not None and c.request("GetSceneItemEnabled", {
-            "sceneName": scene, "sceneItemId": item}).get("sceneItemEnabled"))
-        want = {"show": True, "hide": False, "toggle": not was, "update": was}[action]
-        if action == "hide" and item is None:
-            return {"visible": False, "scene": scene}
-        if want or action == "update":
-            scene, item, p = place(c, cfg)
+        program = sync_scene(c)
+        item = _item_id(c, SHARE_SCENE)
+        was = _is_visible(c, SHARE_SCENE, item)
+        if action == "window":
+            want = was if item is not None else True       # first time: the share window shows the overlay
         else:
-            p = None
-        c.request("SetSceneItemEnabled", {"sceneName": scene, "sceneItemId": item, "sceneItemEnabled": want})
-    out = {"visible": want, "scene": scene}
+            want = {"show": True, "hide": False, "toggle": not was, "update": was}[action]
+        p = None
+        if want or action in ("update", "window") or item is not None:
+            item, p = place(c, cfg)
+        if item is not None:
+            c.request("SetSceneItemEnabled", {"sceneName": SHARE_SCENE, "sceneItemId": item,
+                                              "sceneItemEnabled": want})
+        if action == "window":
+            c.request("OpenSourceProjector", {"sourceName": SHARE_SCENE})
+    out = {"visible": want, "scene": SHARE_SCENE, "program": program}
     if p:
         out.update(page=p["page"], x=p["x"], y=p["y"], scale=round(p["scale"], 4))
+    if action == "window":
+        out["window"] = f'projector of "{SHARE_SCENE}"'
     return out

@@ -21,10 +21,11 @@ puppetry-overlay -- the overlay helper and its tools.
     puppetry-overlay block toggle|on|off|status
                                             block the input visualizer: nothing shown, sent to OBS or
                                             recorded (ignored apps do the same automatically)
-    puppetry-overlay share [toggle|show|hide|update|window|status]
-                                            the overlay for viewers only: one OBS source placed with the
-                                            on-screen overlay's settings (toggle = the keybind); `window`
-                                            opens OBS's output as a window to share in Discord etc.
+    puppetry-overlay share [toggle|show|hide|update|window|projector|status]
+                                            the overlay for viewers only, in OBS scene "Puppetry: Share"
+                                            (never in clips), placed with the on-screen overlay's settings
+                                            (toggle = the keybind); `window` opens that scene as a window
+                                            to share; `projector` opens OBS's plain program output
 
 Every command prints one JSON object on stdout; on failure it prints
 {"error": "..."} and exits 1. Times are Unix seconds.
@@ -113,7 +114,7 @@ def main(argv=None) -> int:
     bp.add_argument("action", nargs="?", default="toggle", choices=["toggle", "on", "off", "status"])
     shp = sub.add_parser("share")
     shp.add_argument("action", nargs="?", default="toggle",
-                     choices=["toggle", "show", "hide", "update", "window", "status"])
+                     choices=["toggle", "show", "hide", "update", "window", "projector", "status"])
     a = ap.parse_args(argv)
 
     import overlay_config as oc

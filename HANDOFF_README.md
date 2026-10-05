@@ -29,7 +29,7 @@ features. That document's content has been folded into this one
 (see "Prior session" below) rather than kept as a separate file, so
 this is now the single source of truth for project state.
 
-## Start here — current state (Session 27)
+## Start here — current state (Session 28)
 
 **What it is.** A NixOS input-macro system: a C++17 daemon (evdev in,
 `uinput` out; control socket; embedded CPython *or* a built-in interpreter
@@ -415,6 +415,19 @@ separately from profiles.
     on-screen setting while shown re-places it (`update`, debounced 0.7 s).
   - Tested against a fake OBS that records requests; not against a real OBS.
 
+- **Session 28: viewers-only overlay moves to its own OBS scene.**
+  `viewers_share.SHARE_SCENE` = "Puppetry: Share": `sync_scene()` creates
+  it once, nests the current program scene at the bottom (replacing a
+  stale nested scene after an OBS scene switch), and removes any
+  "Puppetry: Viewers only" item from the program scene (Session 27 placed
+  it there, which put it into clips). `place()` now works in the share
+  scene. Actions: toggle / show / hide / update / `window` (OpenSourceProjector
+  of the share scene; places the overlay the first time) / `projector`
+  (OpenVideoMixProjector of the program output, no other request) / status.
+  Refuses when the share scene is itself live. All idempotent: the fake-OBS
+  test asserts one CreateInput, one CreateScene and one item however often
+  any button is pressed. GUI: third button "Open Projector".
+
 **Not verified on real hardware / display.** Everything above ran under
 `QT_QPA_PLATFORM=offscreen`; OBS pages were rendered in headless Chromium
 (the engine behind OBS's browser source). Unchecked: a real OBS (tested
@@ -451,7 +464,7 @@ block; which easing recorded movement should use (`linear` today); whether the O
 `overlay.json` (mode 0600) to a keyring.
 
 **Run the checks.** GUI: `cd gui && QT_QPA_PLATFORM=offscreen python3
-test_app.py` (328 checks), `python3 test_overlay.py` (147 checks: layouts,
+test_app.py` (330 checks), `python3 test_overlay.py` (151 checks: layouts,
 scene, movement-view math, replay file, helper over HTTP/SSE with a fake daemon, fake OBS
 server, renderer + CLI, pieces/controller/source colors, transparency per
 format, align/layer, JS parity; needs ffmpeg, node optional) and

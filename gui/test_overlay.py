@@ -944,9 +944,11 @@ def viewers_share_tests():
           and simple["url"].endswith(":17381/"))
 
     class FakeObs:
+        """Scenes with items, the requests viewers_share uses, every call recorded."""
         def __init__(self):
-            self.inputs, self.items, self.calls, self.next_id = set(), {}, [], 1
-            self.projectors = 0
+            self.program = "Game"
+            self.scenes = {"Game": [{"id": 1, "src": "Screen", "on": True}], "Chat": []}
+            self.inputs, self.calls, self.next_id, self.projectors = {"Screen"}, [], 2, []
 
         def __call__(self, _cfg):
             return self
@@ -957,71 +959,116 @@ def viewers_share_tests():
         def __exit__(self, *a):
             pass
 
+        def _new(self, scene, src, on):
+            it = {"id": self.next_id, "src": src, "on": on}
+            self.next_id += 1
+            self.scenes[scene].append(it)
+            return it["id"]
+
+        def _find(self, scene, iid):
+            return next(it for it in self.scenes[scene] if it["id"] == iid)
+
         def request(self, t, d=None):
             self.calls.append((t, d))
             if t == "GetCurrentProgramScene":
-                return {"currentProgramSceneName": "Game"}
+                return {"currentProgramSceneName": self.program}
+            if t == "GetSceneList":
+                return {"scenes": [{"sceneName": n} for n in self.scenes]}
+            if t == "CreateScene":
+                assert d["sceneName"] not in self.scenes
+                self.scenes[d["sceneName"]] = []
+                return {}
             if t == "GetVideoSettings":
                 return {"baseWidth": 1920, "baseHeight": 1080}
             if t == "GetInputList":
                 return {"inputs": [{"inputName": n} for n in self.inputs]}
             if t == "CreateInput":
+                assert d["inputName"] not in self.inputs, "input created twice"
                 self.inputs.add(d["inputName"])
-                self.items[d["inputName"]] = {"id": self.next_id, "enabled": d["sceneItemEnabled"]}
-                self.next_id += 1
-                return {"sceneItemId": self.items[d["inputName"]]["id"]}
-            if t == "GetSceneItemId":
-                if d["sourceName"] not in self.items:
-                    raise ObsError("GetSceneItemId failed: 600")
-                return {"sceneItemId": self.items[d["sourceName"]]["id"]}
-            if t == "CreateSceneItem":
-                self.items[d["sourceName"]] = {"id": self.next_id, "enabled": d["sceneItemEnabled"]}
-                self.next_id += 1
-                return {"sceneItemId": self.items[d["sourceName"]]["id"]}
-            if t in ("GetSceneItemEnabled", "SetSceneItemEnabled"):
-                it = next(v for v in self.items.values() if v["id"] == d["sceneItemId"])
-                if t == "SetSceneItemEnabled":
-                    it["enabled"] = d["sceneItemEnabled"]
-                return {"sceneItemEnabled": it["enabled"]}
+                return {"sceneItemId": self._new(d["sceneName"], d["inputName"], d["sceneItemEnabled"])}
             if t == "GetSceneItemList":
-                return {"sceneItems": [{} for _ in range(3)]}
-            if t == "OpenVideoMixProjector":
-                self.projectors += 1
+                return {"sceneItems": [{"sceneItemId": it["id"], "sourceName": it["src"]}
+                                       for it in self.scenes[d["sceneName"]]]}
+            if t == "CreateSceneItem":
+                assert not any(it["src"] == d["sourceName"] for it in self.scenes[d["sceneName"]]), "item twice"
+                return {"sceneItemId": self._new(d["sceneName"], d["sourceName"], d["sceneItemEnabled"])}
+            if t == "RemoveSceneItem":
+                self.scenes[d["sceneName"]] = [it for it in self.scenes[d["sceneName"]] if it["id"] != d["sceneItemId"]]
+                return {}
+            if t == "GetSceneItemEnabled":
+                return {"sceneItemEnabled": self._find(d["sceneName"], d["sceneItemId"])["on"]}
+            if t == "SetSceneItemEnabled":
+                self._find(d["sceneName"], d["sceneItemId"])["on"] = d["sceneItemEnabled"]
+                return {}
+            if t == "SetSceneItemIndex":
+                sc = self.scenes[d["sceneName"]]
+                it = self._find(d["sceneName"], d["sceneItemId"])
+                sc.remove(it)
+                sc.insert(d["sceneItemIndex"], it)
+                return {}
+            if t in ("OpenSourceProjector", "OpenVideoMixProjector"):
+                self.projectors.append(d)
             return {}
+
+        def srcs(self, scene):
+            return [it["src"] for it in self.scenes[scene]]
     fake = FakeObs()
+    fake.scenes["Game"].append({"id": 99, "src": vsh.SOURCE, "on": True})     # what Session 27 left behind
     real_ensure = vsh.ensure_page
     vsh.ensure_page = lambda c: c
     try:
         r1 = vsh.share("toggle", cfg, fake)
-        tf = [d for t, d in fake.calls if t == "SetSceneItemTransform"][-1]["sceneItemTransform"]
+        tf = [d for t, d in fake.calls if t == "SetSceneItemTransform"][-1]
+        after_first = (fake.srcs(vsh.SHARE_SCENE), fake.srcs("Game"))
         r2 = vsh.share("toggle", cfg, fake)
         r3 = vsh.share("show", cfg, fake)
-        n_inputs = len([1 for t, _d in fake.calls if t == "CreateInput"])
+        for _ in range(3):
+            vsh.share("window", cfg, fake)                       # pressed again and again
+        n_calls = len(fake.calls)
+        vsh.share("projector", cfg, fake)
+        projector_calls = fake.calls[n_calls:]
         st = vsh.share("status", cfg, fake)
         cfg2 = oc.merged(dict(cfg, screen=dict(cfg["screen"], position="top-left")))
         cfg2["style"]["screen_height"] = 1080
         r4 = vsh.share("update", cfg2, fake)
         tf2 = [d for t, d in fake.calls if t == "SetSceneItemTransform"][-1]["sceneItemTransform"]
-        del fake.items[vsh.SOURCE]                       # the source exists but not in this scene
+        fake.program = "Chat"                                    # the user switched OBS scenes
         r5 = vsh.share("show", cfg, fake)
-        vsh.share("window", cfg, fake)
-        vsh.share("window", cfg, fake)
         r6 = vsh.share("hide", cfg, fake)
+        fake.program = vsh.SHARE_SCENE
+        try:
+            vsh.share("show", cfg, fake)
+            live_err = False
+        except RuntimeError as e:
+            live_err = "switch OBS back" in str(e)
     finally:
         vsh.ensure_page = real_ensure
+    check("viewers only: lives in its own scene -- the live scene nested underneath, the overlay on top",
+          after_first[0] == ["Game", vsh.SOURCE] and r1["visible"] is True and r1["scene"] == vsh.SHARE_SCENE
+          and tf["sceneName"] == vsh.SHARE_SCENE)
+    check("viewers only: never in the live scene (clips stay clean) -- even one left there earlier is removed",
+          vsh.SOURCE not in after_first[1] and vsh.SOURCE not in fake.srcs("Game")
+          and vsh.SOURCE not in fake.srcs("Chat"))
     check("viewers only: toggle shows it, toggle again hides it, show shows it",
-          r1["visible"] is True and r2["visible"] is False and r3["visible"] is True and st["visible"] is True)
-    check("viewers only: ONE source, created once and reused (no stacking of every OBS page)",
-          n_inputs == 1 and fake.inputs == {vsh.SOURCE})
+          r2["visible"] is False and r3["visible"] is True and st["visible"] is True)
+    check("viewers only: pressing anything again never adds a second overlay or scene (one input, one item)",
+          len([1 for t, _d in fake.calls if t == "CreateInput"]) == 1
+          and len([1 for t, _d in fake.calls if t == "CreateScene"]) == 1
+          and fake.srcs(vsh.SHARE_SCENE).count(vsh.SOURCE) == 1)
+    check("viewers only: Open share window = a projector of the share scene, every press",
+          [p_.get("sourceName") for p_ in fake.projectors[:3]] == [vsh.SHARE_SCENE] * 3)
+    check("viewers only: Open Projector = OBS's plain output, and touches nothing else",
+          [t for t, _d in projector_calls] == ["OpenVideoMixProjector"]
+          and projector_calls[0][1]["videoMixType"] == "OBS_WEBSOCKET_VIDEO_MIX_TYPE_PROGRAM")
     check("viewers only: OBS transform = the planned spot, top-left aligned, on top",
-          tf["positionX"] == r1["x"] and tf["scaleX"] == r1["scale"] == round(p["scale"], 4) and tf["alignment"] == 5
-          and any(t == "SetSceneItemIndex" and d["sceneItemIndex"] == 2 for t, d in fake.calls))
+          tf["sceneItemTransform"]["positionX"] == r1["x"] and tf["sceneItemTransform"]["alignment"] == 5
+          and abs(r1["scale"] - round(p["scale"], 4)) < 1e-9)
     check("viewers only: update re-places it after a settings change, visibility unchanged",
           r4["visible"] is True and tf2["positionX"] == 20 and tf2["positionY"] == 20)
-    check("viewers only: a source that's missing from the current scene is added to it",
-          r5["visible"] is True and any(t == "CreateSceneItem" for t, _d in fake.calls))
-    check("viewers only: the share window is its own action; hide hides", fake.projectors == 2
-          and r6["visible"] is False)
+    check("viewers only: after switching OBS scenes, the share scene follows the new live scene",
+          r5["program"] == "Chat" and fake.srcs(vsh.SHARE_SCENE)[0] == "Chat"
+          and "Game" not in fake.srcs(vsh.SHARE_SCENE) and r6["visible"] is False)
+    check("viewers only: refuses when the share scene itself is live (it would land in clips)", live_err)
     try:
         vsh.share("sideways", cfg, fake)
         bad = False

@@ -219,21 +219,25 @@ class PrivacyScreenSection(QWidget):
         # -- viewers only --------------------------------------------------------------
         lay.addWidget(section_title("Show it to viewers only"))
         lay.addWidget(dim_label(
-            "A screen share captures exactly what your monitor shows, so an overlay that only viewers see "
-            "has to live in OBS instead. Show to viewers puts the on-screen overlay into OBS's current "
-            "scene, with the settings above (what to show, where, size, opacity), mapped onto OBS's "
-            "canvas: your stream and recordings get it, your monitor doesn't. For Discord or a call, Open "
-            "share window opens OBS's output in its own window: share that window instead of your screen "
-            "(keep it on another virtual desktop). Needs OBS running with a screen capture source and its "
-            "WebSocket server on (connection settings above)."))
+            "A screen share captures exactly what your monitor shows, so an overlay only viewers see lives "
+            "in OBS instead -- in a scene of its own, \"Puppetry: Share\": your live OBS scene with the "
+            "on-screen overlay on top, using the settings above (what to show, where, size, opacity). "
+            "OBS's clips, recordings and stream use your live scene, so they never get the overlay. Open "
+            "share window opens that scene as a window: share it in Discord or a call instead of your "
+            "screen (keep it on another virtual desktop). Open Projector opens OBS's plain output, "
+            "without the overlay. Needs OBS running with its WebSocket server on (connection settings "
+            "above)."))
         row = QHBoxLayout()
         self.share_btn = CustomButton("Show to viewers")
         self.share_btn.clicked.connect(lambda: self._share("toggle"))
         self.share_window_btn = CustomButton("Open share window")
         self.share_window_btn.clicked.connect(lambda: self._share("window"))
+        self.projector_btn = CustomButton("Open Projector")
+        self.projector_btn.clicked.connect(lambda: self._share("projector"))
         self.share_status = dim_label("")
         row.addWidget(self.share_btn)
         row.addWidget(self.share_window_btn)
+        row.addWidget(self.projector_btn)
         row.addWidget(self.share_status, 1)
         lay.addLayout(row)
         self._share_visible = False
@@ -399,7 +403,7 @@ class PrivacyScreenSection(QWidget):
     def _share(self, action: str, quiet: bool = False) -> None:
         self.section.flush()                         # OBS gets the current settings
         if not quiet:
-            for b in (self.share_btn, self.share_window_btn):
+            for b in (self.share_btn, self.share_window_btn, self.projector_btn):
                 b.setEnabled(False)
             self.share_status.setText("Asking OBS...")
 
@@ -414,20 +418,23 @@ class PrivacyScreenSection(QWidget):
         threading.Thread(target=work, daemon=True).start()
 
     def _share_done(self, res: dict) -> None:
-        for b in (self.share_btn, self.share_window_btn):
+        for b in (self.share_btn, self.share_window_btn, self.projector_btn):
             b.setEnabled(True)
         if res.get("error"):
             if not res.get("_quiet"):
                 self.share_status.setText(res["error"])
             return
-        if res.get("_action") == "window":
-            self.share_status.setText("Opened OBS's output as a window: share that window.")
+        if res.get("_action") == "projector":
+            self.share_status.setText("Opened OBS's output (no overlay) as a window.")
             return
         self._share_visible = bool(res.get("visible"))
         self.share_btn.setText("Hide from viewers" if self._share_visible else "Show to viewers")
         if not res.get("_quiet"):
-            self.share_status.setText(f"Viewers see it (OBS scene \"{res.get('scene')}\")." if self._share_visible
-                                      else "Hidden from viewers.")
+            if res.get("_action") == "window":
+                self.share_status.setText(f"Opened \"{res.get('scene')}\" as a window: share that window.")
+            else:
+                self.share_status.setText(f"Viewers see it (in \"{res.get('scene')}\", not in clips)."
+                                          if self._share_visible else "Hidden from viewers.")
         # a page that had to be switched on: the section's switches follow overlay.json
         fresh = oc.load()
         for page, toggle in (("full", self.section.full_toggle), ("simple", self.section.simple_toggle)):
