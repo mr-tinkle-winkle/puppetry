@@ -10,11 +10,23 @@ const P = {
   wheelDir: 0, wheelT: -1e9, wheelSrc: "r",
   burst: [], burstSrc: "r", lastMoveT: -1e9,
   axes: {}, outAxes: {}, padLabels: {},
+  padConnected: false, padLast: null, padButtons: new Set(),   // auto-switch (kbm_layout.visible_group)
   motion: [], clicks: [], wheels: [], views: {},
   offset: 0, dirty: true, connected: false,
   onconfig: null,
 };
-const MOVE_GAP = 0.15, HISTORY_S = 6.0;
+const MOVE_GAP = 0.15, HISTORY_S = 6.0, PAD_USE_THRESHOLD = 0.25;
+
+// Auto-switch (kbm_layout.visible_group's twin): "pad" / "kbm" / null (draw everything).
+function itemGroup(it) { return it.et === "controller" ? "pad" : "kbm"; }
+function visibleGroup(layout, st, now) {
+  if (!st.auto_switch || !layout) return null;
+  const groups = new Set(layout.items.filter((i) => i.et).map(itemGroup));
+  if (!(groups.has("pad") && groups.has("kbm"))) return null;
+  const windowS = (+(st.auto_switch_minutes ?? 2.0)) * 60;
+  const used = P.padConnected && P.padLast != null && now - P.padLast <= windowS;
+  return used ? "pad" : "kbm";
+}
 const MOUSE_BTNS = ["BTN_LEFT", "BTN_RIGHT", "BTN_MIDDLE", "BTN_SIDE", "BTN_EXTRA"];
 
 function nowS() { return performance.now() / 1000; }
@@ -27,11 +39,16 @@ function applyEvent(ev) {
     if (ev.e === "kd" && MOUSE_BTNS.includes(ev.k) && !(ev.k in d)) {
       P.clicks.push([t, ev.k, ev.s]); if (P.clicks.length > 64) P.clicks.splice(0, 32);
     }
+    if (ev.e === "kd" && ev.s === "r" && P.padButtons.has(ev.k)) { P.padConnected = true; P.padLast = t; }
     if (ev.e === "kd") { if (!(ev.k in d)) d[ev.k] = t; delete P.released[ev.k]; }
     else if (ev.k in d) { delete d[ev.k]; if (ev.s === "r") P.released[ev.k] = t; }
   } else if (ev.e === "ax") {
     const d = ev.s === "r" ? P.axes : P.outAxes;
     if (ev.v) d[ev.a] = ev.v; else delete d[ev.a];
+    if (ev.s === "r" && Math.abs(ev.v) >= PAD_USE_THRESHOLD && !ev.a.endsWith("_T")) { P.padConnected = true; P.padLast = t; }
+  } else if (ev.e === "pad") {
+    P.padConnected = !!ev.v;
+    if (!ev.v) P.padLast = null;
   } else if (ev.e === "mv") {
     if (!P.burst.length || t - P.lastMoveT > MOVE_GAP || ev.s !== P.burstSrc) { P.burst = [[t, 0, 0]]; P.burstSrc = ev.s; }
     const last = P.burst[P.burst.length - 1];
@@ -73,6 +90,8 @@ function applySnapshot(s) {
   P.motion = (s.motion || []).map(([rel, x, y, src]) => [n + rel, x, y, src]);
   P.clicks = (s.clicks || []).map(([rel, b, src]) => [n + rel, b, src]);
   P.wheels = (s.wheels || []).map(([rel, d, src]) => [n + rel, d, src]);
+  P.padConnected = !!s.pad;
+  P.padLast = s.pad_age == null ? null : n - s.pad_age;
   P.dirty = true;
 }
 
@@ -99,6 +118,7 @@ function connect() {
     const c = JSON.parse(m.data);
     P.style = c.style || {}; P.layout = c.layout || null; P.labels = c.labels || {};
     P.padLabels = c.pad_labels || {};
+    P.padButtons = new Set(c.pad_buttons || []);
     loadFont(P.style);
     P.dirty = true;
     if (P.onconfig) P.onconfig();

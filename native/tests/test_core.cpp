@@ -13,6 +13,7 @@
 #include <cmath>
 #include <linux/input.h>
 #include "dispatch.hpp"
+#include "steam_hid.hpp"
 #include "evdev_device.hpp"
 #include "keycodes.hpp"
 #include "macro.hpp"
@@ -316,6 +317,43 @@ int main() {
         for (int c : L) in_old_range += (c >= KEY_A && c <= KEY_Z);
         CHECK(in_old_range == 10);
     }
+    // Steam Controller (2026) hidraw reports, laid out as SDL's TritonMTUNoQuat_t
+    {
+        auto put16 = [](uint8_t* p, int v) { p[0] = (uint8_t)(v & 0xff); p[1] = (uint8_t)((v >> 8) & 0xff); };
+        uint8_t r[46] = {0};
+        r[0] = 0x42;
+        uint32_t b = 0x1 | 0x20000 | 0x2000000 | 0x4000;      // A, L4, finger on the left pad, View/Menu bit
+        r[2] = b & 0xff; r[3] = (b >> 8) & 0xff; r[4] = (b >> 16) & 0xff; r[5] = (b >> 24) & 0xff;
+        put16(r + 6, 32767);       // LT fully pulled
+        put16(r + 10, 32767);      // left stick right
+        put16(r + 12, 16384);      // ... and half up (report: up positive)
+        put16(r + 18, 16384);      // left pad x
+        put16(r + 20, -16384);     // left pad y (down in report terms)
+        TritonState s;
+        CHECK(parse_triton_report(r, sizeof(r), s));
+        CHECK(s.lt == 1.0 && s.lx == 1.0 && std::abs(s.ly + 0.5) < 0.001);
+        CHECK(s.lpt && !s.rpt && std::abs(s.lpx - 0.5) < 0.001 && std::abs(s.lpy - 0.5) < 0.001 && s.rpx == 0.0);
+        int pressed = 0;
+        for (const auto& tb : triton_buttons()) {
+            if (s.buttons & tb.bit) {
+                ++pressed;
+                CHECK(tb.code == BTN_SOUTH || tb.code == BTN_TRIGGER_HAPPY1 || tb.code == BTN_SELECT);
+            }
+        }
+        CHECK(pressed == 3);       // the pad touch bit isn't a button
+        // the timestamped variant puts the pads 2 bytes later
+        uint8_t t[46] = {0};
+        t[0] = 0x47;
+        t[5] = 0x02;               // left pad touch (0x2000000 -> byte 5 bit 1)
+        put16(t + 20, -32768);
+        CHECK(parse_triton_report(t, sizeof(t), s) && s.lpt && s.lpx == -1.0);
+        CHECK(!parse_triton_report(t, 20, s));                    // too short
+        uint8_t other[46] = {0x43};
+        CHECK(!parse_triton_report(other, sizeof(other), s));     // battery report, not state
+        CHECK(is_triton_device(0x28de, 0x1302, -1) && is_triton_device(0x28de, 0x1304, 3));
+        CHECK(!is_triton_device(0x28de, 0x1304, 0) && !is_triton_device(0x28de, 0x1205, 0));
+        CHECK(!is_triton_device(0x045e, 0x1302, 2));
+    }
     // controller axis normalization (sticks, triggers, d-pad)
     CHECK(normalize_abs_range(-32768, 32767, -32768) == -1.0);
     CHECK(normalize_abs_range(-32768, 32767, 32767) == 1.0);
@@ -323,6 +361,14 @@ int main() {
     CHECK(normalize_abs_range(0, 255, 255) == 1.0 && normalize_abs_range(0, 255, 0) == 0.0);
     CHECK(normalize_abs_range(0, 1023, 512) > 0.49 && normalize_abs_range(0, 1023, 512) < 0.51);
     CHECK(normalize_abs_range(-1, 1, -1) == -1.0 && normalize_abs_range(-1, 1, 1) == 1.0);
+    // by axis: an unsigned stick rests in the middle (was 0.5: the off-center knob)
+    CHECK(std::abs(normalize_abs_axis(ABS_X, 0, 255, 128)) < 0.01);
+    CHECK(normalize_abs_axis(ABS_RY, 0, 255, 0) == -1.0 && normalize_abs_axis(ABS_RY, 0, 255, 255) == 1.0);
+    CHECK(normalize_abs_axis(ABS_X, -32768, 32767, -32768) == -1.0);
+    // ... and a signed-range trigger rests at 0, not -1
+    CHECK(normalize_abs_axis(ABS_Z, -32768, 32767, -32768) == 0.0 && normalize_abs_axis(ABS_RZ, -32768, 32767, 32767) == 1.0);
+    CHECK(normalize_abs_axis(ABS_Z, 0, 1023, 1023) == 1.0);
+    CHECK(normalize_abs_axis(ABS_HAT0X, -1, 1, -1) == -1.0);
     CHECK(is_gamepad_button(BTN_SOUTH) && is_gamepad_button(BTN_THUMBR) && is_gamepad_button(BTN_DPAD_UP));
     CHECK(!is_gamepad_button(BTN_LEFT) && !is_gamepad_button(KEY_A));
     CHECK(is_our_virtual_device_name("macro-daemon-virtual-gamepad"));

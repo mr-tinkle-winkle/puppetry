@@ -6,6 +6,8 @@ same thing from the same layout JSON and style keys.
 """
 from __future__ import annotations
 
+import math
+
 from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import QColor, QFont, QFontMetricsF, QPainter, QPainterPath, QPen, QPolygonF
 from PySide6.QtWidgets import QSizePolicy, QWidget
@@ -150,7 +152,8 @@ def paint_arrow(p: QPainter, box: QRectF, state: "kl.KbmState", style: dict, now
 
 
 def paint_kbm(p: QPainter, layout: dict, style: dict, state: "kl.KbmState", now: float, *, unit=None,
-              origin=(0.0, 0.0), names: dict | None = None, highlight: set | None = None) -> None:
+              origin=(0.0, 0.0), names: dict | None = None, highlight: set | None = None,
+              all_groups: bool = False) -> None:
     """Draw the picture with its top-left at `origin` (padding included).
     `names` (Dictionary mode): {KEY_name: (big text, small text)} replaces labels.
     `highlight`: names drawn in the pressed color (search matches)."""
@@ -204,6 +207,8 @@ def paint_kbm(p: QPainter, layout: dict, style: dict, state: "kl.KbmState", now:
             return kl.format_hold(now - state.held[name])
         if show_timers and show_macro and name in state.out_held and now - state.out_held[name] >= timer_delay:
             return kl.format_hold(now - state.out_held[name])
+        if item.get("fixed_label"):              # the element's own label choice (kbm_layout.apply_labels)
+            return item["label"]
         if label_mode == "none":
             return ""
         if label_mode == "name" and name:
@@ -263,8 +268,26 @@ def paint_kbm(p: QPainter, layout: dict, style: dict, state: "kl.KbmState", now:
                 p.fillRect(level, src_color(src))
                 p.restore()
             full = v > 0.5
-            _draw_text_fit(p, fonts, r, label_for(it, pressed) if name in state.held
+            _draw_text_fit(p, fonts, r, label_for(it, pressed) if (name in state.held or it.get("fixed_label"))
                            else pad_labels.get(name, ""), fpx, ptext_c if full else text_c)
+            return
+        if kind == "trackpad":
+            base = QColor(fill if pressed else key_c).darker(100 if pressed else 125)
+            base.setAlpha(key_c.alpha())
+            rr = min(r.width(), r.height()) * 0.22
+            p.setPen(QPen(edge, ow) if ow > 0 else Qt.NoPen)
+            p.setBrush(base)
+            p.drawRoundedRect(r, rr, rr)
+            if it.get("pt"):
+                touched, tsrc = axis(it["pt"])
+                if touched > 0.5:                    # a finger on it: where
+                    vx, _s = axis(it["px"])
+                    vy, _s = axis(it["py"])
+                    d = min(r.width(), r.height()) * 0.13
+                    c = QPointF(r.center().x() + vx * (r.width() / 2 - d), r.center().y() + vy * (r.height() / 2 - d))
+                    p.setPen(Qt.NoPen)
+                    p.setBrush(src_color(tsrc))
+                    p.drawEllipse(c, d, d)
             return
         if kind == "stick":
             base = QColor(key_c).darker(120)
@@ -274,6 +297,8 @@ def paint_kbm(p: QPainter, layout: dict, style: dict, state: "kl.KbmState", now:
             p.drawEllipse(r)
             vx, sx = axis(it["ax"])
             vy, sy = axis(it["ay"])
+            if math.hypot(vx, vy) < kl.STICK_DEADZONE:       # resting drift stays centered
+                vx = vy = 0.0
             k = r.width() * 0.62
             travel = (r.width() - k) / 2
             knob = QRectF(r.center().x() - k / 2 + vx * travel, r.center().y() - k / 2 + vy * travel, k, k)
@@ -301,7 +326,7 @@ def paint_kbm(p: QPainter, layout: dict, style: dict, state: "kl.KbmState", now:
             if not pressed and ((want < 0 and hv < -0.5) or (want > 0 and hv > 0.5)):
                 fill, tcol, pressed = src_color(hsrc), ptext_c, True
             shape(r, r.width() * 0.18, fill, pressed)
-            _draw_text_fit(p, fonts, r, label_for(it, pressed) if name in state.held
+            _draw_text_fit(p, fonts, r, label_for(it, pressed) if (name in state.held or it.get("fixed_label"))
                            else pad_labels.get(name, ""), fpx * 0.9, tcol)
             return
         if kind == "pad_btn":
@@ -321,7 +346,10 @@ def paint_kbm(p: QPainter, layout: dict, style: dict, state: "kl.KbmState", now:
         shape(r, min(r.width(), r.height()) * 0.45, fill, pressed)
         _draw_text_fit(p, fonts, r, label_for(it, pressed), fpx * (0.8 if kind == "small" else 1.0), tcol)
 
+    group = None if all_groups else kl.visible_group(layout, state, style, now)   # auto-switch
     for it in layout["items"]:
+        if group is not None and kl.item_group(it) != group:
+            continue
         kind = it["kind"]
         fs = float(it.get("fs", 1.0))              # the item's element scale (Edit mode)
         fpx, gap, rad = base_fpx * fs, base_gap * fs, base_rad * fs
@@ -340,7 +368,7 @@ def paint_kbm(p: QPainter, layout: dict, style: dict, state: "kl.KbmState", now:
             p.setBrush(key_c)
             p.drawRoundedRect(r, r.width() * 0.42, r.width() * 0.42)
             continue
-        if kind in ("pad_body", "trigger", "stick", "dpad", "pad_btn", "shoulder", "small"):
+        if kind in ("pad_body", "trigger", "stick", "dpad", "pad_btn", "shoulder", "small", "trackpad"):
             controller_item(it, r)
             continue
         if kind == "key":
@@ -394,6 +422,9 @@ def needs_animation(state: "kl.KbmState", style: dict, now: float) -> bool:
     fade = style.get("release_fade_ms", 0)
     if fade and any((now - t) * 1000 < fade for t in state.released.values()):
         return True
+    if style.get("auto_switch") and state.pad_last is not None and \
+            now - state.pad_last <= float(style.get("auto_switch_minutes", 2.0)) * 60.0 + 1.0:
+        return True                          # repaint so the switch back happens on time
     if (now - state.wheel_t) * 1000 <= style.get("wheel_flash_ms", 250) + 50:
         return True
     return kl.motion_animating(state, style, now)

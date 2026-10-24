@@ -27,22 +27,30 @@ oldest first.
 {"t": 1790748508.512000, "e": "wh", "n": 1, "h": 0, "s": "r"}
 {"t": 1790748508.600102, "e": "ku", "k": "KEY_LEFTCTRL", "s": "r"}
 {"t": 1790748508.700000, "e": "ax", "a": "LX", "v": -0.53, "s": "r"}
+{"t": 1790748509.000000, "e": "pad", "v": 1}
 ```
 
 - `t`: Unix seconds (float, microsecond precision). For real input this is
   the kernel's own evdev timestamp (CLOCK_REALTIME), not the time Puppetry
   read the event.
 - `e`: `kd` key/button down, `ku` up, `mv` relative mouse motion, `wh` wheel,
-  `ax` game-controller axis.
+  `ax` game-controller axis, `pad` a controller connected (`"v": 1`) or the
+  last one gone (`"v": 0`; no `s` field). The header's `pad_at_start` says
+  whether one was connected at `start`. Renders use it for Puppetry's
+  auto-switch between the keyboard & mouse and the controller.
 - `k`: `KEY_*` / `BTN_*` name. Mouse buttons are `BTN_LEFT`, `BTN_RIGHT`,
   `BTN_MIDDLE`, `BTN_SIDE` and `BTN_EXTRA`. Controller buttons are named by
   position: `BTN_SOUTH` (A / Cross), `BTN_EAST`, `BTN_WEST`, `BTN_NORTH`,
   `BTN_TL`/`BTN_TR` (bumpers), `BTN_TL2`/`BTN_TR2`, `BTN_SELECT`,
   `BTN_START`, `BTN_MODE`, `BTN_THUMBL`/`BTN_THUMBR` and
-  `BTN_DPAD_UP/DOWN/LEFT/RIGHT`. Unknown codes appear as `CODE_<n>`.
+  `BTN_DPAD_UP/DOWN/LEFT/RIGHT`; the Steam Controller adds
+  `BTN_TRIGGER_HAPPY1`-`4` (back grips L4 R4 L5 R5), `BTN_TRIGGER_HAPPY5`
+  (quick access) and `BTN_TRIGGER_HAPPY6`/`7` (trackpad clicks). Unknown
+  codes appear as `CODE_<n>`.
 - `a`, `v` (controller axes): `LX LY RX RY` are sticks, -1..1, with right
   and down positive. `LT RT` are triggers, 0..1. `DPAD_X DPAD_Y` are -1, 0
-  or 1. Thinned to about 125 Hz per axis, always ending on the latest value.
+  or 1. Steam Controller trackpads: `LPAD_X LPAD_Y RPAD_X RPAD_Y` (-1..1)
+  and `LPAD_T RPAD_T` (1 while a finger is on the pad). Thinned to about 125 Hz per axis, always ending on the latest value.
 - `dx`, `dy`: raw device counts (before pointer acceleration), summed into
   roughly 8 ms steps.
 - `n`, `h`: vertical (+ = up) and horizontal wheel notches.
@@ -123,8 +131,14 @@ Options:
     piece); `el:<id>` of the mouse gives the mouse alone.
     - Keyboards come as full size, 80% (TKL), 60% or the left half; mice
       as classic, gaming, minimal or buttons only (Puppetry's choice).
-    - The controller has sticks that move, triggers that fill, bumpers,
-      d-pad, and face buttons labelled Xbox / PlayStation / Nintendo.
+    - Controllers come in four looks (Xbox, Steam Controller, PS3, PS4) with
+      sticks that move, triggers that fill, bumpers, d-pad, and face-button
+      labels chosen per element (Xbox, PlayStation symbols or words,
+      Steam, Nintendo, positions, button names, or none). The Steam look
+      has trackpads that show the finger.
+    - With Puppetry's auto-switch on, `full` and element pieces show either
+      the keyboard & mouse or the controller at each moment (controller
+      while one is connected and was used in the last few minutes).
     - Movement views are square: *comet* (a trail behind the pointer at a
       fixed scale, so its length shows speed; it follows the head or tail), *mousepad* (the pointer moving around a pad),
       *joystick* (direction and speed). Clicks, scrolls and held buttons

@@ -79,6 +79,7 @@ set(CORE_SOURCES
     src/dispatch.cpp
     src/event_stream.cpp
     src/privacy.cpp
+    src/steam_hid.cpp
     src/evdev_device.cpp
     src/macro.cpp
     src/native_vm.cpp

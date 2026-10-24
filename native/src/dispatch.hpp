@@ -52,4 +52,15 @@ bool apply_act_as(Runtime& rt, int code, int value);
 void watch_device(Runtime& rt, MacroRegistry& registry, std::vector<std::unique_ptr<Macro>>& macros,
                    InputDevice& dev, const std::string& kind, int abort_code);
 
+// Controller input that doesn't come from an evdev node (the Steam Controller read
+// over hidraw): the same handling an evdev controller's events get -- streamed,
+// actAs, combos / waitForPress / getButtonsHeld for keys; rt.axes + the stream
+// (visible changes only) for axes. Never forwarded anywhere.
+void feed_controller_key(Runtime& rt, MacroRegistry& registry, std::vector<std::unique_ptr<Macro>>& macros,
+                         int abort_code, int code, int value, long long time_us);
+void feed_controller_axis(Runtime& rt, int code, double value, long long time_us);
+// A controller appeared (+1) or went away (-1): the event stream tells clients
+// when the count goes 0 <-> 1 (`s <t> c 1|0 0`, for the overlay's auto-switch).
+void controller_presence(Runtime& rt, int delta);
+
 } // namespace puppetry

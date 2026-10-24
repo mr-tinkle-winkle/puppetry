@@ -25,6 +25,8 @@ function contrast(hex) {
   return light > 150 ? "#111111" : "#f2f2f2";
 }
 
+const STICK_DEADZONE = 0.06;   // kbm_layout.STICK_DEADZONE (drawing only)
+
 function drawKbm(ctx, layout, st, now, unit, ox, oy) {
   const u = unit || st.unit || 48, pad = st.padding || 0;
   ox += pad; oy += pad;
@@ -54,6 +56,7 @@ function drawKbm(ctx, layout, st, now, unit, ox, oy) {
     const n = it.name;
     if (st.show_timers !== false && n in P.held && now - P.held[n] >= delay) return formatHold(now - P.held[n]);
     if (st.show_timers !== false && showMacro && n in P.out && now - P.out[n] >= delay) return formatHold(now - P.out[n]);
+    if (it.fixed_label) return it.label;   // the element's own label choice (kbm_layout.apply_labels)
     if (st.label_mode === "none") return "";
     if (st.label_mode === "name" && n) return n;
     return (n && n.startsWith("BTN_") && P.padLabels[n]) || it.label;
@@ -100,13 +103,27 @@ function drawKbm(ctx, layout, st, now, unit, ox, oy) {
         ctx.save(); roundRect(ctx, x, y, w, h, rr); ctx.clip();
         ctx.fillStyle = srcColor(src); ctx.fillRect(x, y + h * (1 - v), w, h * v); ctx.restore();
       }
-      fitText(ctx, n in P.held ? labelFor(it) : padLabel(n), x, y, w, h, fpx, st.font_family, st.bold,
+      fitText(ctx, n in P.held || it.fixed_label ? labelFor(it) : padLabel(n), x, y, w, h, fpx, st.font_family, st.bold,
               v > 0.5 ? cssColor(st.pressed_text_color) : cssColor(st.text_color));
+      return;
+    }
+    if (it.kind === "trackpad") {
+      const rr = Math.min(w, h) * 0.22;
+      roundRect(ctx, x, y, w, h, rr); ctx.fillStyle = pressed ? fill : darker(st.key_color, 1.25); ctx.fill(); stroke();
+      if (it.pt) {
+        const [touched, tsrc] = axisValue(it.pt, st);
+        if (touched > 0.5) {
+          const [vx] = axisValue(it.px, st), [vy] = axisValue(it.py, st), d = Math.min(w, h) * 0.13;
+          ellipse(x + w / 2 + vx * (w / 2 - d) - d, y + h / 2 + vy * (h / 2 - d) - d, 2 * d, 2 * d);
+          ctx.fillStyle = srcColor(tsrc); ctx.fill();
+        }
+      }
       return;
     }
     if (it.kind === "stick") {
       ellipse(x, y, w, h); ctx.fillStyle = darker(st.key_color, 1.2); ctx.fill(); stroke();
-      const [vx, sx] = axisValue(it.ax, st), [vy, sy] = axisValue(it.ay, st);
+      let [vx, sx] = axisValue(it.ax, st), [vy, sy] = axisValue(it.ay, st);
+      if (Math.hypot(vx, vy) < STICK_DEADZONE) { vx = 0; vy = 0; }   // resting drift stays centered
       const k = w * 0.62, travel = (w - k) / 2;
       const kx = x + w / 2 - k / 2 + vx * travel, ky = y + h / 2 - k / 2 + vy * travel;
       const moved = Math.abs(vx) > 0.12 || Math.abs(vy) > 0.12;
@@ -126,7 +143,7 @@ function drawKbm(ctx, layout, st, now, unit, ox, oy) {
       }
       if (pressed) glowAt((g) => roundRect(ctx, x - g, y - g, w + 2 * g, h + 2 * g, w * 0.18 + g), fill);
       roundRect(ctx, x, y, w, h, w * 0.18); ctx.fillStyle = fill; ctx.fill(); stroke();
-      fitText(ctx, n in P.held ? labelFor(it) : padLabel(n), x, y, w, h, fpx * 0.9, st.font_family, st.bold, tcol);
+      fitText(ctx, n in P.held || it.fixed_label ? labelFor(it) : padLabel(n), x, y, w, h, fpx * 0.9, st.font_family, st.bold, tcol);
       return;
     }
     if (it.kind === "pad_btn") {
@@ -140,9 +157,11 @@ function drawKbm(ctx, layout, st, now, unit, ox, oy) {
     roundRect(ctx, x, y, w, h, rr); ctx.fillStyle = fill; ctx.fill(); stroke();
     fitText(ctx, labelFor(it), x, y, w, h, fpx * (it.kind === "small" ? 0.8 : 1), st.font_family, st.bold, tcol);
   }
-  const PAD_KINDS = new Set(["pad_body", "trigger", "stick", "dpad", "pad_btn", "shoulder", "small"]);
+  const PAD_KINDS = new Set(["pad_body", "trigger", "stick", "dpad", "pad_btn", "shoulder", "small", "trackpad"]);
 
+  const group = visibleGroup(layout, st, now);       // auto-switch
   for (const it of layout.items) {
+    if (group !== null && itemGroup(it) !== group) continue;
     const fs = it.fs ?? 1;                 // the item's element scale (Edit mode)
     gap = baseGap * fs; rad = baseRad * fs; fpx = baseFpx * fs;
     let x = ox + it.x * u, y = oy + it.y * u, w = it.w * u, h = it.h * u;
@@ -179,5 +198,6 @@ function kbmAnimating(st, now) {
   const fade = st.release_fade_ms || 0;
   if (fade && Object.values(P.released).some((t) => (now - t) * 1000 < fade)) return true;
   if ((now - P.wheelT) * 1000 <= (st.wheel_flash_ms ?? 250) + 50) return true;
+  if (st.auto_switch && P.padLast != null && now - P.padLast <= (+(st.auto_switch_minutes ?? 2.0)) * 60 + 1) return true;
   return arrowAnimating(st, now);
 }

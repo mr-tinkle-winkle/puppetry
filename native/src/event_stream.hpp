@@ -16,6 +16,8 @@
 //           w = wheel        a = vertical notches, b = horizontal notches
 //           a = controller axis  a = ABS_* code, b = value x 10000, normalized
 //                            (-10000..10000 sticks and d-pad, 0..10000 triggers)
+//   s = system: type c = controller presence, a = 1 one is connected / 0 none
+//       (sent on change, and in the hello while one is). Not held back while paused.
 //   s = system: type p = paused, a = 1 paused / 0 resumed (b = 0). While
 //       paused (an ignored app is focused or open -- privacy_watch), NO
 //       input lines are sent at all; a client should release everything it
@@ -52,6 +54,7 @@ public:
     // Ignored apps: while paused nothing is published (see the wire format).
     void set_paused(bool paused);
     bool paused() const { return paused_.load(std::memory_order_relaxed); }
+    void set_controller(bool present);
 
 private:
     void accept_loop();
@@ -64,6 +67,7 @@ private:
     std::atomic<bool> running_{false};
     std::atomic<int> clients_{0};
     std::atomic<bool> paused_{false};
+    std::atomic<bool> controller_{false};
     std::mutex mutex_;
     std::vector<int> fds_;
 };

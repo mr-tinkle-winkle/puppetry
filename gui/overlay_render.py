@@ -71,6 +71,8 @@ class Timeline:
         for src in ("r", "m"):
             for a, v in ((header.get("axes_at_start") or {}).get(src) or {}).items():
                 self.state.axis(a, v, start, src)
+        if header.get("pad_at_start"):
+            self.state.pad_connected = True
 
     def advance(self, t: float) -> None:
         ev, st = self.events, self.state
@@ -86,6 +88,8 @@ class Timeline:
                 st.wheel(e["n"], et, src)
             elif e["e"] == "ax":
                 st.axis(e["a"], e["v"], et, src)
+            elif e["e"] == "pad":
+                st.set_pad(bool(e["v"]), et)
             self.i += 1
 
 

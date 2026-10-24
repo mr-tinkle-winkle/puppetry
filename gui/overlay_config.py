@@ -57,11 +57,7 @@ STYLE_SCHEMA = [
         ("font_family", "Font", "font", "sans-serif", None),
         ("font_scale", "Text size (% of a key)", "int", 32, (10, 80)),
         ("bold", "Bold", "bool", False, None),
-        ("label_mode", "Key labels", "choice", "label",
-         [("label", "Short labels (A, Shift, F1)"), ("name", "Key names (KEY_A)"), ("none", "No labels")]),
-        ("controller_labels", "Controller button labels", "choice", "xbox",
-         [("xbox", "Xbox (A B X Y)"), ("playstation", "PlayStation (\u2715 \u25cb \u25a1 \u25b3)"),
-          ("nintendo", "Nintendo (B A Y X)")]),
+        # labels are per element now (Edit layout: keyboard / mouse / controller "Labels")
     ]),
     ("Behavior", [
         ("show_timers", "Show how long each key is held (replaces its label)", "bool", True, None),
@@ -69,6 +65,10 @@ STYLE_SCHEMA = [
         ("release_fade_ms", "Fade out after release (ms)", "int", 120, (0, 3000)),
         ("show_macro_output", "Show what macros press and move (in the output color)", "bool", True, None),
         ("wheel_flash_ms", "Wheel flash (ms)", "int", 250, (0, 3000)),
+        ("auto_switch", "Switch automatically: show the controller while one is plugged in and in use, "
+                        "else the keyboard and mouse", "bool", False, None),
+        ("auto_switch_minutes", "... back to keyboard and mouse after the controller is unused for (minutes)",
+         "float", 2.0, (0.1, 240.0)),
     ]),
     ("Mouse movement (Comet, Mousepad, Joystick)", MOTION_OPTIONS),
 ]
@@ -192,7 +192,7 @@ def status_file() -> Path:
     return runtime_dir() / "overlay_status.json"
 
 
-DEFAULTS_REV = 2     # bump when a default changes in a way saved configs should pick up
+DEFAULTS_REV = 3     # bump when a default changes in a way saved configs should pick up
 
 
 def merged(data: dict) -> dict:
@@ -215,6 +215,26 @@ def merged(data: dict) -> dict:
         ms = data.get("movement_style") or data.get("mouse_style")
         if isinstance(ms, dict) and ms.get("motion") == "comet":
             ms["motion"] = "mousepad"
+    if rev < 3:     # Session 29: labels moved from the style to each element
+        st = data.get("style") if isinstance(data.get("style"), dict) else {}
+        mode = st.pop("label_mode", "label")
+        pad = st.pop("controller_labels", "xbox")
+        scene = data.get("scene") if isinstance(data.get("scene"), dict) else {}
+        for el in scene.get("elements", []):
+            if not isinstance(el, dict) or "labels" in el:
+                continue
+            if el.get("type") == "keyboard" and mode != "label":
+                el["labels"] = mode
+            elif el.get("type") == "mouse" and mode != "label":
+                el["labels"] = mode
+            elif el.get("type") == "controller":
+                if mode in ("none", "name"):
+                    el["labels"] = mode
+                elif pad == "playstation":
+                    el.setdefault("look", "ps4")
+                    el["labels"] = "ps4"
+                elif pad == "nintendo":
+                    el["labels"] = "nintendo"
     if "mouse_style" in data and "movement_style" not in data:     # renamed (Session 18)
         data["movement_style"] = data.pop("mouse_style")
     data.pop("mouse_style", None)

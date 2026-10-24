@@ -3,6 +3,7 @@
 // the `puppetry` CLI/GUI (PySide6, see gui/) talks to it purely over
 // the control socket and never links against this binary.
 #include <cerrno>
+#include <fcntl.h>
 #include <cstdio>
 #include <cstring>
 #include <iostream>
@@ -27,6 +28,7 @@
 #include <unordered_map>
 #include "pointer_accel.hpp"
 #include "privacy.hpp"
+#include "steam_hid.hpp"
 #include "python_embed.hpp"
 #include "runtime.hpp"
 #include "simplified_names.hpp"
@@ -163,6 +165,17 @@ int main(int argc, char** argv) {
         }
         for (const auto& [path, why] : unreadable_input_devices())
             out.push_back({{"path", path}, {"unreadable", why}});
+        for (const auto& h : list_hidraw()) {          // raw HID: how Steam Controllers are read
+            if (h.vendor != 0x28de) continue;
+            char ids[16];
+            std::snprintf(ids, sizeof(ids), "%04x:%04x", h.vendor, h.product);
+            int fd = ::open(h.path.c_str(), O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+            std::string access = fd >= 0 ? "ok" : strerror(errno);
+            if (fd >= 0) ::close(fd);
+            out.push_back({{"path", h.path}, {"name", h.name}, {"id", ids}, {"interface", h.interface_number},
+                           {"steam_controller", is_triton_device(h.vendor, h.product, h.interface_number)},
+                           {"readable", access}});
+        }
         std::printf("%s\n", out.dump(2).c_str());
         return 0;
     }
@@ -502,7 +515,9 @@ int main(int argc, char** argv) {
                     }
                     std::printf("Controller: %s (%s)\n", c.path.c_str(), c.name.c_str());
                     announced_missing = false;
+                    controller_presence(rt, +1);
                     watch_device(rt, registry, macros, dev, "controller", abort_code);
+                    controller_presence(rt, -1);
                     rt.release_path(c.path);
                     // unplugged: release its held buttons and axes, then look again
                     {
@@ -560,7 +575,9 @@ int main(int argc, char** argv) {
                             InputDevice dev;
                             if (dev.open(path)) {
                                 std::printf("Also watching: %s (%s)\n", path.c_str(), name.c_str());
+                                if (pad) controller_presence(rt, +1);   // e.g. Steam's virtual gamepad in a game
                                 watch_device(rt, registry, macros, dev, pad ? "extra_pad" : "extra", abort_code);
+                                if (pad) controller_presence(rt, -1);
                                 std::printf("Stopped watching: %s\n", path.c_str());
                             }
                             rt.release_path(path);
@@ -572,6 +589,38 @@ int main(int argc, char** argv) {
                 }
             }).detach();
         }
+    }
+
+    // Steam Controllers (2026, and through their puck) over hidraw -- read only, never
+    // sent anything, so their desktop mouse/keyboard mode is left alone. Re-scanned
+    // every 3 s (plugging in, the puck pairing a controller). "watch_steam_controller"
+    // in state.json turns it off.
+    if (json_bool(state, "watch_steam_controller", true)) {
+        std::thread([&rt, &registry, &macros, abort_code] {
+            auto open_paths = std::make_shared<std::set<std::string>>();
+            auto lock = std::make_shared<std::mutex>();
+            while (true) {
+                for (const auto& h : list_hidraw()) {
+                    if (!is_triton_device(h.vendor, h.product, h.interface_number)) continue;
+                    {
+                        std::lock_guard<std::mutex> l(*lock);
+                        if (open_paths->count(h.path)) continue;
+                        open_paths->insert(h.path);
+                    }
+                    std::printf("Steam Controller: reading %s (%s, interface %d)\n", h.path.c_str(),
+                                h.name.c_str(), h.interface_number);
+                    std::fflush(stdout);
+                    std::string path = h.path;
+                    std::thread([&rt, &registry, &macros, abort_code, path, open_paths, lock] {
+                        watch_steam_hid(rt, registry, macros, path, abort_code);
+                        std::this_thread::sleep_for(std::chrono::seconds(2));
+                        std::lock_guard<std::mutex> l(*lock);
+                        open_paths->erase(path);
+                    }).detach();
+                }
+                std::this_thread::sleep_for(std::chrono::seconds(3));
+            }
+        }).detach();
     }
 
     // The main keyboard and mouse: watched for good. If one goes away (unplugged,

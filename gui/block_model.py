@@ -126,7 +126,10 @@ def _operand(v, fallback: str = "None") -> str:
 
 # controller axes (getAxis / axis): name -> plain-English label
 AXIS_LABELS = {"LX": "left stick x", "LY": "left stick y", "RX": "right stick x", "RY": "right stick y",
-               "LT": "left trigger", "RT": "right trigger", "DPAD_X": "d-pad x", "DPAD_Y": "d-pad y"}
+               "LT": "left trigger", "RT": "right trigger", "DPAD_X": "d-pad x", "DPAD_Y": "d-pad y",
+               # reading only (Steam Controller trackpads)
+               "LPAD_X": "left trackpad x", "LPAD_Y": "left trackpad y", "RPAD_X": "right trackpad x",
+               "RPAD_Y": "right trackpad y", "LPAD_T": "left trackpad touched", "RPAD_T": "right trackpad touched"}
 
 
 def rep_label(r: Rep) -> str:

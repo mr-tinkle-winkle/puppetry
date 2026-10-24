@@ -19,7 +19,7 @@ can outline the same element).
 from __future__ import annotations
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QButtonGroup, QHBoxLayout, QLabel, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QButtonGroup, QComboBox, QHBoxLayout, QLabel, QVBoxLayout, QWidget
 
 import kbm_layout as kl
 from ui_kit.custom_button import CustomButton
@@ -34,6 +34,7 @@ PANEL_WIDTH = 340
 KEYBOARD_SHORT = {"full": "Full", "tkl": "80%", "60": "60%", "half": "Half"}
 MOUSE_SHORT = {"classic": "Classic", "gaming": "Gaming", "minimal": "Minimal", "buttons": "Buttons"}
 CENTER_SHORT = {"head": "Head", "tail": "Tail"}
+CONTROLLER_SHORT = {"xbox": "Xbox", "steam": "Steam", "ps3": "PS3", "ps4": "PS4"}
 
 
 def element_title(el: dict) -> str:
@@ -200,6 +201,41 @@ class ElementPanel(QWidget):
         elif self.on_change:
             self.on_change()
 
+    def _set_controller_look(self, look: str) -> None:
+        """A new look; labels still on the old look's default follow it."""
+        el = self._el(self.selected)
+        if el is None:
+            return
+        old_default = kl.LOOK_DEFAULT_LABELS.get(el.get("look", "xbox"))
+        if el.get("labels") in (None, old_default):
+            el.pop("labels", None)
+        self._set("look", look)
+
+    def _labels_row(self, el: dict, groups: list, default: str) -> None:
+        """A "Labels" dropdown: groups = [(heading or None, [(value, text), ...]), ...]."""
+        from ui_kit import theme_config
+        from ui_kit.custom_combo_style import combo_box_stylesheet
+        self.opts.addWidget(self._caption("Labels"))
+        c = QComboBox()
+        c.setStyleSheet(combo_box_stylesheet(theme_config.get_settings()))
+        c.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        c.setMinimumContentsLength(16)
+        for heading, opts in groups:
+            if heading:
+                c.addItem(heading)
+                hi = c.model().item(c.count() - 1)
+                hi.setEnabled(False)                   # a heading, not a choice
+                f = hi.font()
+                f.setBold(True)
+                hi.setFont(f)
+            for value, text in opts:
+                c.addItem(text, value)
+        current = el.get("labels") or default
+        c.setCurrentIndex(max(0, c.findData(current)))
+        c.currentIndexChanged.connect(lambda _i: self._set("labels", c.currentData(), rebuild=False))
+        self.widgets["labels"] = c
+        self.opts.addWidget(c)
+
     def _add_menu(self) -> None:
         from PySide6.QtGui import QCursor
         from PySide6.QtWidgets import QMenu
@@ -240,10 +276,18 @@ class ElementPanel(QWidget):
                 cb.toggled.connect(lambda v: self._set("arrows", bool(v), rebuild=False))
                 self.widgets["arrows"] = cb
                 self.opts.addWidget(cb)
+            self._labels_row(el, [(None, list(kl.KEYBOARD_LABELS.items()))], "short")
         elif typ == "mouse":
             self.opts.addWidget(self._caption("Look"))
             self.widgets["look"] = _Toggles(MOUSE_SHORT, el.get("look", "classic"), lambda k: self._set("look", k))
             self.opts.addWidget(self.widgets["look"])
+            self._labels_row(el, [(None, list(kl.MOUSE_LABEL_CHOICES.items()))], "letters")
+        elif typ == "controller":
+            self.opts.addWidget(self._caption("Look"))
+            look = el.get("look", "xbox")
+            self.widgets["look"] = _Toggles(CONTROLLER_SHORT, look, self._set_controller_look)
+            self.opts.addWidget(self.widgets["look"])
+            self._labels_row(el, kl.CONTROLLER_LABEL_GROUPS, kl.LOOK_DEFAULT_LABELS.get(look, "xbox"))
         elif typ in kl.MOTION_TYPES:
             self.opts.addWidget(self._caption("Style"))
             self.widgets["type"] = _Toggles(kl.MOTION_TYPES, typ, lambda k: self._set("type", k))

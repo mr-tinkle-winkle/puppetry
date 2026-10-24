@@ -420,6 +420,15 @@ def hub_tests():
           and status["element_urls"]["pad"] == "http://127.0.0.1:18480/el/pad"
           and status["replay"]["length_source"] == "fallback"
           and status["replay"]["length_s"] == 20)
+    # controller presence (auto-switch): `s <t> c 1 0`
+    fake.send(f"s {int(time.time() * 1e6)} c 1 0")
+    t0 = time.time()
+    while not hub.state.pad_connected and time.time() - t0 < 3:
+        time.sleep(0.02)
+    time.sleep(0.3)
+    check("hub: controller connected -> state, snapshot, pages and the replay buffer know",
+          hub.state.pad_connected and hub.snapshot()["pad"] is True
+          and any('"e":"pad","v":1' in ln for ln in oc.buffer_file().read_text().splitlines()))
     # blocking (an ignored app / the toggle): the daemon sends `s <t> p 1 0` and then nothing
     t_b = int(time.time() * 1e6)
     fake.send(f"s {t_b} p 1 0")
@@ -1099,8 +1108,143 @@ def viewers_share_tests():
     check("viewers only: a page that never comes up is a clear error", down)
 
 
+def auto_switch_tests():
+    scene = {"elements": [{"id": "keyboard", "type": "keyboard", "layout": "60", "x": 0, "y": 0, "scale": 1},
+                          {"id": "pad", "type": "controller", "x": 0, "y": 6, "scale": 1}]}
+    lay = kl.build_scene(scene)
+    st = kl.KbmState()
+    on = {"auto_switch": True, "auto_switch_minutes": 1.0}
+    check("auto-switch: off -> everything drawn", kl.visible_group(lay, st, {}, 10.0) is None)
+    check("auto-switch: no controller connected -> keyboard and mouse", kl.visible_group(lay, st, on, 10.0) == "kbm")
+    st.set_pad(True, 10.0)
+    check("auto-switch: connected but not used yet -> still keyboard and mouse",
+          kl.visible_group(lay, st, on, 11.0) == "kbm")
+    st.axis("LX", 0.1, 12.0)
+    check("auto-switch: stick drift doesn't count as use", kl.visible_group(lay, st, on, 12.5) == "kbm")
+    st.key("BTN_SOUTH", True, 13.0)
+    st.key("BTN_SOUTH", False, 13.1)
+    check("auto-switch: a controller press -> the controller",
+          kl.visible_group(lay, st, on, 14.0) == "pad" and kl.visible_group(lay, st, on, 13.0 + 59) == "pad")
+    check("auto-switch: unused for the set minutes -> back to keyboard and mouse",
+          kl.visible_group(lay, st, on, 13.0 + 61) == "kbm")
+    st.key("BTN_SOUTH", True, 80.0)
+    st.set_pad(False, 81.0)
+    check("auto-switch: unplugged -> keyboard and mouse at once", kl.visible_group(lay, st, on, 81.5) == "kbm")
+    only_kb = kl.build_scene({"elements": [scene["elements"][0]]})
+    st.set_pad(True, 82.0)
+    st.key("BTN_EAST", True, 82.0)
+    check("auto-switch: a layout without a controller never goes blank",
+          kl.visible_group(only_kb, st, on, 83.0) is None)
+    k2 = kl.KbmState()
+    k2.set_pad(True, 0.0)
+    k2.clear()
+    check("auto-switch: a block (clear) keeps 'connected'", k2.pad_connected)
+    # render: the picture flips from the keyboard to the controller
+    import overlay_render as orr
+    cfg = oc.merged({"scene": scene})
+    cfg["style"].update(auto_switch=True, auto_switch_minutes=1.0, padding=0)
+    fm = orr.FrameMaker("full", cfg)
+    T = 1000.0
+    tl = orr.Timeline({"start": T, "pad_at_start": True},
+                      [{"t": T + 1.0, "e": "kd", "k": "BTN_SOUTH", "s": "r"},
+                       {"t": T + 1.1, "e": "ku", "k": "BTN_SOUTH", "s": "r"}])
+    u = cfg["style"]["unit"]
+    kb_item = next(i for i in fm.layout["items"] if i.get("name") == "KEY_Q")
+    pad_item = next(i for i in fm.layout["items"] if i["kind"] == "pad_body")
+
+    def alpha_at(frame, it):
+        x, y = int((it["x"] + it["w"] / 2) * u), int((it["y"] + it["h"] / 2) * u)
+        return frame[(y * fm.w + x) * 4 + 3]
+    tl.advance(T + 0.5)
+    f1 = fm.frame(tl.state, T + 0.5)
+    tl.advance(T + 2.0)
+    f2 = fm.frame(tl.state, T + 2.0)
+    node = shutil.which("node")
+    if node:
+        web = Path(__file__).resolve().parent / "overlay_web"
+        evs = [{"t": 10.0, "e": "pad", "v": 1}, {"t": 12.0, "e": "ax", "a": "LX", "v": 0.1, "s": "r"},
+               {"t": 13.0, "e": "kd", "k": "BTN_SOUTH", "s": "r"}, {"t": 13.1, "e": "ku", "k": "BTN_SOUTH", "s": "r"}]
+        times = [11.0, 12.5, 14.0, 72.0, 74.5]
+        script = (f"global.performance={{now:()=>0}};\n{(web / 'common.js').read_text()}\n"
+                  f"P.padButtons=new Set({json.dumps(sorted(kl.PAD_BUTTONS))});\n"
+                  f"const lay={json.dumps(lay)}, st={json.dumps(on)}, evs={json.dumps(evs)}, times={json.dumps(times)};\n"
+                  "const out=[]; let i=0;\n"
+                  "for (const t of times) { while (i<evs.length && evs[i].t<=t) applyEvent(evs[i++]); out.push(visibleGroup(lay, st, t)); }\n"
+                  "console.log(JSON.stringify(out));")
+        res = subprocess.run([node, "-e", script.replace("toClient(ev.t)", "ev.t")], capture_output=True, text=True)
+        py = []
+        ps = kl.KbmState()
+        j = 0
+        for t in times:
+            while j < len(evs) and evs[j]["t"] <= t:
+                e = evs[j]
+                if e["e"] == "pad":
+                    ps.set_pad(bool(e["v"]), e["t"])
+                elif e["e"] == "ax":
+                    ps.axis(e["a"], e["v"], e["t"])
+                else:
+                    ps.key(e["k"], e["e"] == "kd", e["t"])
+                j += 1
+            py.append(kl.visible_group(lay, ps, on, t))
+        try:
+            js_out = json.loads(res.stdout)
+        except ValueError:
+            js_out = None
+            print(res.stderr[-800:])
+        check("js: the pages' auto-switch decides exactly as Python does", js_out == py
+              and py == ["kbm", "kbm", "pad", "pad", "kbm"])
+    check("render: auto-switch shows the keyboard before the controller is used, the controller after",
+          alpha_at(f1, kb_item) > 0 and alpha_at(f1, pad_item) == 0
+          and alpha_at(f2, kb_item) == 0 and alpha_at(f2, pad_item) > 0)
+
+
+def looks_labels_tests():
+    def lab(el, name):
+        return next(i["label"] for i in kl.element_layout(el)["items"] if i.get("name") == name)
+    pad = {"type": "controller"}
+    check("controller looks: Xbox, Steam, PS3, PS4 each have their own layout",
+          set(kl.CONTROLLER_LOOKS) == {"xbox", "steam", "ps3", "ps4"}
+          and len({len(kl.build_controller_layout(lk)["items"]) for lk in kl.CONTROLLER_LOOKS}) >= 3)
+    steam = kl.element_layout(dict(pad, look="steam"))
+    tp = [i for i in steam["items"] if i["kind"] == "trackpad"]
+    check("Steam Controller look: two trackpads (finger axes) and the back grips L4 R4 L5 R5",
+          len(tp) == 2 and tp[0]["pt"] == "LPAD_T" and tp[1]["px"] == "RPAD_X"
+          and [lab(dict(pad, look="steam"), f"BTN_TRIGGER_HAPPY{n}") for n in (1, 2, 3, 4)] == ["L4", "R4", "L5", "R5"])
+    check("each look's labels by default (A / \u2715 / Share vs Select)",
+          lab(pad, "BTN_SOUTH") == "A" and lab(dict(pad, look="ps4"), "BTN_SOUTH") == "\u2715"
+          and lab(dict(pad, look="ps4"), "BTN_SELECT") == "Share" and lab(dict(pad, look="ps3"), "BTN_SELECT") == "Select"
+          and lab(dict(pad, look="ps4"), "BTN_TL2") == "L2")
+    check("controller labels: any scheme on any look, words, positions, names, none",
+          lab(dict(pad, look="xbox", labels="ps_words"), "BTN_NORTH") == "Triangle"
+          and lab(dict(pad, labels="positions"), "BTN_EAST") == "East"
+          and lab(dict(pad, labels="name"), "BTN_SOUTH") == "BTN_SOUTH"
+          and lab(dict(pad, labels="none"), "BTN_SOUTH") == "")
+    kb = {"type": "keyboard", "layout": "60"}
+    check("keyboard labels: short / key names / none, separately from the others",
+          lab(kb, "KEY_A") == "A" and lab(dict(kb, labels="name"), "KEY_A") == "KEY_A"
+          and lab(dict(kb, labels="none"), "KEY_A") == "")
+    ms = {"type": "mouse"}
+    check("mouse labels: letters / LMB / button names / none",
+          lab(ms, "BTN_LEFT") == "L" and lab(dict(ms, labels="short"), "BTN_RIGHT") == "RMB"
+          and lab(dict(ms, labels="name"), "BTN_LEFT") == "BTN_LEFT" and lab(dict(ms, labels="none"), "BTN_LEFT") == "")
+    check("labels are fixed per element (the painters don't override them)",
+          all(i.get("fixed_label") for i in kl.element_layout(kb)["items"] if i.get("name")))
+    old = oc.merged({"defaults_rev": 2, "style": {"label_mode": "none", "controller_labels": "playstation"},
+                     "scene": {"elements": [{"id": "keyboard", "type": "keyboard", "x": 0, "y": 0},
+                                            {"id": "pad", "type": "controller", "x": 0, "y": 7}]}})
+    check("old global label settings move onto the elements once",
+          old["scene"]["elements"][0]["labels"] == "none" and old["scene"]["elements"][1]["labels"] == "none"
+          and "label_mode" not in old["style"] and "controller_labels" not in old["style"])
+    ps = oc.merged({"defaults_rev": 2, "style": {"controller_labels": "playstation"},
+                    "scene": {"elements": [{"id": "pad", "type": "controller", "x": 0, "y": 0}]}})
+    check("... PlayStation labels become a PS4 controller", ps["scene"]["elements"][0]["look"] == "ps4"
+          and ps["scene"]["elements"][0]["labels"] == "ps4")
+
+
 def main() -> int:
     layout_tests()
+    looks_labels_tests()
+    auto_switch_tests()
     viewers_share_tests()
     privacy_screen_tests()
     replay_tests()

@@ -222,6 +222,9 @@ public:
     // ignored app is focused / open". Either one stops the event stream.
     std::atomic<bool> visualizer_blocked{false};
     std::atomic<bool> app_blocked{false};
+    // controllers connected right now (evdev controllers, Steam Controllers over hidraw,
+    // Steam's virtual gamepads): the overlay's keyboard <-> controller auto-switch
+    std::atomic<int> controllers_present{0};
 
     // ---- actAs ----
     std::mutex act_as_mutex;

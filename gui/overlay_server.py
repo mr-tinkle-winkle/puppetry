@@ -124,6 +124,8 @@ class ReplayBuffer:
         {"t": ..., "e": "mv", "dx": 3, "dy": -1, "s": "r"|"m"}
         {"t": ..., "e": "wh", "n": 1, "h": 0, "s": "r"|"m"}
         {"t": ..., "e": "ax", "a": "LX", "v": -0.53, "s": "r"|"m"}   (controller axes)
+        {"t": ..., "e": "pad", "v": 1|0}      (a controller connected / none left; header
+                                               "pad_at_start" says whether one was at `start`)
     Lines are appended as they happen (flushed every 100 ms); every few
     seconds the file is rewritten (atomically: temp file + rename) to drop
     what's older than the window. A reader should skip a final line without
@@ -135,6 +137,7 @@ class ReplayBuffer:
         self.events: deque = deque()
         self.base_held: dict = {}      # held at the oldest kept event
         self.base_axes: dict = {"r": {}, "m": {}}   # controller axes at the oldest kept event
+        self.base_pad = False          # a controller connected at the oldest kept event
         self._axis_last: dict = {}     # (axis, src) -> time last written
         self._axis_pending: dict = {}  # (axis, src) -> latest unwritten event
         self.lock = threading.Lock()
@@ -210,7 +213,9 @@ class ReplayBuffer:
         ev = self.events
         while ev and ev[0]["t"] < cutoff:
             e = ev.popleft()
-            if e["e"] == "ax":
+            if e["e"] == "pad":
+                self.base_pad = bool(e["v"])
+            elif e["e"] == "ax":
                 if e["v"]:
                     self.base_axes[e["s"]][e["a"]] = e["v"]
                 else:
@@ -232,7 +237,8 @@ class ReplayBuffer:
         head = {"format": "puppetry-input-buffer", "version": 1, "clock": "unix",
                 "start": round(min(start, now - self.window()), 6), "length_s": self.length_s,
                 "held_at_start": {k: round(v, 6) for k, v in self.base_held.items()},
-                "axes_at_start": {"r": dict(self.base_axes["r"]), "m": dict(self.base_axes["m"])}}
+                "axes_at_start": {"r": dict(self.base_axes["r"]), "m": dict(self.base_axes["m"])},
+                "pad_at_start": self.base_pad}
         tmp = self.path.with_suffix(".tmp")
         with open(tmp, "w") as f:
             f.write(json.dumps(head) + "\n")
@@ -414,6 +420,7 @@ class Hub:
         c = self.cfg
         if page == "full":
             out = {"style": c["style"], "layout": kl.build_scene(c["scene"], only=el), "piece": el or "scene",
+                   "pad_buttons": sorted(kl.PAD_BUTTONS),          # auto-switch: which keys are the controller's
                    "pad_labels": kl.PAD_LABELS.get(c["style"].get("controller_labels", "xbox"), kl.PAD_LABELS["xbox"])}
             if el and not any(e.get("id") == el for e in c["scene"].get("elements", [])):
                 out["missing"] = el
@@ -549,7 +556,8 @@ class Hub:
                 "axes": dict(s.axes), "out_axes": dict(s.out_axes),
                 "motion": [[round(t - now, 4), x, y, src] for t, x, y, src in s.motion[-1500:]],
                 "clicks": [[round(t - now, 4), b, src] for t, b, src in s.clicks],
-                "wheels": [[round(t - now, 4), d, src] for t, d, src in s.wheels]}
+                "wheels": [[round(t - now, 4), d, src] for t, d, src in s.wheels],
+                "pad": s.pad_connected, "pad_age": (now - s.pad_last) if s.pad_last is not None else None}
 
     # -- events --------------------------------------------------------------------
     def name(self, code: int) -> str:
@@ -614,6 +622,13 @@ class Hub:
             self.state.wheel(a, t, src)
             ev = {"t": round(t, 6), "e": "wh", "n": a, "h": b, "s": src}
             self._flush_page_move()
+            self.broadcast_all("ev", ev)
+            if self.replay:
+                self.replay.add(ev)
+        elif typ == "c":
+            # controller presence (the auto-switch between keyboard & mouse and controller)
+            self.state.set_pad(bool(a), t)
+            ev = {"t": round(t, 6), "e": "pad", "v": 1 if a else 0}
             self.broadcast_all("ev", ev)
             if self.replay:
                 self.replay.add(ev)

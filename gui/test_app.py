@@ -1411,6 +1411,24 @@ def main() -> int:
     vp.panel.list_buttons["mouse"].click()
     vp.panel.widgets["look"].buttons["gaming"].click()
     check("edit: mouse look toggles", vp.area.element("mouse")["look"] == "gaming")
+    lc = vp.panel.widgets["labels"]
+    lc.setCurrentIndex(lc.findData("short"))
+    check("edit: mouse labels (its own, separate from the keyboard's)", vp.area.element("mouse")["labels"] == "short"
+          and "labels" not in vp.area.element("keyboard"))
+    vp.panel.list_buttons[pad["id"]].click()
+    check("edit: a controller starts as Xbox with A B X Y", vp.panel.widgets["look"].current() == "xbox"
+          and vp.panel.widgets["labels"].currentData() == "xbox")
+    vp.panel.widgets["look"].buttons["ps4"].click()
+    check("edit: switching the look to PS4 brings its labels along",
+          vp.area.element(pad["id"])["look"] == "ps4" and vp.panel.widgets["labels"].currentData() == "ps4")
+    lc = vp.panel.widgets["labels"]
+    heads = [lc.itemText(i) for i in range(lc.count()) if not lc.model().item(i).isEnabled()]
+    check("edit: controller labels are grouped (Xbox, PlayStation, Steam, Nintendo, Other)",
+          heads == ["Xbox", "PlayStation", "Steam", "Nintendo", "Other"])
+    lc.setCurrentIndex(lc.findData("ps_words"))
+    vp.panel.widgets["look"].buttons["steam"].click()
+    check("edit: a chosen label scheme stays when the look changes", vp.area.element(pad["id"])["labels"] == "ps_words"
+          and vp.area.element(pad["id"])["look"] == "steam")
     vp.panel.list_buttons["movement"].click()
     check("edit: the movement view is a Mousepad by default (no 'follows' option)",
           vp.panel.widgets["type"].current() == "mousepad" and "center" not in vp.panel.widgets)

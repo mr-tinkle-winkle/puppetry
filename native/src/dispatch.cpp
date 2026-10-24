@@ -143,6 +143,40 @@ static bool should_forward(Runtime& rt, const std::string& kind, int code, bool 
     return true;
 }
 
+void feed_controller_key(Runtime& rt, MacroRegistry& registry, std::vector<std::unique_ptr<Macro>>& macros,
+                         int abort_code, int code, int value, long long time_us) {
+    if (value != 2) {
+        EventStream* es = g_event_stream.load(std::memory_order_relaxed);
+        if (es && es->active()) es->publish('r', time_us, 'k', code, value);
+    }
+    apply_act_as(rt, code, value);
+    handle_key_event(rt, macros, abort_code, code, value, [&](Macro& m) { trigger_macro(rt, registry, m); });
+}
+
+void feed_controller_axis(Runtime& rt, int code, double v, long long time_us) {
+    double prev;
+    {
+        std::lock_guard<std::mutex> lock(rt.axes_mutex);
+        prev = rt.axes.count(code) ? rt.axes[code] : 0.0;
+        rt.axes[code] = v;
+    }
+    if (v != prev && (std::abs(v - prev) >= 0.004 || v == 0.0 || v == 1.0 || v == -1.0)) {
+        EventStream* es = g_event_stream.load(std::memory_order_relaxed);
+        if (es && es->active()) es->publish('r', time_us, 'a', code, (int)std::lround(v * 10000));
+    }
+}
+
+void controller_presence(Runtime& rt, int delta) {
+    int now = rt.controllers_present.fetch_add(delta) + delta;
+    if (now < 0) {
+        rt.controllers_present.store(0);
+        now = 0;
+    }
+    if ((delta > 0 && now == 1) || (delta < 0 && now == 0)) {
+        if (EventStream* es = g_event_stream.load()) es->set_controller(now > 0);
+    }
+}
+
 void watch_device(Runtime& rt, MacroRegistry& registry, std::vector<std::unique_ptr<Macro>>& macros,
                    InputDevice& dev, const std::string& kind, int abort_code) {
     // "controller", "extra" and "extra_pad" devices are only read: never

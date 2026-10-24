@@ -120,6 +120,13 @@ session to take effect.
     plain output as a window, without the overlay, and changes nothing.
 - The Input Visualizer's picture uses the overlay's look from
   **Customize…**, so it matches what OBS and afterglow show.
+- Each keyboard, mouse and controller has its own **Labels** choice (short
+  names, full key names, none; for controllers also Xbox, PlayStation
+  symbols or words, Steam, Nintendo and positions).
+- **Switch automatically** (Customize > Behavior): show the controller
+  while one is plugged in and was used in the last few minutes, otherwise
+  the keyboard and mouse. Place them on top of each other in Edit layout so
+  one takes the other's spot.
 - **Edit layout** (Input Visualizer) arranges what's drawn: drag to move,
   drag the corner square to resize. A sidebar lists every element; the
   selected one's options (keyboard size, mouse look, movement style, which
@@ -129,7 +136,8 @@ session to take effect.
   - keyboards: full size, 80% (TKL), 60% (with or without arrow keys), or
     the left half for gaming;
   - mice: classic, gaming (extra side buttons), minimal, or buttons only;
-  - controllers (Xbox / PlayStation / Nintendo labels);
+  - controllers, looking like an Xbox, Steam Controller, PS3 or PS4
+    controller;
   - mouse movement views, all square with no background:
     - *Mousepad* (default): the dot moves around a virtual mousepad that
       re-centers after a pause; auto zoom (on by default) zooms out so the
@@ -147,6 +155,11 @@ session to take effect.
 - The overlay's font picker shows 21 bundled fonts by category, each in its
   own lettering (they work in OBS without installing anything), plus any
   installed font.
+- **Steam Controller (2026)**: read directly from its raw HID device (sticks,
+  triggers, trackpads, grips), without Steam and without touching its
+  desktop mouse/keyboard mode (*Read Steam Controllers directly*, Settings
+  > Devices). Its buttons work in combos; `getAxis("LPAD_X")` etc. read the
+  trackpads.
 - **Steam Controller / Steam Deck**: outside games Steam presents these as
   its own keyboard and mouse. Their input is watched by default (*Watch
   Steam Controller / Steam Deck input*, Settings > Devices), and *Watch

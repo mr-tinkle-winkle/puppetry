@@ -75,7 +75,12 @@ MOUSE_LABELS = {"BTN_LEFT": "L", "BTN_RIGHT": "R", "BTN_MIDDLE": "", "BTN_SIDE":
 PAD_BUTTONS = {"BTN_SOUTH": 0x130, "BTN_EAST": 0x131, "BTN_NORTH": 0x133, "BTN_WEST": 0x134, "BTN_TL": 0x136,
                "BTN_TR": 0x137, "BTN_TL2": 0x138, "BTN_TR2": 0x139, "BTN_SELECT": 0x13A, "BTN_START": 0x13B,
                "BTN_MODE": 0x13C, "BTN_THUMBL": 0x13D, "BTN_THUMBR": 0x13E, "BTN_DPAD_UP": 0x220,
-               "BTN_DPAD_DOWN": 0x221, "BTN_DPAD_LEFT": 0x222, "BTN_DPAD_RIGHT": 0x223}
+               "BTN_DPAD_DOWN": 0x221, "BTN_DPAD_LEFT": 0x222, "BTN_DPAD_RIGHT": 0x223,
+               # Steam Controller extras (native/src/steam_hid.hpp): back grips L4 R4 L5 R5,
+               # quick access, trackpad clicks
+               "BTN_TRIGGER_HAPPY1": 0x2C0, "BTN_TRIGGER_HAPPY2": 0x2C1, "BTN_TRIGGER_HAPPY3": 0x2C2,
+               "BTN_TRIGGER_HAPPY4": 0x2C3, "BTN_TRIGGER_HAPPY5": 0x2C4, "BTN_TRIGGER_HAPPY6": 0x2C5,
+               "BTN_TRIGGER_HAPPY7": 0x2C6}
 PAD_LABELS = {
     "xbox": {"BTN_SOUTH": "A", "BTN_EAST": "B", "BTN_WEST": "X", "BTN_NORTH": "Y", "BTN_TL": "LB", "BTN_TR": "RB",
              "BTN_TL2": "LT", "BTN_TR2": "RT", "BTN_SELECT": "View", "BTN_START": "Menu", "BTN_MODE": "Xbox",
@@ -91,7 +96,9 @@ for _scheme in PAD_LABELS.values():
     _scheme.update({"BTN_DPAD_UP": "\u2191", "BTN_DPAD_DOWN": "\u2193", "BTN_DPAD_LEFT": "\u2190",
                     "BTN_DPAD_RIGHT": "\u2192"})
 # ABS_* code -> short axis name (triggers reported as GAS/BRAKE by some pads)
-AXIS_NAMES = {0: "LX", 1: "LY", 3: "RX", 4: "RY", 2: "LT", 5: "RT", 16: "DPAD_X", 17: "DPAD_Y", 9: "RT", 10: "LT"}
+AXIS_NAMES = {0: "LX", 1: "LY", 3: "RX", 4: "RY", 2: "LT", 5: "RT", 16: "DPAD_X", 17: "DPAD_Y", 9: "RT", 10: "LT",
+              # Steam Controller trackpads (native/src/steam_hid.hpp): position, and finger on (0/1)
+              18: "LPAD_X", 19: "LPAD_Y", 20: "RPAD_X", 21: "RPAD_Y", 22: "LPAD_T", 23: "RPAD_T"}
 
 CODE_TO_NAME: dict = {}
 for _row in KEY_ROWS:
@@ -168,34 +175,153 @@ def build_layout(show_function_row=True, show_nav=True, show_arrows=True, show_m
     return {"items": items, "w": w, "h": h}
 
 
-def build_controller_layout() -> dict:
-    """A gamepad, ~10 x 6.4 key units. Item kinds: pad_body, shoulder,
-    trigger (fills with its axis), stick (base; knob follows its axes;
-    pressed = stick click), dpad (four arms; buttons or the hat axes),
-    pad_btn (face buttons, round), small (select / start / guide)."""
+# ---------------------------------------------------------------------------
+# Controllers: looks and label schemes
+# ---------------------------------------------------------------------------
+CONTROLLER_LOOKS = {"xbox": "Xbox", "steam": "Steam Controller", "ps3": "PS3", "ps4": "PS4"}
+LOOK_DEFAULT_LABELS = {"xbox": "xbox", "steam": "steam", "ps3": "ps3", "ps4": "ps4"}
+
+_ARROWS = {"BTN_DPAD_UP": "\u2191", "BTN_DPAD_DOWN": "\u2193", "BTN_DPAD_LEFT": "\u2190", "BTN_DPAD_RIGHT": "\u2192"}
+_PS_COMMON = {"BTN_SOUTH": "\u2715", "BTN_EAST": "\u25cb", "BTN_WEST": "\u25a1", "BTN_NORTH": "\u25b3",
+              "BTN_TL": "L1", "BTN_TR": "R1", "BTN_TL2": "L2", "BTN_TR2": "R2", "BTN_MODE": "PS",
+              "BTN_THUMBL": "L3", "BTN_THUMBR": "R3", **_ARROWS}
+# scheme -> {button name: label}; anything not listed keeps the layout's own label
+CONTROLLER_LABELS = {
+    "xbox": {"BTN_SOUTH": "A", "BTN_EAST": "B", "BTN_WEST": "X", "BTN_NORTH": "Y", "BTN_TL": "LB", "BTN_TR": "RB",
+             "BTN_TL2": "LT", "BTN_TR2": "RT", "BTN_SELECT": "View", "BTN_START": "Menu", "BTN_MODE": "Xbox",
+             "BTN_THUMBL": "LS", "BTN_THUMBR": "RS", **_ARROWS},
+    "steam": {"BTN_SOUTH": "A", "BTN_EAST": "B", "BTN_WEST": "X", "BTN_NORTH": "Y", "BTN_TL": "LB", "BTN_TR": "RB",
+              "BTN_TL2": "LT", "BTN_TR2": "RT", "BTN_SELECT": "View", "BTN_START": "Menu", "BTN_MODE": "Steam",
+              "BTN_THUMBL": "LS", "BTN_THUMBR": "RS", "BTN_TRIGGER_HAPPY1": "L4", "BTN_TRIGGER_HAPPY2": "R4",
+              "BTN_TRIGGER_HAPPY3": "L5", "BTN_TRIGGER_HAPPY4": "R5", "BTN_TRIGGER_HAPPY5": "\u2026", **_ARROWS},
+    "ps4": {**_PS_COMMON, "BTN_SELECT": "Share", "BTN_START": "Options"},
+    "ps3": {**_PS_COMMON, "BTN_SELECT": "Select", "BTN_START": "Start"},
+    "ps_words": {**_PS_COMMON, "BTN_SOUTH": "Cross", "BTN_EAST": "Circle", "BTN_WEST": "Square",
+                 "BTN_NORTH": "Triangle", "BTN_SELECT": "Share", "BTN_START": "Options"},
+    "nintendo": {"BTN_SOUTH": "B", "BTN_EAST": "A", "BTN_WEST": "Y", "BTN_NORTH": "X", "BTN_TL": "L", "BTN_TR": "R",
+                 "BTN_TL2": "ZL", "BTN_TR2": "ZR", "BTN_SELECT": "\u2212", "BTN_START": "+", "BTN_MODE": "Home",
+                 "BTN_THUMBL": "LS", "BTN_THUMBR": "RS", **_ARROWS},
+    "positions": {"BTN_SOUTH": "South", "BTN_EAST": "East", "BTN_WEST": "West", "BTN_NORTH": "North",
+                  "BTN_TL": "LB", "BTN_TR": "RB", "BTN_TL2": "LT", "BTN_TR2": "RT", "BTN_SELECT": "Select",
+                  "BTN_START": "Start", "BTN_MODE": "Guide", "BTN_THUMBL": "LS", "BTN_THUMBR": "RS", **_ARROWS},
+}
+# the controller "Labels" dropdown, grouped
+CONTROLLER_LABEL_GROUPS = [
+    ("Xbox", [("xbox", "A  B  X  Y")]),
+    ("PlayStation", [("ps4", "\u2715 \u25cb \u25a1 \u25b3  (PS4: Share, Options)"),
+                     ("ps3", "\u2715 \u25cb \u25a1 \u25b3  (PS3: Select, Start)"),
+                     ("ps_words", "Cross, Circle, Square, Triangle")]),
+    ("Steam", [("steam", "A  B  X  Y,  L4 R4 L5 R5")]),
+    ("Nintendo", [("nintendo", "B  A  Y  X")]),
+    ("Other", [("positions", "Positions (South, East, West, North)"), ("name", "Button names (BTN_SOUTH)"),
+               ("none", "No labels")]),
+]
+KEYBOARD_LABELS = {"short": "Short (A, Shift, F1)", "name": "Key names (KEY_A)", "none": "No labels"}
+MOUSE_LABEL_CHOICES = {"letters": "Letters (L, R)", "short": "Short (LMB, RMB, MMB, MB4, MB5)",
+                       "name": "Button names (BTN_LEFT)", "none": "No labels"}
+MOUSE_SHORT = {"BTN_LEFT": "LMB", "BTN_RIGHT": "RMB", "BTN_MIDDLE": "MMB", "BTN_SIDE": "MB4", "BTN_EXTRA": "MB5"}
+
+
+def apply_labels(layout: dict, mode: str, table: dict | None = None) -> dict:
+    """Fix every item's label for an element: "none" blanks them, "name" shows the
+    KEY_/BTN_ name, a table maps names to labels, anything else keeps the layout's
+    own. Marked fixed_label so the painters use them as they are (hold timers still
+    replace them while held)."""
+    for it in layout["items"]:
+        n = it.get("name", "")
+        if not n:
+            continue
+        if mode == "none":
+            lab = ""
+        elif mode == "name":
+            lab = n
+        elif table is not None:
+            lab = table.get(n, it.get("label", ""))
+        else:
+            lab = it.get("label", "")
+        it["label"] = lab
+        it["fixed_label"] = True
+    return layout
+
+
+def build_controller_layout(look: str = "xbox") -> dict:
+    """A gamepad, ~10 x 6.4 key units (the Steam Controller ~11 x 6.6). Item kinds:
+    pad_body, shoulder, trigger (fills with its axis), stick (base; knob follows its
+    axes; pressed = stick click), dpad (four arms; buttons or the hat axes), pad_btn
+    (face buttons, round), small (select / start / guide), trackpad (Steam: a finger
+    dot from its px / py / pt axes; pressed = click). Labels: the Xbox scheme --
+    element_layout() applies the element's own."""
     it = []
 
     def add(kind, name, x, y, w, h, **kw):
-        it.append({"kind": kind, "name": name, "label": "", "x": x, "y": y, "w": w, "h": h, **kw})
+        it.append({"kind": kind, "name": name, "label": CONTROLLER_LABELS["xbox"].get(name, ""),
+                   "x": x, "y": y, "w": w, "h": h, **kw})
+
+    def dpad(cx, cy, a):
+        add("dpad", "BTN_DPAD_UP", cx - a / 2, cy - a * 1.5, a, a, hat=("DPAD_Y", -1))
+        add("dpad", "BTN_DPAD_DOWN", cx - a / 2, cy + a * 0.5, a, a, hat=("DPAD_Y", 1))
+        add("dpad", "BTN_DPAD_LEFT", cx - a * 1.5, cy - a / 2, a, a, hat=("DPAD_X", -1))
+        add("dpad", "BTN_DPAD_RIGHT", cx + a * 0.5, cy - a / 2, a, a, hat=("DPAD_X", 1))
+
+    def face(fx, fy, r):
+        add("pad_btn", "BTN_NORTH", fx - r / 2, fy - r * 1.55, r, r)
+        add("pad_btn", "BTN_SOUTH", fx - r / 2, fy + r * 0.55, r, r)
+        add("pad_btn", "BTN_WEST", fx - r * 1.55, fy - r / 2, r, r)
+        add("pad_btn", "BTN_EAST", fx + r * 0.55, fy - r / 2, r, r)
+
+    def shoulders(width):
+        add("trigger", "BTN_TL2", 0.9, 0.0, 1.6, 0.85, axis="LT")
+        add("trigger", "BTN_TR2", width - 2.5, 0.0, 1.6, 0.85, axis="RT")
+        add("shoulder", "BTN_TL", 0.6, 0.93, 2.2, 0.55)
+        add("shoulder", "BTN_TR", width - 2.8, 0.93, 2.2, 0.55)
+
+    if look == "steam":
+        # the 2026 Steam Controller: d-pad and A B X Y outside, both sticks inside, two square
+        # trackpads below, back grips L4 R4 L5 R5 (drawn between the pads), View / Menu /
+        # Steam / quick access in the middle
+        W = 11.0
+        add("pad_body", "", 0.0, 1.5, W, 4.8)
+        shoulders(W)
+        dpad(1.55, 2.75, 0.5)
+        face(9.45, 2.75, 0.56)
+        add("stick", "BTN_THUMBL", 2.85, 1.95, 1.65, 1.65, ax="LX", ay="LY")
+        add("stick", "BTN_THUMBR", 6.5, 1.95, 1.65, 1.65, ax="RX", ay="RY")
+        add("small", "BTN_SELECT", 4.65, 1.95, 0.75, 0.4)
+        add("small", "BTN_START", 5.6, 1.95, 0.75, 0.4)
+        add("small", "BTN_MODE", 4.75, 2.5, 0.6, 0.6)
+        add("small", "BTN_TRIGGER_HAPPY5", 5.65, 2.5, 0.6, 0.6)
+        add("trackpad", "BTN_TRIGGER_HAPPY6", 0.75, 3.85, 2.55, 2.15, px="LPAD_X", py="LPAD_Y", pt="LPAD_T")
+        add("trackpad", "BTN_TRIGGER_HAPPY7", 7.7, 3.85, 2.55, 2.15, px="RPAD_X", py="RPAD_Y", pt="RPAD_T")
+        add("shoulder", "BTN_TRIGGER_HAPPY1", 3.75, 4.05, 1.1, 0.48)
+        add("shoulder", "BTN_TRIGGER_HAPPY3", 3.75, 4.65, 1.1, 0.48)
+        add("shoulder", "BTN_TRIGGER_HAPPY2", 6.15, 4.05, 1.1, 0.48)
+        add("shoulder", "BTN_TRIGGER_HAPPY4", 6.15, 4.65, 1.1, 0.48)
+        return {"items": it, "w": W, "h": 6.6}
+    if look in ("ps3", "ps4"):
+        # DualShock: d-pad and face buttons up top, both sticks low and symmetric
+        add("pad_body", "", 0.0, 1.5, 10.0, 4.2)
+        shoulders(10.0)
+        dpad(1.95, 2.95, 0.52)
+        face(8.05, 2.95, 0.6)
+        add("stick", "BTN_THUMBL", 2.55, 3.7, 1.75, 1.75, ax="LX", ay="LY")
+        add("stick", "BTN_THUMBR", 5.7, 3.7, 1.75, 1.75, ax="RX", ay="RY")
+        if look == "ps4":
+            add("trackpad", "", 3.45, 1.7, 3.1, 1.45)                  # the touchpad (shape only)
+            add("small", "BTN_SELECT", 2.75, 1.75, 0.6, 0.42)
+            add("small", "BTN_START", 6.65, 1.75, 0.6, 0.42)
+            add("small", "BTN_MODE", 4.65, 3.3, 0.7, 0.7)
+        else:
+            add("small", "BTN_SELECT", 3.45, 2.65, 0.95, 0.42)
+            add("small", "BTN_START", 5.6, 2.65, 0.95, 0.42)
+            add("small", "BTN_MODE", 4.6, 3.2, 0.8, 0.8)
+        return {"items": it, "w": 10.0, "h": 6.4}
+    # Xbox: offset sticks
     add("pad_body", "", 0.0, 1.5, 10.0, 4.2)          # drawn first: everything else sits on it
-    add("trigger", "BTN_TL2", 0.9, 0.0, 1.6, 0.85, axis="LT")
-    add("trigger", "BTN_TR2", 7.5, 0.0, 1.6, 0.85, axis="RT")
-    add("shoulder", "BTN_TL", 0.6, 0.93, 2.2, 0.55)
-    add("shoulder", "BTN_TR", 7.2, 0.93, 2.2, 0.55)
+    shoulders(10.0)
     add("stick", "BTN_THUMBL", 1.1, 2.1, 1.8, 1.8, ax="LX", ay="LY")
     add("stick", "BTN_THUMBR", 5.9, 3.9, 1.8, 1.8, ax="RX", ay="RY")
-    # d-pad: a plus sign
-    cx, cy, a = 3.3, 4.8, 0.55
-    add("dpad", "BTN_DPAD_UP", cx - a / 2, cy - a * 1.5, a, a, hat=("DPAD_Y", -1))
-    add("dpad", "BTN_DPAD_DOWN", cx - a / 2, cy + a * 0.5, a, a, hat=("DPAD_Y", 1))
-    add("dpad", "BTN_DPAD_LEFT", cx - a * 1.5, cy - a / 2, a, a, hat=("DPAD_X", -1))
-    add("dpad", "BTN_DPAD_RIGHT", cx + a * 0.5, cy - a / 2, a, a, hat=("DPAD_X", 1))
-    # face buttons: a diamond
-    fx, fy, r = 8.0, 3.0, 0.62
-    add("pad_btn", "BTN_NORTH", fx - r / 2, fy - r * 1.55, r, r)
-    add("pad_btn", "BTN_SOUTH", fx - r / 2, fy + r * 0.55, r, r)
-    add("pad_btn", "BTN_WEST", fx - r * 1.55, fy - r / 2, r, r)
-    add("pad_btn", "BTN_EAST", fx + r * 0.55, fy - r / 2, r, r)
+    dpad(3.3, 4.8, 0.55)
+    face(8.0, 3.0, 0.62)
     add("small", "BTN_SELECT", 3.6, 2.7, 0.9, 0.45)
     add("small", "BTN_START", 5.5, 2.7, 0.9, 0.45)
     add("small", "BTN_MODE", 4.6, 2.0, 0.8, 0.8)
@@ -250,6 +376,32 @@ MOVE_GAP = 0.15         # seconds of stillness that end a movement burst
 HISTORY_S = 6.0         # how much pointer history the movement views keep
 
 
+# ---------------------------------------------------------------------------
+# Auto-switch: keyboard & mouse <-> controller
+# ---------------------------------------------------------------------------
+PAD_USE_THRESHOLD = 0.25      # a stick / trigger moved this far counts as using the controller
+
+
+def item_group(item: dict) -> str:
+    """"pad" for a controller element's items, "kbm" for everything else."""
+    return "pad" if item.get("et") == "controller" else "kbm"
+
+
+def visible_group(layout: dict, state: "KbmState", style: dict, now: float):
+    """With style.auto_switch on: "pad" while a controller is connected and was used in
+    the last style.auto_switch_minutes, else "kbm" -- only that group's elements are
+    drawn. None (draw everything) when it's off, or when the layout lacks one of the
+    two groups (so the picture never goes blank). common.js visibleGroup is the twin."""
+    if not style.get("auto_switch"):
+        return None
+    groups = {item_group(i) for i in layout.get("items", []) if i.get("et")}
+    if groups != {"pad", "kbm"}:
+        return None
+    window = float(style.get("auto_switch_minutes", 2.0)) * 60.0
+    used = state.pad_connected and state.pad_last is not None and now - state.pad_last <= window
+    return "pad" if used else "kbm"
+
+
 class KbmState:
     """What the picture shows at a moment. Times are seconds on any single
     clock (perf_counter in the app, epoch seconds in the renderer)."""
@@ -270,10 +422,24 @@ class KbmState:
         self.views: dict = {}       # per movement view: zoom / pad origin (drawing state)
         self.axes: dict = {}        # controller axes, real: "LX" -> -1..1 / 0..1
         self.out_axes: dict = {}    # ... set by a macro (virtual controller)
+        self.pad_connected = False  # a controller is connected (the daemon's `s c` lines)
+        self.pad_last = None        # when the controller was last really used (auto-switch)
         self.revision = 0
+
+    def set_pad(self, connected: bool, t: float) -> None:
+        self.pad_connected = bool(connected)
+        if not connected:
+            self.pad_last = None
+        self.revision += 1
+
+    def _pad_used(self, t: float) -> None:
+        self.pad_connected = True              # input from it: it's connected, whatever we were told
+        self.pad_last = t
 
     def key(self, name: str, down: bool, t: float, src: str = "r") -> None:
         d = self.held if src == "r" else self.out_held
+        if src == "r" and down and name in PAD_BUTTONS:
+            self._pad_used(t)
         if down and name in MOUSE_BUTTONS and name not in d:
             self.clicks.append((t, name, src))
             if len(self.clicks) > 64:
@@ -298,6 +464,8 @@ class KbmState:
 
     def axis(self, name: str, value: float, t: float, src: str = "r") -> None:
         d = self.axes if src == "r" else self.out_axes
+        if src == "r" and abs(value) >= PAD_USE_THRESHOLD and not name.endswith("_T"):
+            self._pad_used(t)
         if value:
             d[name] = value
         else:
@@ -334,7 +502,9 @@ class KbmState:
         self.revision += 1
 
     def clear(self) -> None:
+        connected = self.pad_connected         # still plugged in after a block / reconnect
         self.__init__()
+        self.pad_connected = connected
 
 
 # ---------------------------------------------------------------------------
@@ -554,11 +724,16 @@ def _normalized(items: list) -> dict:
 def element_layout(el: dict) -> dict:
     t = el.get("type")
     if t == "keyboard":
-        return keyboard_layout(el.get("layout", "tkl"), bool(el.get("arrows", False)))
+        return apply_labels(keyboard_layout(el.get("layout", "tkl"), bool(el.get("arrows", False))),
+                            el.get("labels", "short"))
     if t == "mouse":
-        return mouse_layout(el.get("look", "classic"))
+        mode = el.get("labels", "letters")
+        return apply_labels(mouse_layout(el.get("look", "classic")), mode, MOUSE_SHORT if mode == "short" else None)
     if t == "controller":
-        return build_controller_layout()
+        look = el.get("look", "xbox")
+        look = look if look in CONTROLLER_LOOKS else "xbox"
+        mode = el.get("labels") or LOOK_DEFAULT_LABELS[look]
+        return apply_labels(build_controller_layout(look), mode, CONTROLLER_LABELS.get(mode))
     if t in MOTION_TYPES:
         opts = {"el": el.get("id", ""), "invert_side": bool(el.get("invert_side", False))}
         if t == "comet":
@@ -600,6 +775,7 @@ def build_scene(scene: dict | None, only=None, normalize: bool = True) -> dict:
             j["x"], j["y"], j["w"], j["h"] = ex + it["x"] * s, ey + it["y"] * s, it["w"] * s, it["h"] * s
             j["fs"] = s
             j["el"] = el.get("id", "")
+            j["et"] = el.get("type", "")
             items.append(j)
     if not items:
         return {"items": [], "w": 1.0, "h": 1.0}
@@ -648,6 +824,7 @@ def scene_has(scene: dict, typ: str) -> bool:
 # the Qt painter and overlay_web/common.js (motionFrame) draw those shapes.
 # Keep the two implementations identical (a test runs both).
 # ===========================================================================
+STICK_DEADZONE = 0.06    # drawing only: a stick this close to the middle is drawn centered
 RING_S = 0.35            # click ring duration
 CHEVRON_S = 0.5          # wheel chevron duration
 ARC_SPAN = 60.0          # degrees: middle / side-button arcs

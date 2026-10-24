@@ -29,7 +29,7 @@ features. That document's content has been folded into this one
 (see "Prior session" below) rather than kept as a separate file, so
 this is now the single source of truth for project state.
 
-## Start here — current state (Session 28)
+## Start here — current state (Session 29)
 
 **What it is.** A NixOS input-macro system: a C++17 daemon (evdev in,
 `uinput` out; control socket; embedded CPython *or* a built-in interpreter
@@ -428,6 +428,56 @@ separately from profiles.
   test asserts one CreateInput, one CreateScene and one item however often
   any button is pressed. GUI: third button "Open Projector".
 
+- **Session 29: Steam Controller, stick centering, auto-switch, controller
+  looks, per-element labels.**
+  - *Steam Controller (2026, "Triton")* -- `native/src/steam_hid.{hpp,cpp}`.
+    No kernel gamepad driver exists for it, so outside Steam it is only a
+    keyboard + mouse ("lizard mode"); KDE's Game Controller page (SDL) reads
+    it from `/dev/hidraw*`. SDL's driver (`SDL_hidapi_steam_triton.c`)
+    turns lizard mode off every 3 s while it holds the device, so SDL was
+    not used: Puppetry reads the raw reports passively and never writes.
+    Devices: 28de:1302 (USB), 1303 (BLE), 1304/1305 (puck / dongle,
+    interfaces 2-5), found through sysfs (`list_hidraw`). Reports 0x42 /
+    0x45 / 0x47 parsed per SDL's `TritonMTUNoQuat_t` /
+    `TritonMTUNoQuat32TS_t` (`parse_triton_report`); wireless status 0x79
+    / 0x46 marks connect / disconnect. Buttons map to existing names
+    (View/Menu as SDL maps them, grips BTN_TRIGGER_HAPPY1-4, quick access
+    5, trackpad clicks 6-7); trackpads are ABS_HAT1X/Y, HAT2X/Y (position)
+    and HAT3X/Y (touched), named LPAD_* / RPAD_* everywhere (getAxis too).
+    Fed through new `feed_controller_key` / `feed_controller_axis` in
+    dispatch.cpp (the evdev controller path: stream, actAs, combos).
+    state.json `watch_steam_controller` (default on; Settings > Devices).
+    `--list-devices` lists Valve hidraw nodes with readability. Assumption
+    to verify on the hardware: the controller streams state reports while
+    in lizard mode (SDL's dongle path implies it).
+  - *Off-center sticks*: `normalize_abs_range` mapped any 0..N axis to
+    0..1, so 0..255 sticks (DualShock, generic pads) rested at 0.5.
+    `normalize_abs_axis(code, ...)`: sticks always -1..1, triggers always
+    0..1 (signed-range triggers rest at 0). Painters also draw |v| < 0.06
+    as centered (`kbm_layout.STICK_DEADZONE`, drift only; getAxis raw).
+  - *Auto-switch* (style `auto_switch`, `auto_switch_minutes`): the daemon
+    streams controller presence `s <t> c 1|0 0` (`controller_presence`,
+    counting evdev controllers, Steam's virtual pads, Steam Controllers;
+    also in the hello). `KbmState.pad_connected / pad_last` (button press
+    or an axis past 0.25). `kbm_layout.visible_group` = "pad" while
+    connected and used within the window, else "kbm"; None when off or the
+    layout lacks either group. Items carry `et` (element type); Qt and JS
+    painters skip the other group (Edit mode and the Customize preview
+    draw everything). Hub: pad events into pages, snapshot and the replay
+    buffer (`pad_at_start`); renderer Timeline replays them. JS twin
+    `visibleGroup` checked against Python under node.
+  - *Controller looks* (element `look`): xbox, steam (two trackpads with
+    finger dot -- new item kind `trackpad` -- grips, View/Menu/Steam/...),
+    ps3, ps4 (touchpad shape, Share/Options). *Labels* per element
+    (`labels`): keyboard short/name/none, mouse letters/short/name/none,
+    controller schemes in `CONTROLLER_LABELS` (xbox, steam, ps4, ps3,
+    ps_words, nintendo, positions) + name/none, grouped in the sidebar
+    dropdown; a look change carries default labels along. Resolved in
+    `element_layout` (`apply_labels`, `fixed_label`) so painters just draw
+    them. The style's `label_mode` / `controller_labels` are gone
+    (`DEFAULTS_REV` 3 moves them onto the elements; the simple list keeps
+    its own `controller_labels`).
+
 **Not verified on real hardware / display.** Everything above ran under
 `QT_QPA_PLATFORM=offscreen`; OBS pages were rendered in headless Chromium
 (the engine behind OBS's browser source). Unchecked: a real OBS (tested
@@ -464,7 +514,7 @@ block; which easing recorded movement should use (`linear` today); whether the O
 `overlay.json` (mode 0600) to a keyring.
 
 **Run the checks.** GUI: `cd gui && QT_QPA_PLATFORM=offscreen python3
-test_app.py` (330 checks), `python3 test_overlay.py` (151 checks: layouts,
+test_app.py` (335 checks), `python3 test_overlay.py` (172 checks: layouts,
 scene, movement-view math, replay file, helper over HTTP/SSE with a fake daemon, fake OBS
 server, renderer + CLI, pieces/controller/source colors, transparency per
 format, align/layer, JS parity; needs ffmpeg, node optional) and

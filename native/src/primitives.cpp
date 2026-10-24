@@ -44,12 +44,16 @@ int axis_code(const std::string& name) {
         {"DPAD_X", ABS_HAT0X}, {"DPAD_Y", ABS_HAT0Y},
         {"ABS_X", ABS_X}, {"ABS_Y", ABS_Y}, {"ABS_RX", ABS_RX}, {"ABS_RY", ABS_RY}, {"ABS_Z", ABS_Z},
         {"ABS_RZ", ABS_RZ}, {"ABS_HAT0X", ABS_HAT0X}, {"ABS_HAT0Y", ABS_HAT0Y},
-        {"ABS_GAS", ABS_GAS}, {"ABS_BRAKE", ABS_BRAKE}};
+        {"ABS_GAS", ABS_GAS}, {"ABS_BRAKE", ABS_BRAKE},
+        // Steam Controller trackpads (steam_hid.hpp): position -1..1 and finger-on 0/1
+        {"LPAD_X", ABS_HAT1X}, {"LPAD_Y", ABS_HAT1Y}, {"RPAD_X", ABS_HAT2X}, {"RPAD_Y", ABS_HAT2Y},
+        {"LPAD_T", ABS_HAT3X}, {"RPAD_T", ABS_HAT3Y}};
     std::string up;
     for (char ch : name) up += (char)std::toupper((unsigned char)ch);
     auto it = t.find(up);
     if (it == t.end())
-        throw std::invalid_argument("unknown axis \"" + name + "\" (LX, LY, RX, RY, LT, RT, DPAD_X, DPAD_Y)");
+        throw std::invalid_argument("unknown axis \"" + name + "\" (LX, LY, RX, RY, LT, RT, DPAD_X, DPAD_Y, "
+                                    "LPAD_X, LPAD_Y, RPAD_X, RPAD_Y, LPAD_T, RPAD_T)");
     return it->second;
 }
 

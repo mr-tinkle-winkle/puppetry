@@ -225,6 +225,8 @@ _REPRESS = Param("repress", "False", kind="bool", caption="block it",
                  doc="True: the press is swallowed -- nothing else (no app, no other macro) sees it.")
 
 _AXES = ('"LX"', '"LY"', '"RX"', '"RY"', '"LT"', '"RT"', '"DPAD_X"', '"DPAD_Y"')
+# reading only: the Steam Controller's trackpads (position -1..1, finger on 0/1)
+_READ_AXES = _AXES + ('"LPAD_X"', '"LPAD_Y"', '"RPAD_X"', '"RPAD_Y"', '"LPAD_T"', '"RPAD_T"')
 
 PRIMITIVES: tuple = (
     Primitive("tap", (Param("key", kind="key", doc="The key or mouse button, e.g. KEY_A or BTN_LEFT."),
@@ -295,7 +297,7 @@ PRIMITIVES: tuple = (
               "mouse position", reporter=True),
     Primitive("getButtonsHeld", (), "input", "Every real key/button held down right now.", "buttons held",
               reporter=True),
-    Primitive("getAxis", (Param("axis", '"LX"', kind="choice", choices=_AXES,
+    Primitive("getAxis", (Param("axis", '"LX"', kind="choice", choices=_READ_AXES,
                                 doc="Which stick / trigger / d-pad axis."),),
               "input", "A real controller's stick or trigger right now (sticks -1..1, triggers 0..1).",
               "controller axis", reporter=True),

@@ -313,7 +313,8 @@ class _Preview(QWidget):
             lay = kl.build_scene(self.scene or kl.DEFAULT_SCENE)
             u = min((r.width() - 16) / lay["w"], (r.height() - 16) / lay["h"], float(self.style_["unit"]))
             w, h = picture_size(lay, self.style_, u)
-            paint_kbm(p, lay, self.style_, self.state, now, unit=u, origin=((r.width() - w) / 2, (r.height() - h) / 2))
+            paint_kbm(p, lay, self.style_, self.state, now, unit=u, origin=((r.width() - w) / 2, (r.height() - h) / 2),
+                      all_groups=True)
         elif self.page == "simple":
             from overlay_render import paint_simple
             h = max(20.0, self.style_["font_px"] * 1.6)

@@ -484,7 +484,7 @@ class CpsArea(QWidget):
         oy = top - miny * u
         self._geom = (ox, oy, u)
         now = time.perf_counter()
-        paint_kbm(p, lay, self.style_, self.kbm, now, unit=u, origin=(ox, oy))
+        paint_kbm(p, lay, self.style_, self.kbm, now, unit=u, origin=(ox, oy), all_groups=self.editing)
         if self.editing:
             from PySide6.QtGui import QPen
             acc = theme.button_color()

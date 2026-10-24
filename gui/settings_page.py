@@ -99,6 +99,16 @@ class SettingsPage(PageBase):
         self.watch_steam.toggled.connect(lambda on: (model.set_pref("watch_steam_devices", on), model.mark_dirty()))
         mark_input(self.watch_steam)
         dl.addWidget(self.watch_steam)
+        self.watch_steam_hid = CustomCheckBox("Read Steam Controllers directly (sticks, triggers, trackpads -- no Steam needed)")
+        self.watch_steam_hid.setChecked(bool(model.state.get("watch_steam_controller", True)))
+        self.watch_steam_hid.setToolTip("The 2026 Steam Controller (and its puck) has no gamepad driver in Linux: outside Steam\n"
+                                        "it's only a keyboard and mouse. Puppetry reads its full gamepad state from its raw\n"
+                                        "HID device (/dev/hidraw*), the way KDE's Game Controller page does, but only listens:\n"
+                                        "it never sends the controller anything, so the controller keeps working as a mouse\n"
+                                        "and keyboard on the desktop.")
+        self.watch_steam_hid.toggled.connect(lambda on: (model.set_pref("watch_steam_controller", on), model.mark_dirty()))
+        mark_input(self.watch_steam_hid)
+        dl.addWidget(self.watch_steam_hid)
         self.watch_all = CustomCheckBox("Watch every input device (keyboards, mice, pads, remotes...)")
         self.watch_all.setChecked(bool(model.state.get("watch_all_devices", False)))
         self.watch_all.setToolTip("Read every input device besides the ones above, read-only: their keys work in\n"

@@ -5,7 +5,8 @@ Qt pictures: the in-app visualizer and the on-screen overlay.
 StreamClient (a QThread) emits event(src, type, name, a, b) per line;
 apply_stream_event() feeds one into a KbmState. Type "p" (src "s") is the
 daemon blocking the input visualizer (an ignored app, or the user's toggle):
-a = 1 blocked (release everything shown), 0 unblocked.
+a = 1 blocked (release everything shown), 0 unblocked. Type "c" (src "s") is
+controller presence: a = 1 one is connected, 0 none (for the auto-switch).
 """
 from __future__ import annotations
 
@@ -25,6 +26,8 @@ def apply_stream_event(k: "kl.KbmState", src: str, typ: str, name: str, a: float
         k.axis(name, a, now, src)
     elif typ == "p" and a:
         k.clear()
+    elif typ == "c":                       # a controller connected (1) / none left (0): auto-switch
+        k.set_pad(bool(a), now)
 
 
 class StreamClient(QThread):

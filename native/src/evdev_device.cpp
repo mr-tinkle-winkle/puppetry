@@ -311,7 +311,26 @@ bool InputDevice::open(const std::string& path) {
 
 double InputDevice::normalize_abs(int code, int value) const {
     if (code < 0 || code >= ABS_CNT) return 0.0;
-    return normalize_abs_range(abs_min_[code], abs_max_[code], value);
+    return normalize_abs_axis(code, abs_min_[code], abs_max_[code], value);
+}
+
+double normalize_abs_axis(int code, int mn, int mx, int value) {
+    if (mx <= mn) return 0.0;
+    switch (code) {
+        // sticks: -1..1 whatever the range. A 0..255 stick (DualShock, many generic pads)
+        // rests at 128 -- read as 0..1 it sat at 0.5, drawn off-center.
+        case ABS_X: case ABS_Y: case ABS_RX: case ABS_RY: {
+            double v = (2.0 * (value - mn) / (double)(mx - mn)) - 1.0;
+            return v < -1 ? -1 : (v > 1 ? 1 : v);
+        }
+        // triggers: 0..1 whatever the range (some pads report -32768..32767, resting at -32768)
+        case ABS_Z: case ABS_RZ: case ABS_GAS: case ABS_BRAKE: {
+            double v = (value - mn) / (double)(mx - mn);
+            return v < 0 ? 0 : (v > 1 ? 1 : v);
+        }
+        default:
+            return normalize_abs_range(mn, mx, value);
+    }
 }
 
 double normalize_abs_range(int mn, int mx, int value) {

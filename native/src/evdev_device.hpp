@@ -70,6 +70,9 @@ std::optional<DeviceInfo> find_best_controller(const std::optional<std::string>&
 // Absolute-axis value -> -1..1 (centered range: sticks), 0..1 (range
 // starting at 0+: triggers), or -1/0/1 (a -1..1 d-pad hat).
 double normalize_abs_range(int mn, int mx, int value);
+// By axis: sticks (ABS_X/Y/RX/RY) always -1..1, triggers (ABS_Z/RZ/GAS/BRAKE)
+// always 0..1, anything else as normalize_abs_range.
+double normalize_abs_axis(int code, int mn, int mx, int value);
 
 enum class ResolveHow { Remembered, Renumbered, AutoDetected, NotFound };
 

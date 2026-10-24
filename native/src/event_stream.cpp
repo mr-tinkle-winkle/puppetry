@@ -80,6 +80,7 @@ void EventStream::accept_loop() {
         }
         hello += "\n";
         if (paused_now) hello += "s " + std::to_string(realtime_us()) + " p 1 0\n";
+        if (controller_.load()) hello += "s " + std::to_string(realtime_us()) + " c 1 0\n";
         if (rt_ && !paused_now) {                   // controller axes that aren't at rest
             std::lock_guard<std::mutex> lock(rt_->axes_mutex);
             long long now = realtime_us();
@@ -113,6 +114,13 @@ void EventStream::set_paused(bool paused) {
     if (paused_.exchange(paused) == paused) return;
     char buf[64];
     int n = std::snprintf(buf, sizeof(buf), "s %lld p %d 0\n", realtime_us(), paused ? 1 : 0);
+    if (n > 0) send_all(buf, (size_t)n);
+}
+
+void EventStream::set_controller(bool present) {
+    if (controller_.exchange(present) == present) return;
+    char buf[64];
+    int n = std::snprintf(buf, sizeof(buf), "s %lld c %d 0\n", realtime_us(), present ? 1 : 0);
     if (n > 0) send_all(buf, (size_t)n);
 }
 
