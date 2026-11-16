@@ -88,7 +88,7 @@ class CustomCheckBox(QAbstractButton):
 
         pen = painter.pen()
         pen.setColor(self._theme.enabled_color().darker(140) if self.isChecked() else self._theme.accent())
-        pen.setWidthF(1.5)
+        pen.setWidthF(self._theme.border(1.5))
         painter.setPen(pen)
         painter.setBrush(Qt.NoBrush)
         if path:

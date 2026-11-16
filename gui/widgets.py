@@ -287,8 +287,16 @@ class Collapsible(QWidget):
 
 
 def section_title(text: str) -> QLabel:
+    import themes
+    theme = Theme()
     lbl = QLabel(text)
-    lbl.setStyleSheet(label_style(Theme().text(), "font-size: 15px; font-weight: bold;"))
+    s = theme.settings
+    if getattr(s, "font_display", "") or getattr(s, "font_body", "") or getattr(s, "display_upper", False):
+        # a look with its own display face: the font carries size / weight / capitals
+        lbl.setFont(themes.display_font(s, 15))
+        lbl.setStyleSheet(label_style(theme.text()))
+    else:
+        lbl.setStyleSheet(label_style(theme.text(), "font-size: 15px; font-weight: bold;"))
     return lbl
 
 
@@ -329,10 +337,13 @@ class PageBase(QWidget):
             outer.addWidget(self.content)
 
     def paintEvent(self, event) -> None:
+        import themes
+        theme = Theme()
         p = QPainter(self)
         p.fillRect(self.rect(), self._bg)
+        themes.paint_pattern(p, self.rect(), theme.settings, self._bg)   # the look's page texture, if any
         p.end()
-        paint_page_outline(self, self._bg)
+        paint_page_outline(self, self._bg, width=theme.border(3.0))
 
 
 # ---------------------------------------------------------------------------

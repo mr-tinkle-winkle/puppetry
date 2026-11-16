@@ -56,6 +56,12 @@ class Theme:
         design choice carried over from afterglow.)"""
         return self._s.rounded_corner_radius if self._s.rounded_corners_enabled else fallback
 
+    def border(self, base: float) -> float:
+        """An outline width: `base` is the kit's own width for that outline,
+        scaled by the look's border_width (2.0 = unchanged)."""
+        bw = float(getattr(self._s, "border_width", 2.0) or 2.0)
+        return max(0.5, base * bw / 2.0)
+
     @property
     def padding(self) -> int:
         return self._s.ui_padding

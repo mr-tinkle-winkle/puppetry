@@ -203,9 +203,15 @@ def run_gui() -> int:
     app = QApplication(sys.argv)
     app.setApplicationName("puppetry")
     app.setDesktopFileName("puppetry")
+    import themes
+    themes.apply_fonts(app, cfg.load_theme_settings())    # the look's fonts, before any widget measures text
     window = MainWindow()
     window.show()
-    return app.exec()
+    code = app.exec()
+    if app.property("puppetry_restart"):                   # Settings > Theme > Apply: come back up in the new look
+        import os
+        os.execv(sys.executable, [sys.executable] + sys.argv)
+    return code
 
 
 def run_cli(argv: list[str]) -> int | None:

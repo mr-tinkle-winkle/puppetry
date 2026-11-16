@@ -626,6 +626,12 @@ bool apply_intercepts(Runtime& rt, int code, int value) {
         return !rt.intercept_swallowed.count(code);
     }
     if (value == 1) {
+        {   // the usual case -- no profile has intercepts -- costs one lock, no copies
+            std::lock_guard<std::mutex> lock(rt.act_as_mutex);
+            bool any = false;
+            for (const auto& p : rt.remap_profiles) if (!p.intercepts.empty()) { any = true; break; }
+            if (!any) return true;
+        }
         std::vector<int> held;
         {
             std::lock_guard<std::mutex> lock(rt.held_mutex);
@@ -669,6 +675,7 @@ bool apply_intercepts(Runtime& rt, int code, int value) {
     bool forward = true;
     {
         std::lock_guard<std::mutex> lock(rt.act_as_mutex);
+        if (rt.active_intercepts.empty() && rt.intercept_swallowed.empty()) return true;
         if (rt.intercept_swallowed.erase(code)) forward = false;
         for (auto it = rt.active_intercepts.begin(); it != rt.active_intercepts.end();) {
             if (vec_has(it->trigger, code)) {

@@ -115,7 +115,7 @@ class CustomGroupBox(QWidget):
 
         pen = painter.pen()
         pen.setColor(self._theme.accent())
-        pen.setWidthF(2)
+        pen.setWidthF(self._theme.border(2))
         painter.setPen(pen)
         painter.setBrush(Qt.NoBrush)
         if path is not None:

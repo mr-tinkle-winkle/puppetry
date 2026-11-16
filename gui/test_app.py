@@ -1624,6 +1624,79 @@ def main() -> int:
     w.nav.button(app.PAGE_MACROS).click()
     pump(50)
 
+    # ------------------------------------------------------------ looks (themes)
+    import themes
+    from PySide6.QtGui import QColor, QFontDatabase
+    from ui_kit.theme_config import ThemeSettings
+    themes.load_fonts()
+    families = set(QFontDatabase.families())
+    check("ten concept looks besides Classic", len(themes.LOOKS) == 11 and "classic" in themes.LOOKS)
+    bad = []
+    for key, look in themes.LOOKS.items():
+        s_ = look.settings()
+        for fname in ("font_body", "font_display", "font_mono"):
+            fam = getattr(s_, fname)
+            if fam and fam not in families:
+                bad.append(f"{key}: font {fam}")
+        for cname, cval in vars(s_).items():
+            if cname.startswith("color_") and cval and not QColor(cval).isValid():
+                bad.append(f"{key}: {cname}={cval}")
+        if s_.pattern not in themes.PATTERNS or s_.preset != key:
+            bad.append(f"{key}: pattern/preset")
+        unknown = set(look.values) - set(vars(ThemeSettings()))
+        if unknown:
+            bad.append(f"{key}: unknown fields {unknown}")
+        # text must be readable on the page and on panels
+        def lum(c):
+            c = QColor(c)
+            def ch(v):
+                v /= 255.0
+                return v / 12.92 if v <= 0.03928 else ((v + 0.055) / 1.055) ** 2.4
+            return 0.2126 * ch(c.red()) + 0.7152 * ch(c.green()) + 0.0722 * ch(c.blue())
+        if key != "classic":
+            for bg in (s_.color_page_background, s_.color_surface):
+                hi, lo = max(lum(s_.color_text), lum(bg)), min(lum(s_.color_text), lum(bg))
+                if (hi + 0.05) / (lo + 0.05) < 7.0:
+                    bad.append(f"{key}: text contrast on {bg}")
+    check("every look: bundled fonts, valid colors, readable text" + (f" -- {bad}" if bad else ""), not bad)
+    arcade = themes.LOOKS["arcade"].settings()
+    back = themes.LOOKS["blackout"].settings(arcade)
+    check("switching looks leaves nothing behind from the last one",
+          back.pattern == "" and back.display_upper is False and back.font_body == "Manrope" and back.border_width == 1.0)
+    kept = themes.LOOKS["arcade"].settings(ThemeSettings(custom_widgets_enabled=False))
+    check("a look keeps the switches it doesn't own", kept.custom_widgets_enabled is False)
+    from ui_kit.theme import Theme as _T
+    check("outline weight scales the kit's widths", _T(arcade).border(2) == 3.0 and _T(ThemeSettings()).border(2) == 2.0)
+    sp = w.settings_page
+    check("Settings lists every look", sp.look_combo.count() == len(themes.LOOKS))
+    sp.look_combo.setCurrentIndex(sp.look_combo.findData("patchbay"))
+    check("picking a look shows its blurb", sp.look_blurb.text() == themes.LOOKS["patchbay"].blurb)
+    import widgets as _widgets
+    _orig_ask = sp_ask = None
+    import settings_page as _sp_mod
+    _orig_ask = _sp_mod.ask
+    _sp_mod.ask = lambda *a, **k: 0            # "Later"
+    try:
+        sp._apply_look()
+    finally:
+        _sp_mod.ask = _orig_ask
+    saved = cfg.load_theme_settings()
+    check("Apply theme writes the whole look to state.json",
+          saved.preset == "patchbay" and saved.color_input == "#ff8a3d" and saved.font_body == "Space Grotesk"
+          and saved.pattern == "dots")
+    from PySide6.QtGui import QImage, QPainter as _QP
+    img = QImage(120, 120, QImage.Format_RGB32)
+    for pat in themes.PATTERNS:
+        base_c = QColor(saved.color_page_background)
+        img.fill(base_c)
+        qp = _QP(img)
+        s2 = ThemeSettings(**{**vars(saved), "pattern": pat})
+        themes.paint_pattern(qp, img.rect(), s2, base_c)
+        qp.end()
+        drew = any(img.pixelColor(x, y) != base_c for x in range(0, 120, 1) for y in range(0, 120, 7))
+        check(f"pattern '{pat or 'none'}' {'draws' if pat else 'draws nothing'}", drew == bool(pat))
+    w.model.set_pref("theme", vars(themes.LOOKS["classic"].settings()))   # back to the look the other checks expect
+
     # ------------------------------------------------------------ styling guardrail
     unscoped = []
     for page in (w.macro_page, w.visualizer_page, w.settings_page, w.editor_page):

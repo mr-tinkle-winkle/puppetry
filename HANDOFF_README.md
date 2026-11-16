@@ -29,7 +29,7 @@ features. That document's content has been folded into this one
 (see "Prior session" below) rather than kept as a separate file, so
 this is now the single source of truth for project state.
 
-## Start here — current state (Session 30)
+## Start here — current state (Session 31)
 
 **What it is.** A NixOS input-macro system: a C++17 daemon (evdev in,
 `uinput` out; control socket; embedded CPython *or* a built-in interpreter
@@ -557,6 +557,68 @@ separately from profiles.
     palette hint label no longer widens the palette (its preferred width
     is font-dependent and failed the width check on a fresh PySide6).
 
+- **Session 31: audit (sanitizers + review), 13 new functions, looks.**
+  - *Stuck keys around a grab (fixed).* Grabbing a device with keys held
+    used to "release" them on the virtual device, which the kernel drops
+    (that device never had them down), so apps kept seeing them held; and a
+    key forwarded during a grab was never released on the virtual device
+    if the grab ended first. Now `grab_with_handover` (primitives.cpp):
+    key-ups are written INTO the real device before the grab
+    (`InputDevice::inject_key`, evdev write, every reader sees them), the
+    grab is taken, key-downs are written again (only the grabber sees them;
+    the kernel's key state is down again so the physical release still
+    arrives), and keys the ignore rules let through are pressed on the
+    virtual device. The watch loop skips its own injected events
+    (`expect_injected` / `consume_injected`). `Runtime::forwarded_down`
+    tracks forwarded presses; their release is forwarded even without a
+    grab, and they are released if the device disappears. `rt.held` is no
+    longer cleared on a grab. Needs write access to the event node (same
+    group as reading); if not writable it logs once and behaves as before.
+    Sequencing is unit-tested with fakes; NOT yet run against real evdev.
+  - *Loop restart race (fixed).* A hold/toggle loop switched back on while
+    its last pass was still running was either lost or could run beside
+    the old one. Each start now has its own stop flag
+    (`RunningMacroState::run_stop`, `loop_mutex`); the new thread joins the
+    previous one first.
+  - *Daemon robustness.* SIGPIPE ignored; control socket: 5 s timeouts,
+    1 MiB request cap, handler exceptions answered instead of fatal,
+    `MSG_NOSIGNAL`; PAUSE takes `"seconds"` and lapses by itself (default
+    60 s, the GUI recorder renews it every 20 s) so a dead GUI cannot leave
+    combos off; listen-socket shutdown/close ordering (found by TSan);
+    `abort_all`'s cleanup thread is waited for in `~Runtime`.
+  - *Focus queries.* `native/src/focus.*`: one cached focused-window
+    query (id each call, class only when the id changes, title on request)
+    shared by the privacy watcher, pause conditions and the new functions.
+  - *New functions (both backends, Dictionary + palette):* `isHeld`,
+    `waitForRelease`, `getFocusedApp`, `getFocusedTitle`, `appFocused`,
+    `pauseWhen(keys=None, app=None, title=None, focused=False,
+    toggle=False)` (a pause condition added from code: `PauseCondition::
+    runtime`, deduplicated, dropped by the abort key via
+    `Runtime::abort_epoch`), `stopLoop`, `getTime`, `random`, `randomInt`,
+    `notify`, `getClipboard` / `setClipboard` (wl-clipboard, else xclip;
+    `run_program` generalizes the kdotool runner). The example macro now
+    pauses itself with `pauseWhen(app=GAME)` and has `FLIP_KEYS`.
+  - *Looks (themes).* `gui/themes.py`: a look = a full `ThemeSettings`
+    (all color roles, radius, padding, plus new fields `preset`,
+    `border_width`, `font_body/display/mono`, `font_size`, `font_weight`,
+    `display_upper`, `pattern`). Ten concepts besides Classic: Marionette,
+    Shadow play, Workbench, Console, Blueprint, Arcade, Brutalist,
+    Patchbay, Felt, Blackout. Semantic colors keep their hue families in
+    every look. Settings > Theme applies one (writes state.json "theme",
+    offers to reopen: `puppetry_restart` -> `os.execv`). Applied through:
+    `themes.apply_fonts` (application font; "monospace" substituted with
+    the look's mono), `widgets.section_title` (display face / capitals),
+    `Theme.border()` scaling the kit's outline widths, `paint_pattern` in
+    `PageBase.paintEvent`. Fonts: `gui/resources/fonts` (OFL, licenses
+    beside them) plus the overlay's set. Concept stage: no tab styles or
+    motion yet; block text keeps its own sizing (small in Arcade).
+  - Also: overlapping "Simplified Variable Names" / "Run as embedded
+    Python" labels fixed; unused `gui/combo_recorder.py` removed;
+    `native/build*/` ignored.
+  - Checked and left alone: daemon hot paths (bench_cps unchanged within
+    noise, ~3 M taps/s), GUI start (0.7 s with 40 macros), pyflakes clean,
+    ASan/UBSan clean.
+
 **Not verified on real hardware / display.** Everything above ran under
 `QT_QPA_PLATFORM=offscreen`; OBS pages were rendered in headless Chromium
 (the engine behind OBS's browser source). Unchecked: a real OBS (tested
@@ -597,12 +659,12 @@ block; which easing recorded movement should use (`linear` today); whether the O
 `overlay.json` (mode 0600) to a keyring.
 
 **Run the checks.** GUI: `cd gui && QT_QPA_PLATFORM=offscreen python3
-test_app.py` (350 checks), `python3 test_overlay.py` (172 checks: layouts,
+test_app.py` (364 checks), `python3 test_overlay.py` (172 checks: layouts,
 scene, movement-view math, replay file, helper over HTTP/SSE with a fake daemon, fake OBS
 server, renderer + CLI, pieces/controller/source colors, transparency per
 format, align/layer, JS parity; needs ffmpeg, node optional) and
 `python3 ui_kit_test_kit.py`. Daemon: `cd native && mkdir build && cd build
-&& cmake .. && cmake --build . -j && ctest -LE timing` (9 tests, incl.
+&& cmake .. && cmake --build . -j && ctest -LE timing` (10 tests, incl.
 `test_event_stream`, `test_pause`). The sections below are the per-session history; the
 newest facts are above.
 

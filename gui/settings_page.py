@@ -22,7 +22,7 @@ from ui_kit.custom_message_dialog import show_message
 from ui_kit.custom_spinbox import CustomDoubleSpinBox
 from ui_kit.theme_editor import ThemeEditorGroup
 from ui_kit.theme import Theme
-from widgets import Collapsible, PageBase, ask, dim_label, label_style, mark_disable, mark_input, mark_output, prompt_text, switch_profile_interactive
+from widgets import Collapsible, PageBase, ask, dim_label, label_style, mark_disable, mark_enable, mark_input, mark_output, prompt_text, switch_profile_interactive
 
 
 class SettingsPage(PageBase):
@@ -218,6 +218,34 @@ class SettingsPage(PageBase):
         bl.addWidget(self.realtime)
         self.content_layout.addWidget(beh)
 
+        # ------------------------------------------------------------ theme (looks)
+        import themes
+        look_box = CustomGroupBox("Theme")
+        ll = look_box.make_layout(QVBoxLayout)
+        row = QHBoxLayout()
+        self.look_combo = QComboBox()
+        self.look_combo.setStyleSheet(combo_box_stylesheet(theme_config.get_settings()))
+        for key, look in themes.LOOKS.items():
+            self.look_combo.addItem(look.name, key)
+        current_look = themes.look_for(cfg.load_theme_settings()).key
+        self.look_combo.setCurrentIndex(max(0, self.look_combo.findData(current_look)))
+        row.addWidget(self.look_combo)
+        self.look_apply = CustomButton("Apply theme")
+        mark_enable(self.look_apply)
+        self.look_apply.clicked.connect(self._apply_look)
+        row.addWidget(self.look_apply)
+        row.addStretch(1)
+        ll.addLayout(row)
+        self.look_blurb = dim_label("")
+        ll.addWidget(self.look_blurb)
+        ll.addWidget(dim_label("A theme sets every color, the corners, outline weight, fonts and page pattern at "
+                               "once. What input (orange family), output (blue family), enabled (green) and "
+                               "disabled (red) mean stays the same in all of them. The Appearance values below "
+                               "can still be changed afterwards."))
+        self.look_combo.currentIndexChanged.connect(self._look_changed)
+        self._look_changed()
+        self.content_layout.addWidget(look_box)
+
         # ------------------------------------------------------------ appearance
         self.theme_editor = ThemeEditorGroup(current=cfg.load_theme_settings(), defaults=cfg.PUPPETRY_THEME_DEFAULTS,
                                              labels={"app_theme_enabled": "Puppetry Theme Colors"})
@@ -386,6 +414,27 @@ class SettingsPage(PageBase):
         if on and self.model.dirty:
             self.model.save()
         self.model.dirty_changed.emit(self.model.dirty)
+
+    def _look_changed(self, *_a) -> None:
+        import themes
+        look = themes.LOOKS.get(self.look_combo.currentData())
+        self.look_blurb.setText(look.blurb if look else "")
+
+    def _apply_look(self) -> None:
+        import themes
+        look = themes.LOOKS.get(self.look_combo.currentData())
+        if look is None:
+            return
+        self.model.set_pref("theme", asdict(look.settings(cfg.load_theme_settings())))
+        choice = ask(self, "Theme", f"\u201c{look.name}\u201d is saved. It shows everywhere once Puppetry reopens.",
+                     ["Later", "Reopen now"], default=1)
+        if choice == 1:
+            from PySide6.QtWidgets import QApplication
+            QApplication.instance().setProperty("puppetry_restart", True)
+            win = self.window()
+            win.close()                      # goes through the usual unsaved-changes check
+            if win.isVisible():              # ...which was cancelled: a later quit is a plain quit
+                QApplication.instance().setProperty("puppetry_restart", False)
 
     def _save_theme(self) -> None:
         theme = cfg.load_theme_settings()

@@ -452,6 +452,7 @@ class MacroEditorPage(QWidget):
                                   "Off: Puppetry's fast native interpreter -- variables, if/else, loops, functions,\n"
                                   "math, every block; no imports, classes, try or methods like \"a\".upper().")
         head.addWidget(self.simplified_cb)
+        head.addSpacing(max(pad, 12))    # the two labels ran into each other
         head.addWidget(self.python_cb)
         rcol.addLayout(head)
         self.code = ZoomablePlainTextEdit()

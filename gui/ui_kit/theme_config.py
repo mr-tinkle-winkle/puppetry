@@ -71,6 +71,19 @@ class ThemeSettings:
     color_false: str = "#e05757"           # red: False / disabled / disable / delete
     text_outline_width: float = 1.0        # OutlinedLabel stroke width, px
 
+    # ---- looks (gui/themes.py) -------------------------------------------
+    # A "look" is a whole set of these settings picked by name; the fields
+    # below are what a look can change beyond colors and corners.
+    preset: str = "classic"                # which look these came from
+    border_width: float = 2.0              # outline weight; 2.0 = the kit's own widths, others scale them
+    font_body: str = ""                    # family; "" = the desktop's font
+    font_display: str = ""                 # section titles; "" = font_body
+    font_mono: str = ""                    # code, key names; "" = the desktop's monospace
+    font_size: int = 0                     # body size, pt; 0 = the desktop's
+    font_weight: int = 0                   # body weight (100-900); 0 = regular
+    display_upper: bool = False            # section titles in capitals
+    pattern: str = ""                      # page background: "", "grid", "dots", "scanlines", "ruled", "weave"
+
 
 # Field groups, used by the theme editor's "Revert" buttons.
 COLOR_FIELDS = tuple(f.name for f in fields(ThemeSettings) if f.name.startswith("color_"))

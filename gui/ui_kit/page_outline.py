@@ -20,14 +20,15 @@ DARKEN_FACTOR = 115  # Qt's own "darker(factor)" convention -- 115 = 15% darker
 
 
 def paint_page_outline(widget, base_color: QColor, skip_top: bool = False, skip_bottom: bool = False,
-                        skip_left: bool = False, skip_right: bool = False) -> None:
+                        skip_left: bool = False, skip_right: bool = False, width: float = BORDER_WIDTH) -> None:
+    width = min(float(width), BORDER_WIDTH)   # pages reserve 3px for it: thinner is fine, wider would be clipped
     painter = QPainter(widget)
     painter.setRenderHint(QPainter.Antialiasing)
     pen = painter.pen()
     pen.setColor(base_color.darker(DARKEN_FACTOR))
-    pen.setWidthF(BORDER_WIDTH)
+    pen.setWidthF(width)
     painter.setPen(pen)
-    inset = BORDER_WIDTH / 2
+    inset = width / 2
     rect = QRectF(widget.rect()).adjusted(inset, inset, -inset, -inset)
     if not skip_top:
         painter.drawLine(QPointF(rect.left(), rect.top()), QPointF(rect.right(), rect.top()))

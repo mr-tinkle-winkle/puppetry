@@ -69,7 +69,7 @@ class CustomRadioButton(QAbstractButton):
         # this outline wasn't rendering at all. A brand-new QPen
         # defaults to Qt.SolidLine, avoiding the trap entirely.
         pen = QPen(self._theme.accent())
-        pen.setWidthF(1.5)
+        pen.setWidthF(self._theme.border(1.5))
         painter.setPen(pen)
         painter.setBrush(Qt.NoBrush)
         painter.drawEllipse(box_rect)
