@@ -120,6 +120,45 @@ void end_intercepts_if(Runtime& rt, const std::function<bool(const ActiveInterce
 // again.
 bool apply_intercepts(Runtime& rt, int code, int value);
 
+// Whether a real key press may reach the apps under the ignore rules
+// (ignore(), ignore_keys(), waitForPress(repress=...)). kind: "keyboard" /
+// "mouse".
+bool passes_ignore_rules(Runtime& rt, const std::string& kind, int code);
+
+// Taking a device over while keys are held on it. Without this the apps
+// keep seeing those keys as down on the real device (its release no longer
+// reaches them) -- a stuck key. Sequence:
+//   1. inject(code, 0) for every held key: the real device "releases" them
+//      for everyone;
+//   2. grab();
+//   3. inject(code, 1): only this process sees it, and the kernel's key
+//      state is down again so the physical release is still delivered;
+//   4. keys the ignore rules let through are pressed on the virtual device
+//      (rt.forwarded_down), so the app sees a held key carry on.
+// `inject` returns false when the device can't be written (then that key is
+// left as it was). Throws what grab() throws, after undoing step 1.
+void grab_with_handover(Runtime& rt, const std::string& kind, const std::vector<int>& held,
+                        const std::function<bool(int code, int value)>& inject, const std::function<void()>& grab);
+
+// Runs a program (argv[0] looked up in PATH), captures its stdout. False on
+// a non-zero exit, a timeout (the child is killed) or if it can't start.
+bool run_program(const std::vector<std::string>& argv, std::string& output, double timeout_s);
+
+// isHeld(key): a real key/button is down right now.
+bool is_held_fn(Runtime& rt, int code);
+// waitForRelease(*keys): until none of them is held (none given: nothing at all).
+void wait_for_release_fn(Runtime& rt, const std::vector<int>& codes);
+// getTime(): seconds on a clock that only goes forward (for measuring).
+double get_time_fn();
+// random(a, b): a float in [a, b]; randomInt(a, b): an integer, both ends included.
+double random_fn(double a, double b);
+long long random_int_fn(long long a, long long b);
+// notify(text, title): a desktop notification (notify-send), not waited for.
+void notify_fn(const std::string& text, const std::string& title);
+// getClipboard() / setClipboard(text): wl-clipboard, else xclip. False if neither works.
+bool get_clipboard_fn(std::string& out);
+bool set_clipboard_fn(const std::string& text);
+
 // getMouseMotion(): total raw motion of the real mice (REL_X, REL_Y counts,
 // no pointer acceleration) -- minus whatever moved while the calling macro
 // was paused. `offset_x/offset_y` are that macro's paused totals (0 off a

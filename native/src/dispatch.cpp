@@ -59,7 +59,7 @@ void handle_key_event(Runtime& rt, std::vector<std::unique_ptr<Macro>>& macros, 
             rt.held.insert(code);
             current.assign(rt.held.begin(), rt.held.end());
         }
-        if (rt.external_pause.load()) return;
+        if (rt.external_paused()) return;
         pause_on_key(rt, macros, code, 1, current);
 
         for (Macro* m : maximal_matching_macros(macros, code, current)) {
@@ -154,14 +154,7 @@ bool apply_act_as(Runtime& rt, int code, int value) {
 }
 
 static bool should_forward(Runtime& rt, const std::string& kind, int code, bool original_wants_forward) {
-    if (!original_wants_forward) return false;
-    std::lock_guard<std::mutex> lock(rt.ignore_mutex);
-    if (kind == "keyboard" && rt.ignore_keyboard) return false;
-    if (kind == "mouse" && rt.ignore_mouse_buttons && is_button_code(code)) return false;
-    if (rt.ignored_keys.count(code)) return false;
-    if (rt.repress_codes.count(code)) return false;
-    if (rt.repress_any > 0) return false;
-    return true;
+    return original_wants_forward && passes_ignore_rules(rt, kind, code);
 }
 
 void feed_controller_key(Runtime& rt, MacroRegistry& registry, std::vector<std::unique_ptr<Macro>>& macros,
@@ -235,6 +228,8 @@ void watch_device(Runtime& rt, MacroRegistry& registry, std::vector<std::unique_
         for (int i = 0; i < n; ++i) {
             const RawEvent& ev = evs[i];
             if (ev.type == EV_KEY) {
+                // our own hand-over events around a grab (grab_with_handover): not input
+                if (primary && dev.consume_injected(ev.code, ev.value)) continue;
                 if (ev.value != 2) {
                     EventStream* es = g_event_stream.load(std::memory_order_relaxed);
                     if (es && es->active()) es->publish('r', ev.time_us, 'k', ev.code, ev.value);
@@ -253,8 +248,17 @@ void watch_device(Runtime& rt, MacroRegistry& registry, std::vector<std::unique_
                 // net), a key-DOWN only if nothing suppresses it.
                 bool forward = grabbed &&
                                ((ev.value == 0) || should_forward(rt, kind, ev.code, original_wants_forward));
+                // A press we forwarded is down on the VIRTUAL device: its
+                // release has to go there too, even if the grab has ended
+                // since (the real device's own release means nothing to the
+                // apps, they never saw its press).
+                if (primary && ev.value == 0 && rt.forwarded_down.has(ev.code)) forward = true;
                 handle_key_event(rt, macros, abort_code, ev.code, ev.value, on_trigger);
-                if (forward) push(is_mouse_button(ev.code) ? out_mouse : out_kb, EV_KEY, ev.code, ev.value);
+                if (forward) {
+                    push(is_mouse_button(ev.code) ? out_mouse : out_kb, EV_KEY, ev.code, ev.value);
+                    if (ev.value == 1) rt.forwarded_down.set(ev.code);
+                    else if (ev.value == 0) rt.forwarded_down.clear(ev.code);
+                }
             } else if (ev.type == EV_REL && (kind == "mouse" || kind == "extra" || kind == "extra_pad")) {
                 // The user just moved the real mouse, so any position
                 // move_mouse(move_to=True) had cached is now wrong. One
@@ -317,6 +321,12 @@ void watch_device(Runtime& rt, MacroRegistry& registry, std::vector<std::unique_
         }
     }
     if (primary) {   // the device went away: nothing may grab or forward through it any more
+        // ...and what it had forwarded can't be released by it any more
+        for (int code : rt.forwarded_down.snapshot()) {
+            if ((kind == "mouse") != is_mouse_button(code)) continue;
+            (kind == "mouse" ? rt.ui_mouse : rt.ui_keyboard).key_frame(code, 0);
+            rt.forwarded_down.clear(code);
+        }
         std::lock_guard<std::mutex> lock(rt.grab_mutex);
         InputDevice*& slot = (kind == "keyboard" ? rt.watched_keyboard : rt.watched_mouse);
         if (slot == &dev) {

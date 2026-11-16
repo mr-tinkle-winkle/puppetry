@@ -1,4 +1,5 @@
 #include "privacy.hpp"
+#include "focus.hpp"
 
 #include <cctype>
 #include <chrono>
@@ -158,15 +159,11 @@ void run_privacy_watch(Runtime& rt) {
         // focused: one window's class + title against every rule (an "open" rule
         // matches the focused window too)
         if (any_focused || any_open_class || any_open_title) {
-            bool ok;
-            std::string id = kd({"getactivewindow"}, ok);
-            if (!ok) watching = false;
-            if (ok && !id.empty()) {
-                bool ok2, ok3;
-                std::string cls = kd({"getwindowclassname", id}, ok2);
-                std::string title = kd({"getwindowname", id}, ok3);
+            FocusInfo f = focused_window(0.4, true);   // shared, cached (focus.hpp)
+            if (!f.ok) watching = false;
+            if (f.ok && !f.id.empty()) {
                 for (const auto& r : rules) {
-                    if (ignored_app_matches(r, cls, title)) {
+                    if (ignored_app_matches(r, f.cls, f.title)) {
                         blocked = true;
                         app = r.value;
                         why = "focused";

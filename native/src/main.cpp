@@ -203,6 +203,9 @@ int main(int argc, char** argv) {
     // for a daemon whose whole job is timing. Inherited by every thread
     // created after this point (all of them).
     prctl(PR_SET_TIMERSLACK, 1UL, 0, 0, 0);
+    // A socket client (GUI, overlay helper, puppetry-fire) hanging up
+    // mid-write must be an error return, not the end of the daemon.
+    std::signal(SIGPIPE, SIG_IGN);
 
     ensure_config_exists();
     json state = load_state();

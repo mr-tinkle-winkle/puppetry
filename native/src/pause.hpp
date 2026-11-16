@@ -41,6 +41,14 @@ void run_pause_focus_watch(Runtime& rt, std::vector<std::unique_ptr<Macro>>& mac
 // change (motion offset, actAs handover, log, status file).
 void refresh_paused(Runtime& rt, Macro& m);
 
+// pauseWhen(): adds a pause condition to a macro while the daemon runs
+// (the same rule twice is one rule). It holds from now on -- a "while"
+// rule that is already true pauses the macro at once -- until the abort
+// key, which drops every rule added this way.
+void pause_when(Runtime& rt, Macro& m, PauseCondition c);
+// Drops the pauseWhen() rules of every macro (after an abort).
+void clear_runtime_pause_conditions(Runtime& rt, std::vector<std::unique_ptr<Macro>>& macros);
+
 void write_pause_status(const std::vector<std::unique_ptr<Macro>>& macros);
 
 } // namespace puppetry

@@ -157,6 +157,12 @@ struct PauseCondition {
     std::string value;           // lowercase
     bool focused = false;        // app: true = "is focused", false = "is not focused"
     bool holding = false;        // runtime: the condition is true right now
+    bool runtime = false;        // added by pauseWhen() (cleared by the abort key), not from macros.json
+
+    bool same_rule(const PauseCondition& o) const {
+        return kind == o.kind && toggle == o.toggle && keys == o.keys && match == o.match && value == o.value &&
+               focused == o.focused;
+    }
 };
 
 struct RunningMacroState {
@@ -168,8 +174,15 @@ struct RunningMacroState {
     std::atomic<long long> motion_off_x{0}, motion_off_y{0};
     long long paused_at_x = 0, paused_at_y = 0;
 
+    // Looping (hold / toggle). active_hold: a loop is running and hasn't
+    // been asked to stop. Each start gets its own stop flag (run_stop), so
+    // a loop restarted while the previous one is still finishing its last
+    // pass neither revives the old one nor runs beside it: the new thread
+    // waits for the old one first. loop_mutex guards thread + run_stop.
+    std::mutex loop_mutex;
     std::thread thread;
-    std::atomic<bool> stop_flag{false};
+    std::shared_ptr<std::atomic<bool>> run_stop;
+    std::atomic<bool> stop_flag{false};   // the latest stop request (also what tests poke)
     std::atomic<bool> active_hold{false};
     std::atomic<bool> armed_up{false};
     // waitForReactivation(): while > 0, a trigger of this macro wakes

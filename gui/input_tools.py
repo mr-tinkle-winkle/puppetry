@@ -144,10 +144,13 @@ class ComboRecorder(QThread):
         if not HAVE_EVDEV:
             self.finished_combo.emit([], "no_devices")
             return
-        cfg.send_control_command({"cmd": "PAUSE"})  # best-effort; fails fast if the daemon's down
+        # The daemon's pause lapses by itself (60 s) so a GUI that dies here
+        # can't leave macros dead; it's renewed while recording goes on.
+        cfg.send_control_command({"cmd": "PAUSE", "seconds": 60})  # best-effort; fails fast if the daemon's down
         sel, devices = _open(self.paths)
         held: set[int] = set()
         last_change = time.monotonic()
+        last_pause = last_change
         finalized = None
         try:
             if not devices:
@@ -169,6 +172,9 @@ class ComboRecorder(QThread):
                     except BlockingIOError:
                         pass
                 now = time.monotonic()
+                if now - last_pause > 20.0:
+                    last_pause = now
+                    cfg.send_control_command({"cmd": "PAUSE", "seconds": 60})
                 if changed:
                     last_change = now
                 if held:

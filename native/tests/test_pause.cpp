@@ -16,6 +16,7 @@
 #include <linux/input.h>
 #include <unistd.h>
 #include "dispatch.hpp"
+#include "focus.hpp"
 #include "macro.hpp"
 #include "native_vm.hpp"
 #include "pause.hpp"
@@ -515,7 +516,217 @@ static void test_remap_profiles() {
     std::this_thread::sleep_for(std::chrono::milliseconds(400));
 }
 
+static void test_grab_handover() {
+    Runtime rt;
+    std::vector<std::string> log;
+    auto inject = [&](int code, int value) { log.push_back("inject " + std::to_string(code) + "=" + std::to_string(value)); return true; };
+    auto grab = [&] { log.push_back("grab"); };
+    {   // W ignored, A free: both released on the real device before the grab, put back after
+        std::lock_guard<std::mutex> lock(rt.ignore_mutex);
+        rt.ignored_keys.insert(KEY_W);
+    }
+    grab_with_handover(rt, "keyboard", {KEY_W, KEY_A}, inject, grab);
+    std::vector<std::string> want = {"inject 17=0", "inject 30=0", "grab", "inject 17=1", "inject 30=1"};
+    CHECK(log == want, "handover order: release for everyone, grab, restore for us");
+    CHECK(rt.forwarded_down.has(KEY_A) && !rt.forwarded_down.has(KEY_W),
+          "a held key that may pass carries on through the virtual device; an ignored one doesn't");
+    CHECK(rt.forwarded_down.snapshot() == std::vector<int>{KEY_A}, "snapshot lists the set");
+
+    // the device can't be written: nothing injected, nothing pretended
+    Runtime rt2;
+    log.clear();
+    grab_with_handover(rt2, "keyboard", {KEY_W}, [&](int, int) { return false; }, grab);
+    CHECK(log == std::vector<std::string>{"grab"} && rt2.forwarded_down.empty(), "unwritable device: plain grab");
+
+    // the grab fails: the keys are given back, the error passes through
+    Runtime rt3;
+    log.clear();
+    bool threw = false;
+    try {
+        grab_with_handover(rt3, "keyboard", {KEY_W}, inject, [] { throw std::runtime_error("EBUSY"); });
+    } catch (const std::runtime_error&) { threw = true; }
+    CHECK(threw && log == (std::vector<std::string>{"inject 17=0", "inject 17=1"}) && rt3.forwarded_down.empty(),
+          "failed grab: held keys restored for everyone");
+
+    // GUI pause lapses by itself
+    Runtime rt4;
+    rt4.set_external_pause(0.05);
+    CHECK(rt4.external_paused(), "external pause on");
+    std::this_thread::sleep_for(std::chrono::milliseconds(80));
+    CHECK(!rt4.external_paused(), "external pause lapsed without a RESUME");
+}
+
+static std::string g_fake_class = "org.vinegarhq.Sober", g_fake_title = "Roblox";
+static std::atomic<int> g_fake_calls{0};
+static bool fake_kdotool(const std::vector<std::string>& args, std::string& out) {
+    ++g_fake_calls;
+    if (args.empty()) return false;
+    if (args[0] == "getactivewindow") out = "{window-1}\n";
+    else if (args[0] == "getwindowclassname") out = g_fake_class + "\n";
+    else if (args[0] == "getwindowname") out = g_fake_title + "\n";
+    else return false;
+    return true;
+}
+
+static void test_new_functions(Runtime& rt) {
+    focus_set_runner_for_tests(&fake_kdotool);
+    // the focus cache: one id query, the class only once per window
+    g_fake_calls = 0;
+    FocusInfo a = focused_window(0.0, false);
+    FocusInfo b = focused_window(10.0, false);
+    CHECK(a.ok && a.cls == "org.vinegarhq.Sober" && b.cls == a.cls && g_fake_calls.load() == 2,
+          "focus: id + class asked once, then cached: " + std::to_string(g_fake_calls.load()));
+    focused_window(0.0, false);
+    CHECK(g_fake_calls.load() == 3, "focus: same window again costs one query, not two");
+    CHECK(focused_window(10.0, true).title == "Roblox", "focus: title on request");
+    CHECK(icontains("org.vinegarhq.Sober", "SOBER") && !icontains("firefox", "sober"), "icontains");
+
+    MacroRegistry registry;
+    auto probe = std::make_shared<Probe>();
+    registry.set("Probe", probe);
+    hold(rt, KEY_Q, true);
+    const char* code =
+        "Probe(isHeld(KEY_Q), isHeld(KEY_Z), isHeld('KEY_Q'))\n"
+        "Probe(getFocusedApp(), getFocusedTitle(), appFocused('sober'), appFocused(app='ROBLOX'), appFocused('firefox'))\n"
+        "r = random()\n"
+        "s = random(2, 3)\n"
+        "n = randomInt(1, 6)\n"
+        "Probe(r >= 0 and r <= 1, s >= 2 and s <= 3, randomInt(5, 5), n >= 1 and n <= 6)\n"
+        "t = getTime()\n"
+        "wait(0.02)\n"
+        "Probe(getTime() - t >= 0.01, getTime() - t < 1)\n"
+        "waitForRelease(KEY_Z)\n"
+        "waitForRelease(KEY_Z, KEY_X)\n"
+        "Probe('released')\n";
+    json def = {{"id", "t"}, {"name", "T"}, {"code", code}};
+    std::string native_log, py_log;
+    try {
+        auto m = compile_native_macro(def, registry);
+        probe->log.clear();
+        m->run(rt, registry, {});
+        for (auto& l : probe->log) native_log += l + "\n";
+    } catch (const std::exception& e) { native_log = std::string("ERROR ") + e.what(); }
+    try {
+        auto m = compile_python_macro(def, registry, {"Probe"});
+        probe->log.clear();
+        m->run(rt, registry, {});
+        for (auto& l : probe->log) py_log += l + "\n";
+    } catch (const std::exception& e) { py_log = std::string("ERROR ") + e.what(); }
+    const std::string want =
+        "True|False|True\norg.vinegarhq.Sober|Roblox|True|True|False\nTrue|True|5|True\nTrue|True\nreleased\n";
+    CHECK(native_log == want, "new functions, native:\n" + native_log);
+    CHECK(py_log == want, "new functions, python:\n" + py_log);
+
+    // waitForRelease really waits
+    std::atomic<bool> done{false};
+    auto waiter = compile_native_macro(json{{"id", "w"}, {"name", "W"}, {"code", "waitForRelease(KEY_Q)\n"}}, registry);
+    std::thread t([&] { try { waiter->run(rt, registry, {}); } catch (...) {} done = true; });
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    CHECK(!done.load(), "waitForRelease blocks while the key is held");
+    hold(rt, KEY_Q, false);
+    t.join();
+    CHECK(done.load(), "...and returns on release");
+
+    // pauseWhen(): pauses the calling macro right away when it already holds, on both paths
+    for (int python = 0; python < 2; ++python) {
+        std::vector<std::unique_ptr<Macro>> macros;
+        macros.push_back(std::make_unique<Macro>());
+        Macro& m = *macros[0];
+        m.id = "pw";
+        m.name = "PW";
+        m.enabled = true;
+        json d = {{"id", "pw"}, {"name", "PW"}, {"code", "pauseWhen(app='sober', focused=False)\npauseWhen(app='sober', focused=False)\nProbe('ran')\n"}};
+        m.func = python ? compile_python_macro(d, registry, {"Probe"}) : compile_native_macro(d, registry);
+        g_fake_class = "firefox";
+        focus_set_runner_for_tests(&fake_kdotool);
+        probe->log.clear();
+        std::thread run([&] {
+            set_current_macro(&m);
+            try { m.func->run(rt, registry, {}); } catch (...) {}
+            set_current_macro(nullptr);
+        });
+        std::this_thread::sleep_for(std::chrono::milliseconds(60));
+        const std::string which = python ? "python" : "native";
+        CHECK(m.runtime->paused.load() && probe->log.empty(), "pauseWhen (" + which + "): Sober not focused -> paused, parked");
+        size_t rules;
+        { std::lock_guard<std::mutex> lock(m.runtime->pause_mutex); rules = m.pause_conditions.size(); }
+        CHECK(rules == 1, "pauseWhen (" + which + "): the same rule twice is one rule");
+        pause_on_focus(rt, macros, true, "org.vinegarhq.Sober", "Roblox");
+        run.join();
+        CHECK(!m.runtime->paused.load() && probe->log.size() == 1, "pauseWhen (" + which + "): focused again -> carries on");
+        pause_on_focus(rt, macros, true, "firefox", "x");
+        CHECK(m.runtime->paused.load(), "the rule stays after the macro ended");
+        clear_runtime_pause_conditions(rt, macros);
+        CHECK(!m.runtime->paused.load() && m.pause_conditions.empty(), "abort drops pauseWhen() rules and resumes");
+    }
+    g_fake_class = "org.vinegarhq.Sober";
+
+    // stopLoop(): a toggle loop that ends itself
+    {
+        Macro m;
+        m.id = "sl";
+        m.name = "SL";
+        m.enabled = true;
+        m.repeat_mode = RepeatMode::Toggle;
+        m.func = compile_native_macro(json{{"id", "sl"}, {"name", "SL"}, {"code", "Probe('pass')\nstopLoop()\n"}}, registry);
+        probe->log.clear();
+        trigger_macro(rt, registry, m);
+        std::this_thread::sleep_for(std::chrono::milliseconds(80));
+        CHECK(probe->log.size() == 1 && !macro_is_looping(m), "stopLoop(): one pass, then off");
+        std::lock_guard<std::mutex> lock(m.runtime->loop_mutex);
+        if (m.runtime->thread.joinable()) m.runtime->thread.join();
+    }
+    focus_set_runner_for_tests(nullptr);
+}
+
+struct SlowBody : CompiledMacro {
+    std::atomic<int> running{0}, max_running{0}, passes{0};
+    void run(Runtime& rt, MacroRegistry&, const std::vector<std::string>&) override {
+        int now = ++running;
+        int seen = max_running.load();
+        while (now > seen && !max_running.compare_exchange_weak(seen, now)) {}
+        for (int i = 0; i < 6; ++i) { rt.check_abort(); std::this_thread::sleep_for(std::chrono::milliseconds(10)); }
+        ++passes;
+        --running;
+    }
+};
+
+static void test_loop_restart() {
+    // A toggle loop switched off and straight back on while its last pass is
+    // still running: exactly one loop afterwards, never two side by side,
+    // and switching it off again really stops it.
+    Runtime rt;
+    MacroRegistry registry;
+    Macro m;
+    m.id = "loop";
+    m.name = "Loop";
+    m.enabled = true;
+    m.repeat_mode = RepeatMode::Toggle;
+    auto body = std::make_shared<SlowBody>();
+    m.func = body;
+    trigger_macro(rt, registry, m);           // on
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    trigger_macro(rt, registry, m);           // off (mid-pass)
+    CHECK(!macro_is_looping(m), "stop request: no longer looping");
+    trigger_macro(rt, registry, m);           // on again before that pass ended
+    CHECK(macro_is_looping(m), "restarted during the old loop's last pass");
+    std::this_thread::sleep_for(std::chrono::milliseconds(250));
+    CHECK(body->max_running.load() == 1, "old and new loop never ran side by side: " + std::to_string(body->max_running.load()));
+    CHECK(macro_is_looping(m) && body->passes.load() >= 3, "the new loop is running");
+    trigger_macro(rt, registry, m);           // off
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+    int at_stop = body->passes.load();
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+    CHECK(body->passes.load() == at_stop && body->running.load() == 0, "switched off: it stays off");
+    {
+        std::lock_guard<std::mutex> lock(m.runtime->loop_mutex);
+        if (m.runtime->thread.joinable()) m.runtime->thread.join();
+    }
+}
+
 int main() {
+    test_grab_handover();
+    test_loop_restart();
     test_immediate_act_as();
     test_parse();
     test_key_conditions();
@@ -525,6 +736,7 @@ int main() {
     Runtime rt;
     python_embed_init(rt);
     test_saved_vars(rt);
+    test_new_functions(rt);
     python_embed_shutdown();
     std::printf("%d checks, %d failed\n", test_count, failures);
     return failures ? 1 : 0;

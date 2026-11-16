@@ -19,3 +19,6 @@ result-*
 # locally if you've been testing in place.
 state.json
 profiles/
+
+# CMake build trees
+native/build*/

@@ -7,6 +7,8 @@
 #include <vector>
 #include "keycodes.hpp"
 #include "macro.hpp"
+#include "focus.hpp"
+#include "pause.hpp"
 #include "primitives.hpp"
 #include "saved_vars.hpp"
 #include "simplified_names.hpp"
@@ -442,7 +444,7 @@ static bool keys_from_py(PyObject* o, const char* what, std::vector<int>& out) {
     if (!o || o == Py_None) return true;
     int code;
     if (PyLong_Check(o) || PyUnicode_Check(o)) {
-        if (!resolve_key_arg(o, code)) { PyErr_Format(PyExc_ValueError, "remapProfile(): unknown key %R", o); return false; }
+        if (!resolve_key_arg(o, code)) { PyErr_Format(PyExc_ValueError, "unknown key %R", o); return false; }
         out.push_back(code);
         return true;
     }
@@ -479,6 +481,158 @@ static PyObject* pairs_from_py(PyObject* o, const char* what) {
         }
     }
     return items;
+}
+
+static bool keys_from_py(PyObject* o, const char* what, std::vector<int>& out);
+
+// ---- session 31 ----
+
+FASTCALL_SIG(py_is_held) {
+    ARGS;
+    if (!a.check_kwargs("isHeld", {"key"})) return nullptr;
+    int code;
+    if (!key_arg(a.get(0, "key"), "isHeld", code)) return nullptr;
+    return PyBool_FromLong(is_held_fn(*g_runtime, code));
+}
+
+FASTCALL_SIG(py_wait_for_release) {
+    (void)kwnames;
+    std::vector<int> codes;
+    for (Py_ssize_t i = 0; i < nargs; ++i) {
+        int code;
+        if (!key_arg(args[i], "waitForRelease", code)) return nullptr;
+        codes.push_back(code);
+    }
+    return run_native(true, [&] { wait_for_release_fn(*g_runtime, codes); });
+}
+
+FASTCALL_SIG(py_get_time) {
+    (void)args; (void)nargs; (void)kwnames;
+    return PyFloat_FromDouble(get_time_fn());
+}
+
+FASTCALL_SIG(py_random) {
+    ARGS;
+    if (!a.check_kwargs("random", {"a", "b"})) return nullptr;
+    double lo, hi;
+    if (!double_arg(a.get(0, "a"), 0.0, lo) || !double_arg(a.get(1, "b"), 1.0, hi)) return nullptr;
+    return PyFloat_FromDouble(random_fn(lo, hi));
+}
+
+FASTCALL_SIG(py_random_int) {
+    ARGS;
+    if (!a.check_kwargs("randomInt", {"a", "b"})) return nullptr;
+    PyObject* lo = a.get(0, "a");
+    PyObject* hi = a.get(1, "b");
+    long long x = lo ? PyLong_AsLongLong(lo) : 0, y = hi ? PyLong_AsLongLong(hi) : 1;
+    if (PyErr_Occurred()) return nullptr;
+    return PyLong_FromLongLong(random_int_fn(x, y));
+}
+
+static bool text_arg(PyObject* o, const char* fn, const char* name, std::string& out) {
+    if (!o) return true;                        // keep the caller's default
+    PyObject* s = PyObject_Str(o);
+    if (!s) return false;
+    const char* c = PyUnicode_AsUTF8(s);
+    if (!c) { Py_DECREF(s); PyErr_Format(PyExc_TypeError, "%s(): bad %s", fn, name); return false; }
+    out = c;
+    Py_DECREF(s);
+    return true;
+}
+
+FASTCALL_SIG(py_notify) {
+    ARGS;
+    if (!a.check_kwargs("notify", {"text", "title"})) return nullptr;
+    std::string text, title = "Puppetry";
+    if (!a.get(0, "text")) { PyErr_SetString(PyExc_TypeError, "notify(text, title=\"Puppetry\")"); return nullptr; }
+    if (!text_arg(a.get(0, "text"), "notify", "text", text) || !text_arg(a.get(1, "title"), "notify", "title", title))
+        return nullptr;
+    return run_native(false, [&] { g_runtime->check_abort(); notify_fn(text, title); });
+}
+
+FASTCALL_SIG(py_get_clipboard) {
+    (void)args; (void)nargs; (void)kwnames;
+    std::string out;
+    PyObject* r = run_native(true, [&] { g_runtime->check_abort(); get_clipboard_fn(out); });
+    if (!r) return nullptr;
+    Py_DECREF(r);
+    return PyUnicode_DecodeUTF8(out.data(), (Py_ssize_t)out.size(), "replace");
+}
+
+FASTCALL_SIG(py_set_clipboard) {
+    ARGS;
+    if (!a.check_kwargs("setClipboard", {"text"})) return nullptr;
+    std::string text;
+    if (!a.get(0, "text")) { PyErr_SetString(PyExc_TypeError, "setClipboard(text)"); return nullptr; }
+    if (!text_arg(a.get(0, "text"), "setClipboard", "text", text)) return nullptr;
+    bool ok = false;
+    PyObject* r = run_native(true, [&] { g_runtime->check_abort(); ok = set_clipboard_fn(text); });
+    if (!r) return nullptr;
+    Py_DECREF(r);
+    return PyBool_FromLong(ok);
+}
+
+static PyObject* focus_text(bool title) {
+    FocusInfo info;
+    PyObject* r = run_native(true, [&] { g_runtime->check_abort(); info = focused_window(0.1, title); });
+    if (!r) return nullptr;
+    Py_DECREF(r);
+    const std::string& s = title ? info.title : info.cls;
+    return PyUnicode_DecodeUTF8(s.data(), (Py_ssize_t)s.size(), "replace");
+}
+
+FASTCALL_SIG(py_get_focused_app) { (void)args; (void)nargs; (void)kwnames; return focus_text(false); }
+FASTCALL_SIG(py_get_focused_title) { (void)args; (void)nargs; (void)kwnames; return focus_text(true); }
+
+FASTCALL_SIG(py_app_focused) {
+    ARGS;
+    if (!a.check_kwargs("appFocused", {"app"})) return nullptr;
+    std::string want;
+    if (!a.get(0, "app")) { PyErr_SetString(PyExc_TypeError, "appFocused(app)"); return nullptr; }
+    if (!text_arg(a.get(0, "app"), "appFocused", "app", want)) return nullptr;
+    FocusInfo info;
+    PyObject* r = run_native(true, [&] { g_runtime->check_abort(); info = focused_window(0.1, true); });
+    if (!r) return nullptr;
+    Py_DECREF(r);
+    return PyBool_FromLong(info.ok && !info.id.empty() && (icontains(info.cls, want) || icontains(info.title, want)));
+}
+
+FASTCALL_SIG(py_stop_loop) {
+    (void)args; (void)nargs; (void)kwnames;
+    if (Macro* m = current_macro()) stop_macro_loop(*m);
+    Py_RETURN_NONE;
+}
+
+FASTCALL_SIG(py_pause_when) {
+    ARGS;
+    if (!a.check_kwargs("pauseWhen", {"keys", "app", "title", "focused", "toggle"})) return nullptr;
+    Macro* m = current_macro();
+    if (!m) { PyErr_SetString(PyExc_RuntimeError, "pauseWhen() only works inside a macro"); return nullptr; }
+    PyObject* keys = a.get(0, "keys");
+    PyObject* app = a.get(-1, "app");
+    PyObject* title = a.get(-1, "title");
+    PauseCondition cond;
+    bool focused = false, toggle = false;
+    if (!bool_arg(a.get(-1, "focused"), false, focused) || !bool_arg(a.get(-1, "toggle"), false, toggle)) return nullptr;
+    cond.toggle = toggle;
+    if (keys && keys != Py_None) {
+        cond.kind = PauseCondition::Kind::Keys;
+        if (!keys_from_py(keys, "keys", cond.keys)) return nullptr;
+    } else if ((app && app != Py_None) || (title && title != Py_None)) {
+        const bool by_title = title && title != Py_None;
+        cond.kind = PauseCondition::Kind::App;
+        cond.match = by_title ? "title" : "class";
+        cond.focused = focused;
+        if (!text_arg(by_title ? title : app, "pauseWhen", "app", cond.value)) return nullptr;
+    } else {
+        PyErr_SetString(PyExc_TypeError, "pauseWhen() needs keys=..., app=... or title=...");
+        return nullptr;
+    }
+    Runtime* rt = g_runtime;
+    return run_native(true, [&] {
+        pause_when(*rt, *m, std::move(cond));
+        rt->check_abort();                    // already true: wait here
+    });
 }
 
 FASTCALL_SIG(py_remap_profile) {
@@ -658,6 +812,11 @@ static PyMethodDef kMethods[] = {
     FC("axis", py_axis), FC("getAxis", py_get_axis),
     FC("getMouseMotion", py_get_mouse_motion), FC("saveVar", py_save_var), FC("loadVar", py_load_var),
     FC("clearVar", py_clear_var), FC("remapProfile", py_remap_profile),
+    FC("isHeld", py_is_held), FC("waitForRelease", py_wait_for_release), FC("getTime", py_get_time),
+    FC("random", py_random), FC("randomInt", py_random_int), FC("notify", py_notify),
+    FC("getClipboard", py_get_clipboard), FC("setClipboard", py_set_clipboard),
+    FC("getFocusedApp", py_get_focused_app), FC("getFocusedTitle", py_get_focused_title),
+    FC("appFocused", py_app_focused), FC("stopLoop", py_stop_loop), FC("pauseWhen", py_pause_when),
     {nullptr, nullptr, 0, nullptr},
 };
 #undef FC

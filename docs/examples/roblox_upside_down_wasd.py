@@ -5,9 +5,9 @@
 # at once.
 #
 # Macro settings: Python ON, Repeat mode "No Repeat", any key combo (it
-# starts the macro; pressing it again stops it). Suggested pause condition:
-# App, Window class "sober", "is not focused", While -- the keys act normally
-# and mouse movement isn't counted while the game isn't focused.
+# starts the macro; pressing it again stops it). While GAME isn't the
+# focused window the macro is paused: the keys act normally and mouse
+# movement isn't counted (the pauseWhen() line below).
 #
 # Calibration (first run, or press CALIBRATE any time; kept in this
 # macro's Saved variables):
@@ -24,6 +24,10 @@ LEVEL = KEY_F7          # camera is level right now (after a respawn)
 CALIBRATE = KEY_F9      # calibrate again
 SWAP_AD = True          # False: only W and S swap
 POLL = 0.004            # seconds between mouse readings
+GAME = "sober"          # part of the game's window class ("" = any window)
+# Keys that flip the swap by hand, on top of the tracking, e.g.
+# [KEY_LEFTALT, KEY_TAB, KEY_ESC, KEY_LEFTMETA]
+FLIP_KEYS = []
 
 global _running, _stop
 if globals().get("_running"):
@@ -32,12 +36,12 @@ if globals().get("_running"):
 _running, _stop = True, False
 
 
-def notify(text):
-    command("notify-send -a Puppetry -t 4000 'Upside-down WASD' {0}", text)
+def say(text):
+    notify(text, "Upside-down WASD")
 
 
 def mark(prompt):
-    notify(prompt)
+    say(prompt)
     waitForPress(CALIBRATE, repress=True)
     return getMouseMotion.y
 
@@ -57,9 +61,9 @@ def calibrate():
             for name, v in (("up_flip", up_flip), ("up_max", up_max),
                             ("down_flip", down_flip), ("down_max", down_max)):
                 saveVar(name, v)
-            notify("Calibrated. Press F7 after every respawn.")
+            say("Calibrated. Press F7 after every respawn.")
             return
-        notify("Those readings don't line up -- starting over")
+        say("Those readings don't line up -- starting over")
 
 
 SWAPS = {KEY_W: KEY_S, KEY_S: KEY_W}
@@ -76,6 +80,8 @@ def set_flipped(on):
 
 # Swallowing LEVEL / CALIBRATE also keeps the keyboard going through
 # Puppetry for the whole run, so a flip never grabs it with a key held down.
+if GAME:
+    pauseWhen(app=GAME)             # paused while the game isn't focused
 ignore_keys(LEVEL, CALIBRATE)       # the game never sees them
 aborted = False
 try:
@@ -85,17 +91,25 @@ try:
     up_flip, up_max = loadVar("up_flip"), loadVar("up_max")
     down_flip, down_max = loadVar("down_flip"), loadVar("down_max")
     low, high = min(up_max, down_max), max(up_max, down_max)
-    notify("On. Press F7 when the camera is level.")
+    say("On. Press F7 when the camera is level.")
 
     pitch = 0                       # mouse counts from level; the game's own limits clamp it
     last = getMouseMotion.y
     flipped = False
-    prev_held = []
+    by_hand = False                 # FLIP_KEYS flip this
+    prev_held = getButtonsHeld()
+    prev_t = getTime()
     while not _stop:
         y = getMouseMotion.y
         pitch = max(low, min(high, pitch + y - last))
         last = y
         held = getButtonsHeld()
+        now = getTime()
+        if now - prev_t > 0.2:      # just back from a pause: keys pressed meanwhile don't count
+            prev_held = held
+        prev_t = now
+        if any(k in held and k not in prev_held for k in FLIP_KEYS):
+            by_hand = not by_hand
         if LEVEL in held and LEVEL not in prev_held:
             pitch = 0
         if CALIBRATE in held and CALIBRATE not in prev_held:
@@ -109,11 +123,12 @@ try:
             held = getButtonsHeld()
         prev_held = held
         upside_down = (pitch - up_flip) * up_flip >= 0 or (pitch - down_flip) * down_flip >= 0
-        if upside_down != flipped:
-            flipped = upside_down
+        want = upside_down != by_hand
+        if want != flipped:
+            flipped = want
             set_flipped(flipped)
         wait(POLL)
-    notify("Off.")
+    say("Off.")
 except KeyboardInterrupt:
     aborted = True
     raise

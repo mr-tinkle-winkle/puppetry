@@ -8,6 +8,8 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <thread>
+#include <chrono>
 #include <cstdint>
 #include <linux/input-event-codes.h>
 #include <mutex>
@@ -93,6 +95,17 @@ public:
     bool has(int code) const {
         if (code < 0 || code >= KEY_CNT) return false;
         return words_[code >> 6].load(std::memory_order_relaxed) & (1ull << (code & 63));
+    }
+    std::vector<int> snapshot() const {
+        std::vector<int> out;
+        for (size_t w = 0; w < words_.size(); ++w) {
+            unsigned long long bits = words_[w].load(std::memory_order_relaxed);
+            while (bits) {
+                out.push_back((int)(w * 64) + __builtin_ctzll(bits));
+                bits &= bits - 1;
+            }
+        }
+        return out;
     }
     bool empty() const {
         for (const auto& w : words_) if (w.load(std::memory_order_relaxed)) return false;
@@ -257,6 +270,11 @@ public:
         }
     }
 
+    // Real keys/buttons whose press was forwarded to a virtual device and is
+    // still down there. Their release is forwarded even after the grab
+    // ended (otherwise the virtual copy would stay down forever).
+    AtomicKeySet forwarded_down;
+
     // ---- raw mouse motion (getMouseMotion) ----
     // Every REL_X / REL_Y count from the real mice since the daemon
     // started, before pointer acceleration (straight from evdev). Our own
@@ -265,7 +283,21 @@ public:
     std::atomic<long long> motion_y{0};
 
     // ---- external pause (GUI recording a combo) ----
-    std::atomic<bool> external_pause{false};
+    // Combos are held off while the GUI records one (control socket
+    // PAUSE / RESUME). Stored as a deadline, not a flag: a GUI that dies
+    // mid-recording must not leave every macro dead.
+    std::atomic<long long> external_pause_until_ms{0};
+    static long long steady_ms() {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+    }
+    bool external_paused() const {
+        long long until = external_pause_until_ms.load(std::memory_order_relaxed);
+        return until != 0 && steady_ms() < until;
+    }
+    void set_external_pause(double seconds) {
+        external_pause_until_ms.store(seconds > 0 ? steady_ms() + (long long)(seconds * 1000) : 0);
+    }
     // Input visualizer blocking (privacy.hpp): the user's toggle, and "an
     // ignored app is focused / open". Either one stops the event stream.
     std::atomic<bool> visualizer_blocked{false};
@@ -307,6 +339,18 @@ public:
     static std::optional<std::chrono::steady_clock::time_point>& wait_anchor() {
         thread_local std::optional<std::chrono::steady_clock::time_point> value;
         return value;
+    }
+
+    // Bumped by abort_all(): runtime-only state kept outside Runtime (the
+    // pause conditions pauseWhen() added) is dropped when it changes.
+    std::atomic<int> abort_epoch{0};
+
+    // abort_all()'s delayed cleanup threads still running: the destructor
+    // waits for them (only matters to tests; the daemon's Runtime lives
+    // for the whole process).
+    std::atomic<int> abort_cleanups{0};
+    ~Runtime() {
+        while (abort_cleanups.load() > 0) std::this_thread::sleep_for(std::chrono::milliseconds(2));
     }
 
     // The macro this thread runs for (set by macro.cpp): check_abort()

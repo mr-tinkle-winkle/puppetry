@@ -72,10 +72,10 @@ int main() {
     // PAUSE / RESUME toggle external_pause.
     auto r2 = send_request(sock_path, {{"cmd", "PAUSE"}});
     CHECK(r2["ok"] == true);
-    CHECK(rt.external_pause.load() == true);
+    CHECK(rt.external_paused());
     auto r3 = send_request(sock_path, {{"cmd", "RESUME"}});
     CHECK(r3["ok"] == true);
-    CHECK(rt.external_pause.load() == false);
+    CHECK(!rt.external_paused());
 
     // VISUALIZER: the block toggle (`puppetry-overlay block`, its keybind, the GUI button).
     // The state file goes to $XDG_RUNTIME_DIR/puppetry -- point that at the temp dir.

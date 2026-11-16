@@ -12,6 +12,7 @@
 #include <fcntl.h>
 #include <linux/input.h>
 #include <poll.h>
+#include <random>
 #include <sstream>
 #include <stdexcept>
 #include <sys/wait.h>
@@ -234,20 +235,56 @@ void speed_fn(Runtime& rt, double multiplier) {
 
 static void apply_grab_state(Runtime& rt); // fwd decl, defined below
 
-static void release_held_from(Runtime& rt, const std::string& kind) {
-    std::vector<int> stuck;
-    {
-        std::lock_guard<std::mutex> lock(rt.held_mutex);
-        for (int code : rt.held) {
-            bool is_button = is_mouse_button(code);
-            if ((kind == "keyboard" && !is_button) || (kind == "mouse" && is_button)) {
-                stuck.push_back(code);
-            }
-        }
-        for (int code : stuck) rt.held.erase(code);
+bool passes_ignore_rules(Runtime& rt, const std::string& kind, int code) {
+    std::lock_guard<std::mutex> lock(rt.ignore_mutex);
+    if (kind == "keyboard" && rt.ignore_keyboard) return false;
+    if (kind == "mouse" && rt.ignore_mouse_buttons && is_button_code(code)) return false;
+    if (rt.ignored_keys.count(code)) return false;
+    if (rt.repress_codes.count(code)) return false;
+    if (rt.repress_any > 0) return false;
+    return true;
+}
+
+void grab_with_handover(Runtime& rt, const std::string& kind, const std::vector<int>& held,
+                        const std::function<bool(int code, int value)>& inject, const std::function<void()>& grab) {
+    std::vector<int> handed;
+    for (int code : held)
+        if (inject(code, 0)) handed.push_back(code);
+    try {
+        grab();
+    } catch (...) {
+        for (int code : handed) inject(code, 1);   // not grabbed: everyone sees them down again
+        throw;
     }
     UinputDevice& out = (kind == "keyboard") ? rt.ui_keyboard : rt.ui_mouse;
-    for (int code : stuck) out.key_frame(code, 0);
+    for (int code : handed) {
+        inject(code, 1);
+        if (passes_ignore_rules(rt, kind, code)) {
+            out.key_frame(code, 1);
+            rt.forwarded_down.set(code);
+        }
+    }
+}
+
+static std::vector<int> held_on(Runtime& rt, const std::string& kind) {
+    std::vector<int> out;
+    std::lock_guard<std::mutex> lock(rt.held_mutex);
+    for (int code : rt.held) {
+        bool is_button = is_mouse_button(code);
+        if ((kind == "keyboard" && !is_button) || (kind == "mouse" && is_button)) out.push_back(code);
+    }
+    return out;
+}
+
+static void grab_device(Runtime& rt, InputDevice& dev, const std::string& kind) {
+    grab_with_handover(rt, kind, held_on(rt, kind),
+        [&](int code, int value) {
+            dev.expect_injected(code, value);
+            if (dev.inject_key(code, value)) return true;
+            dev.cancel_injected(code, value);
+            return false;
+        },
+        [&] { dev.grab(); });
 }
 
 static void apply_grab_state(Runtime& rt) {
@@ -284,9 +321,8 @@ static void apply_grab_state(Runtime& rt) {
     if (rt.watched_keyboard) {
         try {
             if (kb_needed && !rt.keyboard_grabbed) {
-                rt.watched_keyboard->grab();
+                grab_device(rt, *rt.watched_keyboard, "keyboard");
                 rt.keyboard_grabbed = true;
-                release_held_from(rt, "keyboard");
             } else if (!kb_needed && rt.keyboard_grabbed) {
                 rt.watched_keyboard->ungrab();
                 rt.keyboard_grabbed = false;
@@ -299,9 +335,8 @@ static void apply_grab_state(Runtime& rt) {
     if (rt.watched_mouse) {
         try {
             if (mouse_needed && !rt.mouse_grabbed) {
-                rt.watched_mouse->grab();
+                grab_device(rt, *rt.watched_mouse, "mouse");
                 rt.mouse_grabbed = true;
-                release_held_from(rt, "mouse");
             } else if (!mouse_needed && rt.mouse_grabbed) {
                 rt.watched_mouse->ungrab();
                 rt.mouse_grabbed = false;
@@ -680,6 +715,69 @@ bool remap_profile_active(Runtime& rt, const std::string& name) {
     return false;
 }
 
+// ---------------------------------------------------------------- session 31 primitives
+
+bool is_held_fn(Runtime& rt, int code) {
+    std::lock_guard<std::mutex> lock(rt.held_mutex);
+    return rt.held.count(code) > 0;
+}
+
+void wait_for_release_fn(Runtime& rt, const std::vector<int>& codes) {
+    // codes empty: every real key and button
+    while (true) {
+        rt.check_abort();
+        bool any = false;
+        {
+            std::lock_guard<std::mutex> lock(rt.held_mutex);
+            if (codes.empty()) any = !rt.held.empty();
+            else for (int c : codes) if (rt.held.count(c)) { any = true; break; }
+        }
+        if (!any) return;
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+}
+
+double get_time_fn() {
+    return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+static std::mt19937_64& rng() {
+    thread_local std::mt19937_64 gen{std::random_device{}()};
+    return gen;
+}
+
+double random_fn(double a, double b) {
+    if (a > b) std::swap(a, b);
+    return std::uniform_real_distribution<double>(a, b)(rng());
+}
+
+long long random_int_fn(long long a, long long b) {
+    if (a > b) std::swap(a, b);
+    return std::uniform_int_distribution<long long>(a, b)(rng());
+}
+
+void notify_fn(const std::string& text, const std::string& title) {
+    // fire and forget, like command(): notify-send can block on the notification daemon
+    std::string out;
+    std::thread([text, title] {
+        std::string ignored;
+        run_program({"notify-send", "-a", "Puppetry", "--", title, text}, ignored, 5.0);
+    }).detach();
+}
+
+bool get_clipboard_fn(std::string& out) {
+    if (run_program({"wl-paste", "--no-newline"}, out, 2.0)) return true;
+    out.clear();
+    return run_program({"xclip", "-selection", "clipboard", "-o"}, out, 2.0);
+}
+
+bool set_clipboard_fn(const std::string& text) {
+    std::string ignored;
+    // wl-copy forks its own background holder and returns
+    if (run_program({"wl-copy", "--", text}, ignored, 2.0)) return true;
+    return run_program({"sh", "-c", "printf %s \"$1\" | xclip -selection clipboard", "sh", text}, ignored, 2.0);
+}
+
 void get_mouse_motion_fn(Runtime& rt, long long offset_x, long long offset_y, long long& x, long long& y) {
     rt.check_abort();
     x = rt.motion_x.load(std::memory_order_relaxed) - offset_x;
@@ -724,6 +822,15 @@ static double ease(double t, Easing style) {
 // exit) -- shared by every kdotool-backed query below, all of which fail
 // open (treat "couldn't ask" the same as "no" rather than blocking).
 bool run_kdotool(const std::vector<std::string>& args, std::string& output, double timeout_s) {
+    std::vector<std::string> full;
+    full.reserve(args.size() + 1);
+    full.push_back("kdotool");
+    full.insert(full.end(), args.begin(), args.end());
+    return run_program(full, output, timeout_s);
+}
+
+bool run_program(const std::vector<std::string>& args, std::string& output, double timeout_s) {
+    if (args.empty()) return false;
     // argv is built BEFORE fork(): the daemon is multithreaded, and after
     // fork() only async-signal-safe calls are legal in the child. A
     // std::vector push_back there can block forever on the malloc lock if
@@ -732,8 +839,7 @@ bool run_kdotool(const std::vector<std::string>& args, std::string& output, doub
     // cursor going somewhere else entirely). command_fn() below already
     // took this care; this path hadn't.
     std::vector<char*> argv;
-    argv.reserve(args.size() + 2);
-    argv.push_back(const_cast<char*>("kdotool"));
+    argv.reserve(args.size() + 1);
     for (const auto& a : args) argv.push_back(const_cast<char*>(a.c_str()));
     argv.push_back(nullptr);
 
@@ -751,7 +857,7 @@ bool run_kdotool(const std::vector<std::string>& args, std::string& output, doub
         close(out_pipe[1]);
         int devnull = open("/dev/null", O_WRONLY);
         if (devnull >= 0) { dup2(devnull, STDERR_FILENO); close(devnull); }
-        execvp("kdotool", argv.data());
+        execvp(argv[0], argv.data());
         _exit(127);
     }
     close(out_pipe[1]);
@@ -765,10 +871,11 @@ bool run_kdotool(const std::vector<std::string>& args, std::string& output, doub
         if (remaining <= 0) { timed_out = true; break; }
         int rc = poll(&pfd, 1, (int)remaining);
         if (rc <= 0) { timed_out = true; break; }
-        char buf[256];
+        char buf[4096];
         ssize_t n = read(out_pipe[0], buf, sizeof(buf));
         if (n <= 0) break;
         output.append(buf, n);
+        if (output.size() > (8u << 20)) { timed_out = true; break; }   // runaway output
     }
     close(out_pipe[0]);
     if (timed_out) kill(pid, SIGKILL);
@@ -1026,6 +1133,7 @@ void type_text_fn(Runtime& rt, const std::string& text, double time_per_letter) 
 
 void abort_all(Runtime& rt) {
     rt.abort_flag.store(true);
+    rt.abort_epoch.fetch_add(1);
 
     {
         std::lock_guard<std::mutex> lock(rt.ignore_mutex);
@@ -1056,7 +1164,9 @@ void abort_all(Runtime& rt) {
         }
     }
 
+    rt.abort_cleanups.fetch_add(1);
     std::thread([&rt] {
+        struct Done { Runtime& r; ~Done() { r.abort_cleanups.fetch_sub(1); } } done{rt};
         std::this_thread::sleep_for(std::chrono::milliseconds(300));
         for (int code : rt.synth_held.take_all()) {
             try { device_for_code(rt, code).key_frame(code, 0); } catch (...) {}

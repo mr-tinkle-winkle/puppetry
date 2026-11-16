@@ -7,6 +7,7 @@
 // devel environment already has.
 #include <linux/input.h>
 #include <optional>
+#include <mutex>
 #include <string>
 #include <utility>
 #include <vector>
@@ -144,6 +145,18 @@ public:
     void grab();
     void ungrab();
 
+    // Writes one key event (+ SYN_REPORT) INTO this device, as if it had
+    // produced it (evdev write). Before a grab every reader sees it; under
+    // our grab only we do. Used to hand held keys over when the grab starts
+    // (dispatch: grab_with_handover). False when the node isn't writable.
+    bool inject_key(int code, int value);
+    // The watch loop must not treat our own injected events as presses:
+    // expect_injected() registers one before it is written, and
+    // consume_injected() (called per key event read) eats it.
+    void expect_injected(int code, int value);
+    void cancel_injected(int code, int value);
+    bool consume_injected(int code, int value);
+
     int fd() const { return fd_; }
     const std::string& path() const { return path_; }
     // Axis value normalized with this device's own range (read at open()).
@@ -151,7 +164,11 @@ public:
 
 private:
     int fd_ = -1;
+    int wfd_ = -1;                 // opened on the first inject_key()
+    bool wfd_failed_ = false;
     std::string path_;
+    std::mutex inject_mutex_;
+    std::vector<int> injected_;    // code * 2 + value, expected back from the kernel
     int abs_min_[ABS_CNT] = {};
     int abs_max_[ABS_CNT] = {};
 };

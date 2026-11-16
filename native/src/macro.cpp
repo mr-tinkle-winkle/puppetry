@@ -294,37 +294,50 @@ static void fire_once(Runtime& rt, MacroRegistry& registry, Macro& macro, std::v
     }).detach();
 }
 
-static void loop_until_stopped(Runtime& rt, MacroRegistry& registry, Macro* macro,
-                                std::vector<std::string> args) {
+static void loop_until_stopped(Runtime& rt, MacroRegistry& registry, Macro* macro, std::vector<std::string> args,
+                                std::shared_ptr<std::atomic<bool>> my_stop, std::thread previous) {
+    // The previous loop of this macro may still be finishing its last pass.
+    if (previous.joinable()) previous.join();
     ThreadHookScope scope;
     CurrentMacroScope current(macro);
+    Runtime::pause_hook().stop = my_stop.get();   // a paused loop unwinds on ITS stop request
     auto rts = macro->runtime;
     try {
-        while (!rts->stop_flag.load(std::memory_order_relaxed)) {
+        while (!my_stop->load(std::memory_order_relaxed)) {
             Runtime::speed_multiplier() = 1.0;
             run_guarded(rt, registry, *macro, args);
         }
     } catch (const MacroAborted&) {
     }
-    rts->active_hold.store(false);
+    std::lock_guard<std::mutex> lock(rts->loop_mutex);
+    if (rts->run_stop == my_stop) rts->active_hold.store(false);   // not if a newer loop has taken over
 }
 
 bool macro_is_looping(const Macro& macro) {
-    return macro.runtime->thread.joinable() && macro.runtime->active_hold.load();
+    return macro.runtime->active_hold.load();
 }
 
 void stop_macro_loop(Macro& macro) {
-    macro.runtime->stop_flag.store(true);
+    auto rts = macro.runtime;
+    std::lock_guard<std::mutex> lock(rts->loop_mutex);
+    rts->stop_flag.store(true);
+    if (rts->run_stop) rts->run_stop->store(true);
+    rts->active_hold.store(false);
 }
 
 static void start_loop(Runtime& rt, MacroRegistry& registry, Macro& macro, std::vector<std::string> args) {
     auto rts = macro.runtime;
+    std::lock_guard<std::mutex> lock(rts->loop_mutex);
+    if (rts->active_hold.load()) return;          // two triggers at once (keyboard + control socket)
+    auto stop = std::make_shared<std::atomic<bool>>(false);
     rts->stop_flag.store(false);
+    rts->run_stop = stop;
     rts->active_hold.store(true);
-    if (rts->thread.joinable()) rts->thread.detach();
+    std::thread previous = std::move(rts->thread);
     // Macro objects live in a container that outlives the daemon's whole
     // run (see main.cpp), so a plain pointer is safe here.
-    rts->thread = std::thread(loop_until_stopped, std::ref(rt), std::ref(registry), &macro, std::move(args));
+    rts->thread = std::thread(loop_until_stopped, std::ref(rt), std::ref(registry), &macro, std::move(args),
+                              stop, std::move(previous));
 }
 
 void trigger_macro(Runtime& rt, MacroRegistry& registry, Macro& macro, const std::vector<std::string>& args) {

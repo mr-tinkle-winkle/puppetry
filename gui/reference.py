@@ -123,6 +123,52 @@ getMouseMotion()
   getMouseMotion.x / .y read it directly. Movement while this macro is
   paused is left out.
 
+isHeld(key)
+  True while that real key or button is down:  if isHeld(KEY_LEFTSHIFT): ...
+
+waitForRelease(*keys)
+  Waits until none of the given keys is held any more -- or, with no keys,
+  until nothing at all is held. waitForRelease(KEY_W, KEY_S)
+
+getFocusedApp() / getFocusedTitle()
+  The focused window's class (the app's id, e.g. org.vinegarhq.Sober,
+  firefox) / the text in its title bar. "" if it can't be read (needs
+  kdotool, KDE Plasma).
+
+appFocused(app)
+  True if the focused window's class or title contains that text (any
+  capitals):  if appFocused("sober"): ...
+
+pauseWhen(keys=None, app=None, title=None, focused=False, toggle=False)
+  A pause condition from inside the macro (the same thing as the macro's
+  "Pause conditions" setting, see there):
+      pauseWhen(app="sober")                # paused while Sober is NOT focused
+      pauseWhen(app="obs", focused=True)    # paused while OBS IS focused
+      pauseWhen(KEY_F8, toggle=True)        # F8 switches paused / running
+      pauseWhen((KEY_LEFTCTRL, KEY_P), toggle=True)
+  title="..." matches the window title instead of the app. It applies from
+  that line on (already true: the macro waits right there) and stays until
+  the abort key, also after the macro ends.
+
+stopLoop()
+  In a macro that repeats (hold / toggle): this pass is the last one.
+
+getTime()
+  Seconds on a clock that only runs forward, for measuring:
+      start = getTime() ... took = getTime() - start
+
+random(a=0, b=1) / randomInt(a=0, b=1)
+  A random number between a and b / a random whole number from a to b
+  (both ends included). wait(random(0.05, 0.12)) makes timing less
+  machine-like.
+
+notify(text, title="Puppetry")
+  A desktop notification.
+
+getClipboard() / setClipboard(text)
+  Reads / replaces the clipboard's text (wl-clipboard, or xclip on X11).
+  setClipboard gives True if it worked.
+
 saveVar(name, value)
   Keeps a value for this macro across runs, daemon restarts and reboots:
   saveVar("pitch_range", 2400). Numbers, text, True/False, None and lists
@@ -362,6 +408,42 @@ PRIMITIVES: tuple = (
                        Param("time_", "0", caption="over", doc="Seconds to move there (0 = at once).")),
               "output", "Move a stick or trigger on the virtual controller (Settings > Devices).",
               "move controller axis"),
+    Primitive("isHeld", (Param("key", kind="key", doc="The real key or button to look at."),), "input",
+              "True while that real key/button is down.", "is held", reporter=True),
+    Primitive("waitForRelease", (Param("keys", kind="keys", caption="", vararg=True,
+                                       doc="Wait until none of these is held (none given: nothing at all)."),),
+              "input", "Wait here until those keys are let go of.", "wait for release"),
+    Primitive("getFocusedApp", (), "input", "The focused window's class (the app's id).", "focused app",
+              reporter=True),
+    Primitive("getFocusedTitle", (), "input", "The focused window's title.", "focused title", reporter=True),
+    Primitive("appFocused", (Param("app", kind="string", doc="Part of the app's class or title, any capitals."),),
+              "input", "True if the focused window's class or title contains that text.", "app focused",
+              reporter=True),
+    Primitive("getClipboard", (), "input", "The clipboard's text.", "clipboard", reporter=True),
+    Primitive("setClipboard", (Param("text", kind="string", doc="The new clipboard text."),), "output",
+              "Replace the clipboard's text.", "set clipboard"),
+    Primitive("notify", (Param("text", kind="string", doc="The message."),
+                         Param("title", '"Puppetry"', kind="string", caption="title", doc="Its heading.")),
+              "output", "Show a desktop notification.", "notify"),
+    Primitive("getTime", (), "neutral", "Seconds on a forward-only clock, for measuring.", "time", reporter=True),
+    Primitive("random", (Param("a", "0", caption="from", doc="Lowest value."),
+                         Param("b", "1", caption="to", doc="Highest value.")),
+              "neutral", "A random number between the two.", "random", reporter=True),
+    Primitive("randomInt", (Param("a", "0", caption="from", doc="Lowest whole number."),
+                            Param("b", "1", caption="to", doc="Highest whole number (included).")),
+              "neutral", "A random whole number, both ends included.", "random whole", reporter=True),
+    Primitive("stopLoop", (), "neutral", "In a repeating macro: this pass is the last one.", "stop repeating"),
+    Primitive("pauseWhen", (Param("keys", "None", kind="keys", caption="keys",
+                                  doc="A key or combo that pauses the macro."),
+                            Param("app", "None", caption="app", kw_only=True,
+                                  doc="Part of an app's window class, in quotes."),
+                            Param("title", "None", caption="title", kw_only=True,
+                                  doc="Part of a window title, in quotes (instead of app)."),
+                            Param("focused", "False", kind="bool", caption="focused", kw_only=True,
+                                  doc="False: paused while that app is NOT focused. True: while it is."),
+                            Param("toggle", "False", kind="bool", caption="toggle", kw_only=True,
+                                  doc="True: each time it happens switches paused/running, instead of 'while'.")),
+              "neutral", "Add a pause condition from inside the macro.", "pause when"),
     Primitive("saveVar", (Param("name", kind="string", doc="The variable's name, in quotes."),
                           Param("value", caption="=", doc="What to keep.")),
               "neutral", "Keep a value for this macro, across runs and restarts.", "save variable"),

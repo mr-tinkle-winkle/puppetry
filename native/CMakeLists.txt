@@ -80,6 +80,7 @@ set(CORE_SOURCES
     src/event_stream.cpp
     src/privacy.cpp
     src/pause.cpp
+    src/focus.cpp
     src/saved_vars.cpp
     src/steam_hid.cpp
     src/evdev_device.cpp

@@ -55,8 +55,10 @@ bool EventStream::start(const std::string& path, Runtime* rt) {
 
 void EventStream::stop() {
     if (!running_.exchange(false)) return;
-    if (listen_fd_ >= 0) { ::shutdown(listen_fd_, SHUT_RDWR); ::close(listen_fd_); listen_fd_ = -1; }
+    // wake the accept loop, let it finish, THEN close (closing first raced with its poll/accept)
+    if (listen_fd_ >= 0) ::shutdown(listen_fd_, SHUT_RDWR);
     if (thread_.joinable()) thread_.join();
+    if (listen_fd_ >= 0) { ::close(listen_fd_); listen_fd_ = -1; }
     std::lock_guard<std::mutex> lock(mutex_);
     for (int fd : fds_) ::close(fd);
     fds_.clear();

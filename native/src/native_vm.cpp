@@ -32,7 +32,9 @@
 #include <unordered_map>
 #include <unordered_set>
 #include "keycodes.hpp"
+#include "focus.hpp"
 #include "macro.hpp"
+#include "pause.hpp"
 #include "primitives.hpp"
 #include "saved_vars.hpp"
 #include "simplified_names.hpp"
@@ -386,7 +388,7 @@ std::vector<int> keys_of(const Value& v, const char* what) {
         return out;
     }
     if (v.kind == Value::Kind::Int || v.kind == Value::Kind::Str) { out.push_back(v.as_key_code()); return out; }
-    type_error(std::string("remapProfile(): ") + what + " must be a key, a list of keys or None");
+    type_error(std::string(what) + " must be a key, a list of keys or None");
 }
 
 const List& pairs_of(const Value& v, const char* what) {
@@ -1626,6 +1628,126 @@ private:
                 for (size_t i = 2; i < all.size(); ++i) acting.push_back(all[i].key_code(f));
                 act_as_fn(*f.rt, all[0].key_code(f), all[1].flag(f), acting, immediate.flag(f),
                           current_macro_paused_flag());
+                return Value::none();
+            });
+        }
+        if (n == "isHeld") {
+            c.allow({"key"});
+            c.max_pos(1);
+            Arg key = c.at(0, "key");
+            return EvalFn([key](Frame& f) { return Value::of_bool(is_held_fn(*f.rt, key.key_code(f))); });
+        }
+        if (n == "waitForRelease") {
+            c.allow({});
+            std::vector<Arg> keys = c.pos;
+            return EvalFn([keys](Frame& f) {
+                std::vector<int> codes;
+                for (const auto& k : keys) codes.push_back(k.key_code(f));
+                wait_for_release_fn(*f.rt, codes);
+                return Value::none();
+            });
+        }
+        if (n == "getTime") {
+            c.allow({});
+            c.max_pos(0);
+            return EvalFn([](Frame&) { return Value::of_float(get_time_fn()); });
+        }
+        if (n == "random") {
+            c.allow({"a", "b"});
+            c.max_pos(2);
+            Arg a = c.at(0, "a", Value::of_float(0.0)), b = c.at(1, "b", Value::of_float(1.0));
+            return EvalFn([a, b](Frame& f) { return Value::of_float(random_fn(a.dbl(f), b.dbl(f))); });
+        }
+        if (n == "randomInt") {
+            c.allow({"a", "b"});
+            c.max_pos(2);
+            Arg a = c.at(0, "a", Value::of_int(0)), b = c.at(1, "b", Value::of_int(1));
+            return EvalFn([a, b](Frame& f) { return Value::of_int(random_int_fn(a.get(f).as_int(), b.get(f).as_int())); });
+        }
+        if (n == "notify") {
+            c.allow({"text", "title"});
+            c.max_pos(2);
+            Arg text = c.at(0, "text"), title = c.at(1, "title", Value::of_str("Puppetry"));
+            return EvalFn([text, title](Frame& f) {
+                f.rt->check_abort();
+                notify_fn(text.text(f), title.text(f));
+                return Value::none();
+            });
+        }
+        if (n == "getClipboard") {
+            c.allow({});
+            c.max_pos(0);
+            return EvalFn([](Frame& f) {
+                f.rt->check_abort();
+                std::string out;
+                get_clipboard_fn(out);
+                return Value::of_str(out);
+            });
+        }
+        if (n == "setClipboard") {
+            c.allow({"text"});
+            c.max_pos(1);
+            Arg text = c.at(0, "text");
+            return EvalFn([text](Frame& f) {
+                f.rt->check_abort();
+                return Value::of_bool(set_clipboard_fn(text.text(f)));
+            });
+        }
+        if (n == "getFocusedApp" || n == "getFocusedTitle") {
+            c.allow({});
+            c.max_pos(0);
+            const bool title = n == "getFocusedTitle";
+            return EvalFn([title](Frame& f) {
+                f.rt->check_abort();
+                FocusInfo info = focused_window(0.1, title);
+                return Value::of_str(title ? info.title : info.cls);
+            });
+        }
+        if (n == "appFocused") {
+            c.allow({"app"});
+            c.max_pos(1);
+            Arg name = c.at(0, "app");
+            return EvalFn([name](Frame& f) {
+                f.rt->check_abort();
+                FocusInfo info = focused_window(0.1, true);
+                std::string want = name.text(f);
+                return Value::of_bool(info.ok && !info.id.empty() &&
+                                      (icontains(info.cls, want) || icontains(info.title, want)));
+            });
+        }
+        if (n == "stopLoop") {
+            c.allow({});
+            c.max_pos(0);
+            return EvalFn([](Frame&) {
+                if (Macro* m = current_macro()) stop_macro_loop(*m);
+                return Value::none();
+            });
+        }
+        if (n == "pauseWhen") {
+            c.allow({"keys", "app", "title", "focused", "toggle"});
+            c.max_pos(1);
+            Arg keys = c.at(0, "keys", Value::none()), app = c.at(SIZE_MAX, "app", Value::none()),
+                title = c.at(SIZE_MAX, "title", Value::none()), focused = c.at(SIZE_MAX, "focused", Value::of_bool(false)),
+                toggle = c.at(SIZE_MAX, "toggle", Value::of_bool(false));
+            return EvalFn([keys, app, title, focused, toggle](Frame& f) {
+                Macro* m = current_macro();
+                if (!m) type_error("pauseWhen() only works inside a macro");
+                Value kv = keys.get(f), av = app.get(f), tv = title.get(f);
+                PauseCondition cond;
+                cond.toggle = toggle.flag(f);
+                if (kv.kind != Value::Kind::None) {
+                    cond.kind = PauseCondition::Kind::Keys;
+                    cond.keys = keys_of(kv, "keys");
+                } else if (av.kind != Value::Kind::None || tv.kind != Value::Kind::None) {
+                    cond.kind = PauseCondition::Kind::App;
+                    cond.match = tv.kind != Value::Kind::None ? "title" : "class";
+                    cond.value = (tv.kind != Value::Kind::None ? tv : av).str();
+                    cond.focused = focused.flag(f);
+                } else {
+                    type_error("pauseWhen() needs keys=..., app=... or title=...");
+                }
+                pause_when(*f.rt, *m, std::move(cond));
+                f.rt->check_abort();          // already true: wait here
                 return Value::none();
             });
         }

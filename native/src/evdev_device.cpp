@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <cerrno>
 #include <ctime>
+#include <cstdio>
 #include <cstring>
 #include <fcntl.h>
 #include <filesystem>
@@ -349,6 +350,13 @@ void InputDevice::close() {
         ::close(fd_);
         fd_ = -1;
     }
+    if (wfd_ >= 0) {
+        ::close(wfd_);
+        wfd_ = -1;
+    }
+    wfd_failed_ = false;
+    std::lock_guard<std::mutex> lock(inject_mutex_);
+    injected_.clear();
 }
 
 bool InputDevice::read_event(RawEvent& out) {
@@ -384,6 +392,44 @@ void InputDevice::grab() {
     if (ioctl(fd_, EVIOCGRAB, 1) < 0) {
         throw std::runtime_error("EVIOCGRAB failed: " + std::string(strerror(errno)));
     }
+}
+
+bool InputDevice::inject_key(int code, int value) {
+    if (fd_ < 0 || wfd_failed_) return false;
+    if (wfd_ < 0) {
+        wfd_ = ::open(path_.c_str(), O_WRONLY | O_NONBLOCK | O_CLOEXEC);
+        if (wfd_ < 0) {
+            wfd_failed_ = true;
+            std::fprintf(stderr, "%s is not writable (%s): keys held while Puppetry takes the device over may "
+                                 "stay down until pressed again\n", path_.c_str(), strerror(errno));
+            return false;
+        }
+    }
+    struct input_event evs[2] = {};
+    evs[0].type = EV_KEY; evs[0].code = (unsigned short)code; evs[0].value = value;
+    evs[1].type = EV_SYN; evs[1].code = SYN_REPORT;
+    return ::write(wfd_, evs, sizeof(evs)) == (ssize_t)sizeof(evs);
+}
+
+void InputDevice::expect_injected(int code, int value) {
+    std::lock_guard<std::mutex> lock(inject_mutex_);
+    injected_.push_back(code * 2 + (value ? 1 : 0));
+}
+
+void InputDevice::cancel_injected(int code, int value) {
+    std::lock_guard<std::mutex> lock(inject_mutex_);
+    auto it = std::find(injected_.begin(), injected_.end(), code * 2 + (value ? 1 : 0));
+    if (it != injected_.end()) injected_.erase(it);
+}
+
+bool InputDevice::consume_injected(int code, int value) {
+    if (value == 2) return false;
+    std::lock_guard<std::mutex> lock(inject_mutex_);
+    if (injected_.empty()) return false;
+    auto it = std::find(injected_.begin(), injected_.end(), code * 2 + (value ? 1 : 0));
+    if (it == injected_.end()) return false;
+    injected_.erase(it);
+    return true;
 }
 
 void InputDevice::ungrab() {

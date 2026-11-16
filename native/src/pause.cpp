@@ -4,9 +4,11 @@
 #include <chrono>
 #include <cstdio>
 #include <fstream>
+#include <stdexcept>
 #include <thread>
 
 #include "config.hpp"
+#include "focus.hpp"
 #include "keycodes.hpp"
 #include "primitives.hpp"
 
@@ -127,7 +129,7 @@ void pause_on_key(Runtime& rt, std::vector<std::unique_ptr<Macro>>& macros, int 
     if (value == 2) return;
     for (auto& mp : macros) {
         Macro& m = *mp;
-        if (m.pause_conditions.empty() || !m.enabled) continue;
+        if (!m.enabled) continue;
         bool changed = false;
         {
             std::lock_guard<std::mutex> lock(m.runtime->pause_mutex);
@@ -154,7 +156,6 @@ void pause_on_focus(Runtime& rt, std::vector<std::unique_ptr<Macro>>& macros, bo
     const std::string cls = lower(window_class), ttl = lower(title);
     for (auto& mp : macros) {
         Macro& m = *mp;
-        if (m.pause_conditions.empty()) continue;
         bool changed = false;
         {
             std::lock_guard<std::mutex> lock(m.runtime->pause_mutex);
@@ -172,30 +173,73 @@ void pause_on_focus(Runtime& rt, std::vector<std::unique_ptr<Macro>>& macros, bo
     }
 }
 
+void pause_when(Runtime& rt, Macro& m, PauseCondition c) {
+    c.runtime = true;
+    c.value = lower(trim(c.value));
+    if (c.kind == PauseCondition::Kind::Keys && c.keys.empty()) throw std::invalid_argument("pauseWhen(): no keys given");
+    if (c.kind == PauseCondition::Kind::App && c.value.empty()) throw std::invalid_argument("pauseWhen(): no app given");
+    // where it stands right now (a toggle rule only reacts to the NEXT time it happens)
+    if (c.kind == PauseCondition::Kind::Keys) {
+        std::lock_guard<std::mutex> lock(rt.held_mutex);
+        c.holding = true;
+        for (int k : c.keys) if (!rt.held.count(k)) { c.holding = false; break; }
+    } else {
+        FocusInfo f = focused_window(0.2, c.match == "title");
+        bool is_focused = icontains(c.match == "title" ? f.title : f.cls, c.value);
+        c.holding = f.ok && (c.focused ? is_focused : !is_focused);
+    }
+    {
+        std::lock_guard<std::mutex> lock(m.runtime->pause_mutex);
+        for (const auto& have : m.pause_conditions)
+            if (have.same_rule(c)) return;
+        m.pause_conditions.push_back(std::move(c));
+    }
+    refresh_paused(rt, m);
+}
+
+void clear_runtime_pause_conditions(Runtime& rt, std::vector<std::unique_ptr<Macro>>& macros) {
+    for (auto& mp : macros) {
+        bool changed = false;
+        {
+            std::lock_guard<std::mutex> lock(mp->runtime->pause_mutex);
+            auto& v = mp->pause_conditions;
+            size_t before = v.size();
+            v.erase(std::remove_if(v.begin(), v.end(), [](const PauseCondition& c) { return c.runtime; }), v.end());
+            changed = v.size() != before;
+        }
+        if (changed) refresh_paused(rt, *mp);
+    }
+}
+
 void run_pause_focus_watch(Runtime& rt, std::vector<std::unique_ptr<Macro>>& macros) {
     g_macros = &macros;
     write_pause_status(macros);
-    bool any = false;
-    for (const auto& m : macros)
-        for (const auto& c : m->pause_conditions)
-            if (c.kind == PauseCondition::Kind::App) any = true;
-    if (!any) return;   // macros only change with a daemon restart
     bool warned = false;
+    int epoch = rt.abort_epoch.load();
     while (true) {
-        std::string id, cls, title;
-        bool ok = run_kdotool({"getactivewindow"}, id, 1.0);
-        id = trim(id);
-        if (ok && !id.empty()) {
-            ok = run_kdotool({"getwindowclassname", id}, cls, 1.0);
-            run_kdotool({"getwindowname", id}, title, 1.0);
-        } else {
-            ok = false;
+        int now_epoch = rt.abort_epoch.load();
+        if (now_epoch != epoch) {            // the abort key: pauseWhen() rules go
+            epoch = now_epoch;
+            clear_runtime_pause_conditions(rt, macros);
         }
-        if (!ok && !warned) {
-            std::fprintf(stderr, "Pause conditions: can't read the focused window (kdotool) -- app conditions are off\n");
-            warned = true;
+        // conditions can appear while running (pauseWhen), so this is looked at every pass
+        bool any_app = false, want_title = false;
+        for (const auto& m : macros) {
+            std::lock_guard<std::mutex> lock(m->runtime->pause_mutex);
+            for (const auto& c : m->pause_conditions) {
+                if (c.kind != PauseCondition::Kind::App) continue;
+                any_app = true;
+                if (c.match == "title") want_title = true;
+            }
         }
-        pause_on_focus(rt, macros, ok, trim(cls), trim(title));
+        if (any_app) {
+            FocusInfo f = focused_window(0.2, want_title);   // shared with the privacy watcher and the primitives
+            if (!f.ok && !warned) {
+                std::fprintf(stderr, "Pause conditions: can't read the focused window (kdotool) -- app conditions are off\n");
+                warned = true;
+            }
+            pause_on_focus(rt, macros, f.ok, f.cls, f.title);
+        }
         std::this_thread::sleep_for(std::chrono::milliseconds(250));
     }
 }

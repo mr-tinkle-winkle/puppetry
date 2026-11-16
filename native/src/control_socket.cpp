@@ -1,3 +1,4 @@
+#include <algorithm>
 #include "control_socket.hpp"
 #include "privacy.hpp"
 #include "primitives.hpp"
@@ -5,6 +6,7 @@
 #include <cstring>
 #include <stdexcept>
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <sys/stat.h>
 #include <sys/un.h>
 #include <unistd.h>
@@ -49,12 +51,13 @@ void ControlSocketServer::start(const std::string& path) {
 
 void ControlSocketServer::stop() {
     if (!running_.exchange(false)) return;
+    // wake accept(), let the loop end, then close (closing first raced with accept)
+    if (listen_fd_ >= 0) ::shutdown(listen_fd_, SHUT_RDWR);
+    if (accept_thread_.joinable()) accept_thread_.join();
     if (listen_fd_ >= 0) {
-        ::shutdown(listen_fd_, SHUT_RDWR);
         ::close(listen_fd_);
         listen_fd_ = -1;
     }
-    if (accept_thread_.joinable()) accept_thread_.join();
     if (!socket_path_.empty()) ::unlink(socket_path_.c_str());
 }
 
@@ -68,16 +71,27 @@ void ControlSocketServer::accept_loop() {
         std::thread([this, client_fd] {
             std::string buf;
             char chunk[4096];
+            // A client that connects and never finishes its line must not
+            // hold a thread forever, nor grow the buffer without limit.
+            struct timeval tv = {5, 0};
+            ::setsockopt(client_fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+            ::setsockopt(client_fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
             // One line in, one line out, then close -- same contract as
             // the Python version's _handle_control_client().
             while (buf.find('\n') == std::string::npos) {
                 ssize_t n = ::recv(client_fd, chunk, sizeof(chunk), 0);
-                if (n <= 0) { ::close(client_fd); return; }
+                if (n <= 0 || buf.size() + (size_t)n > (1u << 20)) { ::close(client_fd); return; }
                 buf.append(chunk, n);
             }
             std::string line = buf.substr(0, buf.find('\n'));
-            std::string response = handle_line(line) + "\n";
-            ::send(client_fd, response.data(), response.size(), 0);
+            std::string response;
+            try {
+                response = handle_line(line) + "\n";
+            } catch (const std::exception& exc) {     // never let a request take the daemon down
+                response = json{{"ok", false}, {"error", exc.what()}}.dump() + "\n";
+            }
+            // MSG_NOSIGNAL: a client that already hung up must not SIGPIPE the daemon
+            ::send(client_fd, response.data(), response.size(), MSG_NOSIGNAL);
             ::close(client_fd);
         }).detach();
     }
@@ -98,10 +112,13 @@ std::string ControlSocketServer::handle_line(const std::string& line) {
         abort_all(rt_);
         resp = {{"ok", true}};
     } else if (cmd == "PAUSE") {
-        rt_.external_pause.store(true);
+        // {"cmd": "PAUSE", "seconds": N}: lapses by itself (default 60 s, at most 10 min)
+        double secs = 60.0;
+        if (payload.contains("seconds") && payload["seconds"].is_number()) secs = payload["seconds"].get<double>();
+        rt_.set_external_pause(std::min(std::max(secs, 0.1), 600.0));
         resp = {{"ok", true}};
     } else if (cmd == "RESUME") {
-        rt_.external_pause.store(false);
+        rt_.set_external_pause(0);
         resp = {{"ok", true}};
     } else if (cmd == "VISUALIZER") {
         // block / unblock the input visualizer: {"cmd": "VISUALIZER", "state": "toggle"|"block"|"unblock"|"status"}

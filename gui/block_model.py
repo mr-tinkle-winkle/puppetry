@@ -367,7 +367,7 @@ def prim_param(prim_name: str, param_name: str):
 _STARTERS = {"key": "KEY_A", "keys": ["KEY_LEFTCTRL", "KEY_C"], "acting": ["KEY_B"], "text": '"hello"',
              "cmd": '"notify-send hi"', "x_pixels": "100", "y_pixels": "0", "amount": "1", "time_": "0.1",
              "multiplier": "1", "what": '"keyboard"', "button": "KEY_F8", "axis": '"LX"', "value": "1",
-             "name": '"my_value"'}
+             "name": '"my_value"', "app": '"firefox"'}
 
 
 def new_call(name: str) -> Block:
