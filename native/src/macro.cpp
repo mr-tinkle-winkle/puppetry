@@ -212,15 +212,43 @@ struct ThreadHookScope {
 
 namespace {
 thread_local Macro* t_current_macro = nullptr;
+PauseHook hook_for(Macro* m) {
+    PauseHook h;
+    if (m) { h.paused = &m->runtime->paused; h.stop = &m->runtime->stop_flag; }
+    return h;
+}
 struct CurrentMacroScope {
     Macro* prev;
-    explicit CurrentMacroScope(Macro* m) : prev(t_current_macro) { t_current_macro = m; }
-    ~CurrentMacroScope() { t_current_macro = prev; }
+    PauseHook prev_hook;
+    explicit CurrentMacroScope(Macro* m) : prev(t_current_macro), prev_hook(Runtime::pause_hook()) {
+        t_current_macro = m;
+        Runtime::pause_hook() = hook_for(m);
+    }
+    ~CurrentMacroScope() { t_current_macro = prev; Runtime::pause_hook() = prev_hook; }
 };
 } // namespace
 
 Macro* current_macro() { return t_current_macro; }
-void set_current_macro(Macro* m) { t_current_macro = m; }
+void set_current_macro(Macro* m) { t_current_macro = m; Runtime::pause_hook() = hook_for(m); }
+const std::atomic<bool>* current_macro_paused_flag() {
+    return t_current_macro ? &t_current_macro->runtime->paused : nullptr;
+}
+
+void block_while_paused(const Runtime& rt, const PauseHook& hook) {
+    // Parked here, at the macro's next primitive / abort check, until it
+    // resumes. Abort and stopping a looping macro still work.
+    const MacroThreadHooks& hooks = macro_thread_hooks();
+    void* parked = hooks.park_begin ? hooks.park_begin() : nullptr;
+    struct Unpark {
+        const MacroThreadHooks& h; void* p;
+        ~Unpark() { if (h.park_end) h.park_end(p); }
+    } unpark{hooks, parked};
+    while (hook.paused->load(std::memory_order_relaxed)) {
+        if (rt.abort_flag.load(std::memory_order_relaxed)) throw MacroAborted{};
+        if (hook.stop && hook.stop->load(std::memory_order_relaxed)) throw MacroAborted{};
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+}
 
 void wait_for_reactivation(Runtime& rt, bool repress) {
     Macro* m = current_macro();
@@ -300,6 +328,14 @@ static void start_loop(Runtime& rt, MacroRegistry& registry, Macro& macro, std::
 }
 
 void trigger_macro(Runtime& rt, MacroRegistry& registry, Macro& macro, const std::vector<std::string>& args) {
+    if (macro.runtime->paused.load()) {
+        // Paused: nothing new starts. A looping toggle macro can still be
+        // switched off (it stops where it is parked).
+        if (macro.repeat_mode == RepeatMode::Toggle && macro_is_looping(macro)) stop_macro_loop(macro);
+        else std::printf("Macro '%s' is paused -- not started\n", macro.name.c_str());
+        std::fflush(stdout);
+        return;
+    }
     if (macro.runtime->reactivation_waiters.load() > 0) {
         macro.runtime->reactivated.store(true); // consumed by waitForReactivation()
         return;

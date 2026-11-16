@@ -7,7 +7,10 @@
 // interpreter (native_vm.cpp). Keeping the actual behavior in one place
 // means the two paths can never drift apart on what e.g. tap() does.
 #include <chrono>
+#include <functional>
+#include <optional>
 #include <string>
+#include <unordered_map>
 #include <vector>
 #include "runtime.hpp"
 
@@ -73,7 +76,55 @@ void ignore_keys_fn(Runtime& rt, const std::vector<int>& codes);
 // dispatch loop's raw key events, not from macro bodies calling kd/ku
 // directly -- this function only updates the Runtime's remap tables;
 // dispatch.cpp is what actually injects the duplicate presses.
-void act_as_fn(Runtime& rt, int key_pressing, bool ignore_original, const std::vector<int>& acting_keys);
+//
+// immediate=true: if the key is held right now, the change applies to that
+// press at once -- the old acting keys are released and the new ones
+// pressed (and the key itself, when the new mapping lets it through) --
+// instead of waiting for the next press. owner_paused: the calling macro's
+// paused flag (current_macro_paused_flag()); while it is set the mapping
+// acts as the plain key.
+void act_as_fn(Runtime& rt, int key_pressing, bool ignore_original, const std::vector<int>& acting_keys,
+               bool immediate = false, const std::atomic<bool>* owner_paused = nullptr);
+
+// Moves a HELD key from one actAs mapping to another right now (either may
+// be nullptr = "no mapping"): releases what `before` was pressing that
+// `after` isn't, presses what `after` adds. Used by immediate actAs and by
+// pause/resume of the macro that owns a mapping.
+void act_as_transition_held(Runtime& rt, int code, const ActAsMapping* before, const ActAsMapping* after);
+
+// remapProfile(name, keys, intercepts): adds or replaces the named profile
+// (it keeps its place in the layering when replaced); both empty removes it.
+// Held keys switch over at once. owner_paused: see act_as_fn.
+void remap_profile_fn(Runtime& rt, const std::string& name, const std::unordered_map<int, std::vector<int>>& keys,
+                      const std::vector<std::pair<std::vector<int>, std::vector<int>>>& intercepts,
+                      const std::atomic<bool>* owner_paused = nullptr);
+bool remap_profile_active(Runtime& rt, const std::string& name);
+
+// What a key does right now: the top non-paused remap profile that maps
+// it, else its non-paused actAs mapping, else nothing (owner cleared).
+std::optional<ActAsMapping> effective_mapping(Runtime& rt, int code);
+// Effective mappings of every real key held now; and moving held keys from
+// one snapshot to the other (act_as_transition_held for each difference).
+using MappingSnapshot = std::vector<std::pair<int, std::optional<ActAsMapping>>>;
+MappingSnapshot held_mapping_snapshot(Runtime& rt);
+void transition_snapshots(Runtime& rt, const MappingSnapshot& before, const MappingSnapshot& after);
+// Ends intercepts in progress that belong to profiles matching `pred`.
+void end_intercepts_if(Runtime& rt, const std::function<bool(const ActiveIntercept&)>& pred);
+
+// One real key event against the intercepts. false = it was consumed:
+// don't forward it and don't run actAs / remaps on it.
+// Press completing a trigger (every trigger key held): that press is
+// swallowed, trigger keys that aren't part of the output are released on
+// output for the duration, the output keys are pressed. Releasing any
+// trigger key ends it: output released, lifted keys still held pressed
+// again.
+bool apply_intercepts(Runtime& rt, int code, int value);
+
+// getMouseMotion(): total raw motion of the real mice (REL_X, REL_Y counts,
+// no pointer acceleration) -- minus whatever moved while the calling macro
+// was paused. `offset_x/offset_y` are that macro's paused totals (0 off a
+// macro thread).
+void get_mouse_motion_fn(Runtime& rt, long long offset_x, long long offset_y, long long& x, long long& y);
 
 // x_pixels/y_pixels: pixel delta (move_to=false) or absolute target
 // (move_to=true, resolved against kdotool's cursor-position query, with

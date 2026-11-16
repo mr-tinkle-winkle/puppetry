@@ -79,6 +79,8 @@ set(CORE_SOURCES
     src/dispatch.cpp
     src/event_stream.cpp
     src/privacy.cpp
+    src/pause.cpp
+    src/saved_vars.cpp
     src/steam_hid.cpp
     src/evdev_device.cpp
     src/macro.cpp
@@ -122,6 +124,8 @@ function(puppetry_test name source)
 endfunction()
 
 puppetry_test(test_core tests/test_core.cpp)
+puppetry_test(test_pause tests/test_pause.cpp)
+target_compile_definitions(test_pause PRIVATE PUPPETRY_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
 puppetry_test(test_control_socket tests/test_control_socket.cpp)
 puppetry_test(test_python_embed tests/test_python_embed.cpp)
 puppetry_test(test_native_vm tests/test_native_vm.cpp)

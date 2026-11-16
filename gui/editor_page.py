@@ -28,6 +28,7 @@ import sound
 import custom_blocks
 from block_editor import BlockEditor
 from custom_block_dialog import CustomBlockDialog
+from macro_extras import PauseConditionsEditor, SavedVariablesEditor
 from input_tools import ComboRecorder, DetectKey, HotkeyListener, MousePositionPoller, resolve_key_code
 from model import AppModel
 from reference import alias_targets
@@ -207,6 +208,16 @@ class MacroEditorPage(QWidget):
         self.mouse_pos.setFont(QFont("monospace"))
         pos_row.addWidget(self.mouse_pos, stretch=1)
         col.addLayout(pos_row)
+
+        # ------------------------------------------------------------ pause conditions / saved variables
+        col.addWidget(section_title("Pause conditions"))
+        self._pause_recorder: ComboRecorder | None = None
+        self._pause_record_row = None
+        self.pause_editor = PauseConditionsEditor(css, self._record_pause_keys)
+        col.addWidget(self.pause_editor)
+        col.addWidget(section_title("Saved variables"))
+        self.saved_vars = SavedVariablesEditor()
+        col.addWidget(self.saved_vars)
 
         # ------------------------------------------------------------ transcription
         self.transcribe_title = section_title("Transcribe Inputs")
@@ -512,6 +523,9 @@ class MacroEditorPage(QWidget):
         self.repeat.setCurrentIndex(REPEAT_MODES.index(mode) if mode in REPEAT_MODES else 0)
         self.edge.setCurrentIndex(1 if m.get("trigger_edge") == "up" else 0)
         self._set_combo_label(m.get("combo", []))
+        self._cancel_pause_recording()
+        self.pause_editor.set_conditions(m.get("pause_conditions", []))
+        self.saved_vars.set_owner(m.get("id"))
         self.ign_kb.setChecked(bool(m.get("ignore_keyboard")))
         self.ign_btn.setChecked(bool(m.get("ignore_mouse_buttons")))
         self.ign_move.setChecked(bool(m.get("ignore_mouse_movement")))
@@ -555,6 +569,11 @@ class MacroEditorPage(QWidget):
         m["ignore_keyboard"] = self.ign_kb.isChecked()
         m["ignore_mouse_buttons"] = self.ign_btn.isChecked()
         m["ignore_mouse_movement"] = self.ign_move.isChecked()
+        conds = self.pause_editor.conditions()
+        if conds:
+            m["pause_conditions"] = conds
+        else:
+            m.pop("pause_conditions", None)
         return m
 
     def _collect_aliases(self) -> dict:
@@ -585,6 +604,7 @@ class MacroEditorPage(QWidget):
         self.model.commit_macro(macro)
         self.macro = copy.deepcopy(self.model.find(macro.get("id")) or macro)
         self.model.save()
+        self.saved_vars.set_owner(self.macro.get("id"))   # a new macro just got its id
         self._snapshot = self._fingerprint()
         note = ""
         if self._view_mode == VIEW_BLOCKS and self.blocks.loose_count():
@@ -609,6 +629,7 @@ class MacroEditorPage(QWidget):
 
     def _leave(self) -> None:
         self.transcriber.stop()
+        self._cancel_pause_recording()
         if self._recorder is not None:
             self._recorder.cancel()
         self.on_close()
@@ -729,6 +750,43 @@ class MacroEditorPage(QWidget):
             self.combo_label.setText("Couldn't open keyboard/mouse device -- check paths & permissions.")
             return
         self._set_combo_label(self.macro.get("combo", []))
+
+    # ------------------------------------------------------------------ pause-condition keys
+
+    def _record_pause_keys(self, row) -> None:
+        if self._pause_recorder is not None:
+            same = self._pause_record_row is row
+            self._cancel_pause_recording()
+            if same:
+                return
+        kb, _ = self.model.device("keyboard")
+        mouse, _ = self.model.device("mouse")
+        if not kb and not mouse:
+            row.set_recording(True, "Set a keyboard/mouse device in Settings first.")
+            return
+        rec = ComboRecorder(kb, mouse, float(self.model.state.get("record_time_seconds", 3.0)), self)
+        self._pause_recorder, self._pause_record_row = rec, row
+        rec.progress.connect(lambda names, left: row.set_recording(
+            True, " + ".join(names) + (f" — hold ({left:.1f}s)" if left > 0 else "") if names else ""))
+        rec.finished_combo.connect(lambda names, status: self._pause_keys_done(rec, row, names, status))
+        row.set_recording(True)
+        rec.start()
+
+    def _pause_keys_done(self, rec, row, names: list, status: str) -> None:
+        rec.wait(500)
+        if self._pause_recorder is rec:
+            self._pause_recorder, self._pause_record_row = None, None
+        try:
+            row.set_recording(False)
+            if status == "ok" and names:
+                row.set_keys(names)
+        except RuntimeError:      # the row was removed meanwhile
+            pass
+
+    def _cancel_pause_recording(self) -> None:
+        rec = getattr(self, "_pause_recorder", None)
+        if rec is not None:
+            rec.cancel()
 
     def _clear_combo(self) -> None:
         if self._recorder is None:

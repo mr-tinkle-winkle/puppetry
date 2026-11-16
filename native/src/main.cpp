@@ -28,6 +28,7 @@
 #include <unordered_map>
 #include "pointer_accel.hpp"
 #include "privacy.hpp"
+#include "pause.hpp"
 #include "steam_hid.hpp"
 #include "python_embed.hpp"
 #include "runtime.hpp"
@@ -396,6 +397,7 @@ int main(int argc, char** argv) {
                     if (key_name.is_string() && resolve_key_name(key_name.get<std::string>(), code)) m->combo.push_back(code);
                 }
             }
+            m->pause_conditions = parse_pause_conditions(macro_def);
             m->func = compile_macro_body(macro_def, registry, all_macro_names);
             registry.set(sanitize_macro_name(m->name), m->func);
             macros.push_back(std::move(m));
@@ -467,6 +469,7 @@ int main(int argc, char** argv) {
     // Blocking the input visualizer: the manual toggle (survives restarts) and ignored apps.
     privacy_load_manual(rt);
     std::thread([&rt] { run_privacy_watch(rt); }).detach();
+    std::thread([&rt, &macros] { run_pause_focus_watch(rt, macros); }).detach();   // pause conditions on app focus
     if (overlay_wanted(load_overlay_config())) {
         std::thread(run_overlay_helper).detach();
         std::printf("Overlay helper: starting (overlay.json)\n");

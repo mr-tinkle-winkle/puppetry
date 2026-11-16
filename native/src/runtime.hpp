@@ -27,15 +27,52 @@ namespace puppetry {
 // _MacroAborted. Never escapes a macro thread.
 struct MacroAborted {};
 
+// Blocks the calling macro thread while its macro is paused (pause
+// conditions, see pause.hpp). Defined in macro.cpp; called from
+// check_abort() only when this thread belongs to a macro.
+struct PauseHook {
+    const std::atomic<bool>* paused = nullptr;  // the macro's paused flag
+    const std::atomic<bool>* stop = nullptr;    // its loop's stop flag
+};
+struct Runtime;
+void block_while_paused(const Runtime& rt, const PauseHook& hook);
+
 // actAs(keyPressing, ignore_original, acting_keys...) -- see the project
 // handoff for the settled spec. One entry per remapped key code.
 struct ActAsMapping {
     bool ignore_original = false;
     std::vector<int> acting_keys;
+    // The macro that made this mapping. While it is paused the mapping
+    // acts as the key itself (the grab stays, so nothing gets stuck when
+    // it resumes). Not part of ==: toggling off works from any macro.
+    const std::atomic<bool>* owner_paused = nullptr;
+
+    bool suspended() const { return owner_paused && owner_paused->load(std::memory_order_relaxed); }
 
     bool operator==(const ActAsMapping& other) const {
         return ignore_original == other.ignore_original && acting_keys == other.acting_keys;
     }
+};
+
+// remapProfile(name, keys, intercept): a named set of remaps, layered (the
+// most recently added profile wins a key). keys: code -> what it acts as
+// (empty = the key does nothing); the original is always suppressed.
+// intercepts: a trigger combo -> an output combo, see apply_intercepts().
+struct RemapProfile {
+    std::string name;
+    const std::atomic<bool>* owner_paused = nullptr;   // as ActAsMapping::owner_paused
+    std::unordered_map<int, std::vector<int>> keys;
+    std::vector<std::pair<std::vector<int>, std::vector<int>>> intercepts;
+    bool suspended() const { return owner_paused && owner_paused->load(std::memory_order_relaxed); }
+};
+
+// An intercept that fired and whose trigger is still held.
+struct ActiveIntercept {
+    std::string profile;
+    int code = 0;                  // the trigger key whose press completed it (swallowed)
+    std::vector<int> trigger;
+    std::vector<int> lifted;       // held trigger keys released on output for the duration
+    std::vector<int> pressed;      // output keys we pressed
 };
 
 // Lock-free set of key codes, one bit per code. Used for the codes OUR
@@ -52,6 +89,10 @@ public:
     void clear(int code) {
         if (code < 0 || code >= KEY_CNT) return;
         words_[code >> 6].fetch_and(~(1ull << (code & 63)), std::memory_order_relaxed);
+    }
+    bool has(int code) const {
+        if (code < 0 || code >= KEY_CNT) return false;
+        return words_[code >> 6].load(std::memory_order_relaxed) & (1ull << (code & 63));
     }
     bool empty() const {
         for (const auto& w : words_) if (w.load(std::memory_order_relaxed)) return false;
@@ -126,7 +167,7 @@ private:
     std::atomic<long long> at_us_{0};
 };
 
-class Runtime {
+struct Runtime {
 public:
     UinputDevice ui_keyboard;
     UinputDevice ui_mouse;
@@ -216,6 +257,13 @@ public:
         }
     }
 
+    // ---- raw mouse motion (getMouseMotion) ----
+    // Every REL_X / REL_Y count from the real mice since the daemon
+    // started, before pointer acceleration (straight from evdev). Our own
+    // virtual mouse is never counted.
+    std::atomic<long long> motion_x{0};
+    std::atomic<long long> motion_y{0};
+
     // ---- external pause (GUI recording a combo) ----
     std::atomic<bool> external_pause{false};
     // Input visualizer blocking (privacy.hpp): the user's toggle, and "an
@@ -232,6 +280,17 @@ public:
     // Queued change for a key that's currently physically held -- takes
     // effect on that key's next release. std::nullopt = "clear" queued.
     std::unordered_map<int, std::optional<ActAsMapping>> act_as_pending;
+    // Originals pressed on the VIRTUAL keyboard by an immediate held-key
+    // transition (actAs(..., immediate=True), a pause/resume): their real
+    // release must release the virtual copy too, grabbed or not.
+    std::unordered_set<int> act_as_synth_originals;
+    // remapProfile() layers + intercepts in progress (also act_as_mutex)
+    std::vector<RemapProfile> remap_profiles;
+    std::vector<ActiveIntercept> active_intercepts;
+    // swallowed trigger presses whose intercept ended early (another trigger
+    // key let go first, profile removed, macro paused): their release and
+    // autorepeat stay swallowed too
+    std::unordered_set<int> intercept_swallowed;
 
     // Per-thread duration multiplier for wait()/tap()/move_mouse() --
     // reset to 1.0 at the start of every top-level macro run/iteration,
@@ -250,8 +309,17 @@ public:
         return value;
     }
 
+    // The macro this thread runs for (set by macro.cpp): check_abort()
+    // parks here while that macro is paused.
+    static PauseHook& pause_hook() {
+        thread_local PauseHook value;
+        return value;
+    }
+
     void check_abort() const {
         if (abort_flag.load(std::memory_order_relaxed)) throw MacroAborted{};
+        const PauseHook& h = pause_hook();
+        if (h.paused && h.paused->load(std::memory_order_relaxed)) block_while_paused(*this, h);
     }
 };
 

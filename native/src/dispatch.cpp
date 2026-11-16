@@ -1,5 +1,6 @@
 #include "dispatch.hpp"
 #include "event_stream.hpp"
+#include "pause.hpp"
 #include "keycodes.hpp"
 #include "primitives.hpp"
 #include <algorithm>
@@ -59,6 +60,7 @@ void handle_key_event(Runtime& rt, std::vector<std::unique_ptr<Macro>>& macros, 
             current.assign(rt.held.begin(), rt.held.end());
         }
         if (rt.external_pause.load()) return;
+        pause_on_key(rt, macros, code, 1, current);
 
         for (Macro* m : maximal_matching_macros(macros, code, current)) {
             if (m->trigger_edge == TriggerEdge::Up) {
@@ -74,6 +76,7 @@ void handle_key_event(Runtime& rt, std::vector<std::unique_ptr<Macro>>& macros, 
             rt.held.erase(code);
             current.assign(rt.held.begin(), rt.held.end());
         }
+        pause_on_key(rt, macros, code, 0, current);
 
         for (const auto& mp : macros) {
             Macro& m = *mp;
@@ -98,13 +101,30 @@ void handle_key_event(Runtime& rt, std::vector<std::unique_ptr<Macro>>& macros, 
 bool apply_act_as(Runtime& rt, int code, int value) {
     std::optional<ActAsMapping> mapping_to_use;
     bool suppress_original = false;
+    bool synth_original_up = false;
 
     {
         std::lock_guard<std::mutex> lock(rt.act_as_mutex);
-        auto active_it = rt.act_as_active.find(code);
-        if (active_it != rt.act_as_active.end()) {
-            mapping_to_use = active_it->second;
-            suppress_original = active_it->second.ignore_original;
+        // remap profiles over actAs; a mapping whose macro is paused acts as the plain key
+        for (auto it = rt.remap_profiles.rbegin(); it != rt.remap_profiles.rend() && !mapping_to_use; ++it) {
+            if (it->suspended()) continue;
+            auto k = it->keys.find(code);
+            if (k != it->keys.end()) mapping_to_use = ActAsMapping{true, k->second, nullptr};
+        }
+        if (!mapping_to_use) {
+            auto active_it = rt.act_as_active.find(code);
+            if (active_it != rt.act_as_active.end() && !active_it->second.suspended())
+                mapping_to_use = active_it->second;
+        }
+        if (mapping_to_use) suppress_original = mapping_to_use->ignore_original;
+        if (value == 0) {
+            // pressed on the virtual keyboard by an immediate transition:
+            // release that copy (the real release may not reach it)
+            auto so = rt.act_as_synth_originals.find(code);
+            if (so != rt.act_as_synth_originals.end()) {
+                rt.act_as_synth_originals.erase(so);
+                synth_original_up = true;
+            }
         }
 
         if (value == 0) {
@@ -121,6 +141,7 @@ bool apply_act_as(Runtime& rt, int code, int value) {
         }
     }
 
+    if (synth_original_up) ku(rt, code);
     if (!mapping_to_use) return true; // not a remapped key -- forward normally
 
     if (value == 1 || value == 0) {
@@ -218,7 +239,9 @@ void watch_device(Runtime& rt, MacroRegistry& registry, std::vector<std::unique_
                     EventStream* es = g_event_stream.load(std::memory_order_relaxed);
                     if (es && es->active()) es->publish('r', ev.time_us, 'k', ev.code, ev.value);
                 }
-                bool original_wants_forward = apply_act_as(rt, ev.code, ev.value);
+                // intercepts first: a consumed event skips actAs / remaps and isn't forwarded
+                bool original_wants_forward = apply_intercepts(rt, ev.code, ev.value) &&
+                                              apply_act_as(rt, ev.code, ev.value);
                 // Decide forwarding BEFORE handling the event: handling it
                 // can wake a waitForPress()/waitForReactivation(repress)
                 // thread that immediately drops its repress codes, and the
@@ -238,6 +261,8 @@ void watch_device(Runtime& rt, MacroRegistry& registry, std::vector<std::unique_
                 // relaxed atomic store; safe to do even when the motion
                 // is being suppressed below (it only costs a later query).
                 if (ev.code == REL_X || ev.code == REL_Y) rt.cursor.invalidate();
+                if (ev.code == REL_X) rt.motion_x.fetch_add(ev.value, std::memory_order_relaxed);   // getMouseMotion()
+                else if (ev.code == REL_Y) rt.motion_y.fetch_add(ev.value, std::memory_order_relaxed);
                 switch (ev.code) {                    // summed per hardware frame for the stream
                     case REL_X: frame_dx += ev.value; break;
                     case REL_Y: frame_dy += ev.value; break;

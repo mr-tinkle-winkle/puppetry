@@ -271,6 +271,13 @@ static void apply_grab_state(Runtime& rt) {
             if (!mapping.ignore_original) continue;
             (is_button_code(pressing_code) ? mouse_needed : kb_needed) = true;
         }
+        // remap profiles (paused ones too: their keys act as themselves
+        // through us, so nothing is re-grabbed with a key held on resume)
+        for (const auto& p : rt.remap_profiles) {
+            for (const auto& [code, _t] : p.keys) (is_button_code(code) ? mouse_needed : kb_needed) = true;
+            for (const auto& [trigger, _o] : p.intercepts)
+                for (int code : trigger) (is_button_code(code) ? mouse_needed : kb_needed) = true;
+        }
     }
 
     std::lock_guard<std::mutex> lock(rt.grab_mutex);
@@ -418,8 +425,40 @@ void ignore_keys_fn(Runtime& rt, const std::vector<int>& codes) {
     apply_grab_state(rt);
 }
 
-void act_as_fn(Runtime& rt, int key_pressing, bool ignore_original, const std::vector<int>& acting_keys) {
-    ActAsMapping candidate{ignore_original, acting_keys};
+static std::optional<ActAsMapping> effective_mapping_locked(Runtime& rt, int code);
+
+void act_as_transition_held(Runtime& rt, int code, const ActAsMapping* before, const ActAsMapping* after) {
+    static const std::vector<int> kNone;
+    const std::vector<int>& b = before ? before->acting_keys : kNone;
+    const std::vector<int>& a = after ? after->acting_keys : kNone;
+    const bool orig_before = !(before && before->ignore_original);
+    const bool orig_after = !(after && after->ignore_original);
+    auto has = [](const std::vector<int>& v, int x) { return std::find(v.begin(), v.end(), x) != v.end(); };
+
+    // the key itself is "out" if it passes through, or is one of its own acting keys
+    const bool in_before = orig_before || has(b, code);
+    const bool in_after = orig_after || has(a, code);
+    for (int k : b) if (!has(a, k) && k != code) ku(rt, k);
+    if (in_before && !in_after) {
+        // Only the virtual copy can be released; a press that went straight
+        // from the real (ungrabbed) device is out of reach.
+        ku(rt, code);
+        std::lock_guard<std::mutex> lock(rt.act_as_mutex);
+        rt.act_as_synth_originals.erase(code);
+    } else if (in_after && orig_after && !orig_before) {
+        // now held as the plain key: its real release has to undo our press
+        if (!in_before) kd(rt, code);
+        std::lock_guard<std::mutex> lock(rt.act_as_mutex);
+        rt.act_as_synth_originals.insert(code);
+    } else if (!in_before && in_after) {
+        kd(rt, code);
+    }
+    for (int k : a) if (!has(b, k) && k != code) kd(rt, k);
+}
+
+void act_as_fn(Runtime& rt, int key_pressing, bool ignore_original, const std::vector<int>& acting_keys,
+               bool immediate, const std::atomic<bool>* owner_paused) {
+    ActAsMapping candidate{ignore_original, acting_keys, owner_paused};
 
     bool currently_held;
     {
@@ -427,6 +466,9 @@ void act_as_fn(Runtime& rt, int key_pressing, bool ignore_original, const std::v
         currently_held = rt.held.count(key_pressing) > 0;
     }
 
+    // What the held key is doing now and what it will do (immediate only).
+    std::optional<ActAsMapping> before_eff, after_eff;
+    bool transition = false;
     {
         // Scoped so act_as_mutex is released BEFORE apply_grab_state()
         // below, which takes the same (non-recursive) mutex itself --
@@ -450,20 +492,198 @@ void act_as_fn(Runtime& rt, int key_pressing, bool ignore_original, const std::v
         std::optional<ActAsMapping> new_intent =
             (intended && *intended == candidate) ? std::nullopt : std::optional<ActAsMapping>(candidate);
 
-        if (currently_held) {
+        if (currently_held && !immediate) {
             // Held-key transition: finish the current press/release cycle
             // acting as whatever it already is; only take effect starting
             // from the next press.
             rt.act_as_pending[key_pressing] = new_intent;
         } else {
-            // Not currently down -- nothing to finish, apply immediately.
+            if (currently_held) before_eff = effective_mapping_locked(rt, key_pressing);
             if (new_intent) rt.act_as_active[key_pressing] = *new_intent;
             else rt.act_as_active.erase(key_pressing);
             rt.act_as_pending.erase(key_pressing);
+            if (currently_held) {
+                after_eff = effective_mapping_locked(rt, key_pressing);   // a remap profile may still override it
+                transition = !(before_eff == after_eff);
+            }
         }
     }
 
     apply_grab_state(rt);
+    if (transition) act_as_transition_held(rt, key_pressing, before_eff ? &*before_eff : nullptr,
+                                           after_eff ? &*after_eff : nullptr);
+}
+
+// ---------------------------------------------------------------- remap profiles
+
+static std::optional<ActAsMapping> effective_mapping_locked(Runtime& rt, int code) {
+    for (auto it = rt.remap_profiles.rbegin(); it != rt.remap_profiles.rend(); ++it) {
+        if (it->suspended()) continue;
+        auto k = it->keys.find(code);
+        if (k != it->keys.end()) return ActAsMapping{true, k->second, nullptr};
+    }
+    auto a = rt.act_as_active.find(code);
+    if (a != rt.act_as_active.end() && !a->second.suspended()) return ActAsMapping{a->second.ignore_original,
+                                                                                  a->second.acting_keys, nullptr};
+    return std::nullopt;
+}
+
+std::optional<ActAsMapping> effective_mapping(Runtime& rt, int code) {
+    std::lock_guard<std::mutex> lock(rt.act_as_mutex);
+    return effective_mapping_locked(rt, code);
+}
+
+MappingSnapshot held_mapping_snapshot(Runtime& rt) {
+    std::vector<int> held;
+    {
+        std::lock_guard<std::mutex> lock(rt.held_mutex);
+        held.assign(rt.held.begin(), rt.held.end());
+    }
+    MappingSnapshot out;
+    std::lock_guard<std::mutex> lock(rt.act_as_mutex);
+    for (int c : held) out.emplace_back(c, effective_mapping_locked(rt, c));
+    return out;
+}
+
+void transition_snapshots(Runtime& rt, const MappingSnapshot& before, const MappingSnapshot& after) {
+    for (const auto& [code, b] : before) {
+        for (const auto& [code2, a] : after) {
+            if (code2 != code || b == a) continue;
+            act_as_transition_held(rt, code, b ? &*b : nullptr, a ? &*a : nullptr);
+        }
+    }
+}
+
+static bool vec_has(const std::vector<int>& v, int x) { return std::find(v.begin(), v.end(), x) != v.end(); }
+
+static void finish_intercept(Runtime& rt, const ActiveIntercept& in, int releasing) {
+    for (auto it = in.pressed.rbegin(); it != in.pressed.rend(); ++it) ku(rt, *it);
+    std::vector<int> held;
+    {
+        std::lock_guard<std::mutex> lock(rt.held_mutex);
+        held.assign(rt.held.begin(), rt.held.end());
+    }
+    for (int k : in.lifted)
+        if (k != releasing && vec_has(held, k)) kd(rt, k);
+}
+
+void end_intercepts_if(Runtime& rt, const std::function<bool(const ActiveIntercept&)>& pred) {
+    std::vector<ActiveIntercept> ending;
+    {
+        std::lock_guard<std::mutex> lock(rt.act_as_mutex);
+        for (auto it = rt.active_intercepts.begin(); it != rt.active_intercepts.end();) {
+            if (pred(*it)) {
+                rt.intercept_swallowed.insert(it->code);
+                ending.push_back(*it);
+                it = rt.active_intercepts.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    }
+    for (const auto& in : ending) finish_intercept(rt, in, -1);
+}
+
+bool apply_intercepts(Runtime& rt, int code, int value) {
+    if (value == 2) {
+        std::lock_guard<std::mutex> lock(rt.act_as_mutex);
+        for (const auto& in : rt.active_intercepts) if (in.code == code) return false;   // its autorepeat
+        return !rt.intercept_swallowed.count(code);
+    }
+    if (value == 1) {
+        std::vector<int> held;
+        {
+            std::lock_guard<std::mutex> lock(rt.held_mutex);
+            held.assign(rt.held.begin(), rt.held.end());
+        }
+        held.push_back(code);   // the dispatch loop adds it to `held` after this
+        ActiveIntercept in;
+        std::vector<int> output;
+        bool found = false;
+        {
+            std::lock_guard<std::mutex> lock(rt.act_as_mutex);
+            if (rt.remap_profiles.empty()) return true;
+            for (auto it = rt.remap_profiles.rbegin(); it != rt.remap_profiles.rend() && !found; ++it) {
+                if (it->suspended()) continue;
+                for (const auto& [trigger, out] : it->intercepts) {
+                    if (!vec_has(trigger, code)) continue;
+                    bool all = true;
+                    for (int k : trigger) if (!vec_has(held, k)) { all = false; break; }
+                    if (!all) continue;
+                    in.profile = it->name;
+                    in.code = code;
+                    in.trigger = trigger;
+                    output = out;
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) return true;
+            for (int k : in.trigger)
+                if (k != code && !vec_has(output, k)) in.lifted.push_back(k);
+            for (int k : output)
+                if (!(k != code && vec_has(in.trigger, k))) in.pressed.push_back(k);   // held trigger keys stay down
+            rt.active_intercepts.push_back(in);
+        }
+        for (int k : in.lifted) ku(rt, k);
+        for (int k : in.pressed) kd(rt, k);
+        return false;
+    }
+    // release: ends every intercept this key belongs to
+    std::vector<ActiveIntercept> ending;
+    bool forward = true;
+    {
+        std::lock_guard<std::mutex> lock(rt.act_as_mutex);
+        if (rt.intercept_swallowed.erase(code)) forward = false;
+        for (auto it = rt.active_intercepts.begin(); it != rt.active_intercepts.end();) {
+            if (vec_has(it->trigger, code)) {
+                // another trigger key let go first: the swallowed one stays swallowed till its own release
+                if (it->code != code) rt.intercept_swallowed.insert(it->code);
+                ending.push_back(*it);
+                it = rt.active_intercepts.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    }
+    for (const auto& in : ending) {
+        finish_intercept(rt, in, code);
+        if (in.code == code) forward = false;    // its press never went out
+    }
+    return forward;
+}
+
+void remap_profile_fn(Runtime& rt, const std::string& name, const std::unordered_map<int, std::vector<int>>& keys,
+                      const std::vector<std::pair<std::vector<int>, std::vector<int>>>& intercepts,
+                      const std::atomic<bool>* owner_paused) {
+    MappingSnapshot before = held_mapping_snapshot(rt);
+    {
+        std::lock_guard<std::mutex> lock(rt.act_as_mutex);
+        auto it = std::find_if(rt.remap_profiles.begin(), rt.remap_profiles.end(),
+                               [&](const RemapProfile& p) { return p.name == name; });
+        if (keys.empty() && intercepts.empty()) {
+            if (it != rt.remap_profiles.end()) rt.remap_profiles.erase(it);
+        } else {
+            RemapProfile p{name, owner_paused, keys, intercepts};
+            if (it != rt.remap_profiles.end()) *it = std::move(p);
+            else rt.remap_profiles.push_back(std::move(p));
+        }
+    }
+    end_intercepts_if(rt, [&](const ActiveIntercept& in) { return in.profile == name; });
+    apply_grab_state(rt);
+    transition_snapshots(rt, before, held_mapping_snapshot(rt));
+}
+
+bool remap_profile_active(Runtime& rt, const std::string& name) {
+    std::lock_guard<std::mutex> lock(rt.act_as_mutex);
+    for (const auto& p : rt.remap_profiles) if (p.name == name) return true;
+    return false;
+}
+
+void get_mouse_motion_fn(Runtime& rt, long long offset_x, long long offset_y, long long& x, long long& y) {
+    rt.check_abort();
+    x = rt.motion_x.load(std::memory_order_relaxed) - offset_x;
+    y = rt.motion_y.load(std::memory_order_relaxed) - offset_y;
 }
 
 static void move_rel_step(Runtime& rt, int dx, int dy) {
@@ -819,6 +1039,10 @@ void abort_all(Runtime& rt) {
         std::lock_guard<std::mutex> lock(rt.act_as_mutex);
         rt.act_as_active.clear();
         rt.act_as_pending.clear();
+        rt.act_as_synth_originals.clear();   // their virtual presses are in synth_held, released below
+        rt.remap_profiles.clear();
+        rt.active_intercepts.clear();
+        rt.intercept_swallowed.clear();
     }
     {
         std::lock_guard<std::mutex> lock(rt.grab_mutex);

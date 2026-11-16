@@ -62,7 +62,27 @@ actAs(key, ignore, *acting_keys)
   original key's own press. Runtime-only (a daemon restart clears it),
   global across profiles, cleared by the abort key. Calling it again
   with the exact same arguments turns it back off. If the key is held
-  when you change it, the change applies from its next press.
+  when you change it, the change applies from its next press -- or right
+  away with immediate=True: actAs(KEY_W, True, KEY_S, immediate=True)
+  lets go of what the held key was pressing and presses the new keys
+  instead. While the macro that made a remap is paused (pause
+  conditions), the key acts as itself.
+
+remapProfile(name, keys=None, intercept=None)
+  A whole set of remaps at once, by name. keys: what each key acts as --
+  {KEY_W: KEY_S, KEY_A: (KEY_D, KEY_LEFTSHIFT), KEY_Q: None} (None = the
+  key does nothing; with Python off, write it as a list of pairs:
+  [(KEY_W, KEY_S), (KEY_Q, None)]). The keys' own presses never go
+  through. intercept: key combos turned into other combos --
+      remapProfile("edit", intercept={(KEY_LEFTCTRL, KEY_C): (KEY_LEFTCTRL, KEY_INSERT)})
+  While Ctrl is held, pressing C sends Ctrl+Insert instead (a held key
+  that isn't part of the new combo is let go of for it). Calling it again
+  with the same name replaces that profile; remapProfile(name) alone
+  removes it. Several profiles stack: the one added last wins a key, so a
+  temporary layer can sit on top of a base one. Keys held during a change
+  switch over at once. Runtime-only, cleared by the abort key; while the
+  macro that made it is paused (pause conditions), it's switched off.
+  Keyboard and mouse buttons only (not controllers).
 
 checkpoint()
   Does nothing at all when the macro runs -- a pure marker. The editor's
@@ -91,6 +111,30 @@ getMousePosition()
 getButtonsHeld()
   A list of every real key/button held right now, e.g.
   if KEY_A in getButtonsHeld(): ...
+
+getMouseMotion()
+  How far the real mouse has moved in total, as (x, y) in raw mouse
+  counts (right and down are positive) -- straight from the mouse, before
+  any pointer speed or acceleration, and still counting when a game locks
+  the cursor (camera turning). Compare two readings to see a movement:
+      start = getMouseMotion()
+      ...
+      moved_up = start.y - getMouseMotion.y
+  getMouseMotion.x / .y read it directly. Movement while this macro is
+  paused is left out.
+
+saveVar(name, value)
+  Keeps a value for this macro across runs, daemon restarts and reboots:
+  saveVar("pitch_range", 2400). Numbers, text, True/False, None and lists
+  (dicts with Python on). Each macro has its own set; see and edit them
+  under "Saved variables" in the macro's settings.
+
+loadVar(name, default=None)
+  A value saveVar() kept (or that was typed into "Saved variables"), else
+  default:  limit = loadVar("pitch_range", 0)
+
+clearVar(name)
+  Forgets a saved variable. True if there was one.
 
 getAxis(axis)
   Where a real game controller's stick or trigger is right now. axis:
@@ -281,9 +325,18 @@ PRIMITIVES: tuple = (
                         Param("ignore", kind="bool", caption="suppress original",
                               doc="True: the original key's own press is blocked."),
                         Param("acting", kind="keys", caption="also press", vararg=True,
-                              doc="Keys/buttons pressed whenever the key is.")),
+                              doc="Keys/buttons pressed whenever the key is."),
+                        Param("immediate", "False", kind="bool", caption="right away", kw_only=True,
+                              doc="True: if the key is held now, switch it over now instead of on its next press.")),
               "input", "From now on, pressing the key also presses these (run again with the same values to undo).",
               "act as"),
+    Primitive("remapProfile", (Param("name", kind="string", doc="The profile's name, in quotes."),
+                               Param("keys", "None", caption="keys",
+                                     doc="What each key acts as: {KEY_W: KEY_S, ...} (None = nothing)."),
+                               Param("intercept", "None", caption="intercept",
+                                     doc="Combos sent as other combos: {(KEY_LEFTCTRL, KEY_C): (KEY_LEFTCTRL, KEY_INSERT)}.")),
+              "input", "Turn on a named set of key remaps and combo intercepts (only a name: turn it off).",
+              "remap profile"),
     Primitive("waitForPress", (Param("button", '"any"', kind="key",
                                      doc="The real key or mouse button to wait for -- leave it empty (or \"any\") "
                                          "for any key or button."), _REPRESS),
@@ -297,6 +350,9 @@ PRIMITIVES: tuple = (
               "mouse position", reporter=True),
     Primitive("getButtonsHeld", (), "input", "Every real key/button held down right now.", "buttons held",
               reporter=True),
+    Primitive("getMouseMotion", (), "input",
+              "Total raw movement of the real mouse, (x, y) in mouse counts -- works while a game locks the cursor. "
+              "Use .x / .y for one number.", "mouse motion", reporter=True),
     Primitive("getAxis", (Param("axis", '"LX"', kind="choice", choices=_READ_AXES,
                                 doc="Which stick / trigger / d-pad axis."),),
               "input", "A real controller's stick or trigger right now (sticks -1..1, triggers 0..1).",
@@ -306,6 +362,15 @@ PRIMITIVES: tuple = (
                        Param("time_", "0", caption="over", doc="Seconds to move there (0 = at once).")),
               "output", "Move a stick or trigger on the virtual controller (Settings > Devices).",
               "move controller axis"),
+    Primitive("saveVar", (Param("name", kind="string", doc="The variable's name, in quotes."),
+                          Param("value", caption="=", doc="What to keep.")),
+              "neutral", "Keep a value for this macro, across runs and restarts.", "save variable"),
+    Primitive("loadVar", (Param("name", kind="string", doc="The variable's name, in quotes."),
+                          Param("default", "None", caption="else", doc="What to use if it was never saved.")),
+              "neutral", "A value this macro saved (or that was typed into Saved variables).", "saved variable",
+              reporter=True),
+    Primitive("clearVar", (Param("name", kind="string", doc="The variable's name, in quotes."),),
+              "neutral", "Forget a saved variable.", "forget variable"),
 )
 
 PRIMITIVES_BY_NAME: dict = {p.name: p for p in PRIMITIVES}

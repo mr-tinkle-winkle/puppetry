@@ -1555,6 +1555,75 @@ def main() -> int:
     w.nav.button(app.PAGE_MACROS).click()
     pump(200)
 
+    # ------------------------------------------------------------ pause conditions + saved variables
+    import macro_extras as mx
+    check("pause conditions: incomplete rows dropped, values normalized",
+          mx.clean_conditions([{"kind": "keys", "keys": []}, {"kind": "app", "value": "  "},
+                               {"kind": "app", "value": "sober", "mode": "bogus"},
+                               {"kind": "keys", "keys": ["KEY_F8"], "mode": "toggle"}, "junk"])
+          == [{"kind": "app", "match": "class", "value": "sober", "state": "unfocused", "mode": "while"},
+              {"kind": "keys", "keys": ["KEY_F8"], "mode": "toggle"}])
+    check("saved variable values: JSON, Python literals, else text",
+          [mx.parse_value(t) for t in ("2400", "2.5", '"x"', "true", "True", "None", "[1, 'a']", "(1, 2)",
+                                       "hello there", "")]
+          == [2400, 2.5, "x", True, True, None, [1, "a"], [1, 2], "hello there", ""])
+    check("saved variable values print the way code writes them",
+          [mx.format_value(v) for v in (2400, 2.5, "x", True, None, [1, "a", False])]
+          == ["2400", "2.5", '"x"', "True", "None", "[1, 'a', False]"])
+    w.nav.button(app.PAGE_MACROS).click()
+    pump(50)
+    w.model.find("m1")["code"] = "tap(KEY_A)\n"
+    w.open_editor("m1")
+    pump(50)
+    ed = w.editor_page
+    ed.load_macro("m1")
+    pe = ed.pause_editor
+    pe.set_conditions([{"kind": "keys", "keys": ["KEY_LEFTCTRL", "KEY_P"], "mode": "toggle"}])
+    check("pause conditions: a change is an unsaved change", ed.has_unsaved_changes())
+    pe._add({"kind": "app", "match": "title", "value": "Roblox", "state": "focused", "mode": "while"}, emit=True)
+    pe._add({"kind": "keys", "keys": [], "mode": "while"}, emit=True)       # never recorded: not saved
+    pe.rows[0].mode.setCurrentIndex(1)
+    check("pause conditions: rows -> macro dict", ed._collect().get("pause_conditions") == [
+        {"kind": "keys", "keys": ["KEY_LEFTCTRL", "KEY_P"], "mode": "while"},
+        {"kind": "app", "match": "title", "value": "Roblox", "state": "focused", "mode": "while"}])
+    check("pause conditions: app rows show the app fields, key rows the keys",
+          not pe.rows[1].value.isHidden() and pe.rows[1].record_btn.isHidden()
+          and pe.rows[0].value.isHidden() and not pe.rows[0].record_btn.isHidden())
+    if cfg.find_binary("puppetry-daemon"):
+        _ok = ed.save()
+        if not _ok:
+            print("SAVE ERROR:", ed.error.text())
+        check("a macro with pause conditions saves", _ok)
+        check("...and they're in macros.json",
+              any(m.get("pause_conditions") for m in cfg.load_macros()["macros"] if m.get("id") == "m1"))
+        ed.load_macro("m1")
+        check("...and load back", len(ed.pause_editor.rows) == 2)
+    pe.rows[0].removed.emit(pe.rows[0])
+    check("pause conditions: remove a row", len(pe.rows) == (1 if cfg.find_binary("puppetry-daemon") else 2))
+
+    sv = ed.saved_vars
+    check("saved variables: owner is the macro id", sv.owner == "m1")
+    mx.set_variable("m1", "pitch_range", 2400)
+    mx.set_variable("other", "pitch_range", 5)
+    sv.refresh()
+    check("saved variables: the macro's own values show (live re-read)",
+          [(r.name, r.value_edit.text()) for r in sv.rows] == [("pitch_range", "2400")])
+    sv._add_blank()
+    sv.rows[-1].name_edit.setText("label")
+    sv.rows[-1].value_edit.setText("hello")
+    sv._commit_row(sv.rows[-1])
+    sv.rows[0].value_edit.setText("[1, 2]")
+    sv._commit_row(sv.rows[0])
+    doc = mx.load_saved_variables()
+    check("saved variables: edits written straight to the file",
+          doc.get("m1") == {"pitch_range": [1, 2], "label": "hello"} and doc.get("other") == {"pitch_range": 5})
+    sv._delete_row(next(r for r in sv.rows if r.name == "label"))
+    check("saved variables: delete", mx.load_saved_variables().get("m1") == {"pitch_range": [1, 2]})
+    ed.load_macro(None)
+    check("saved variables: a never-saved macro can't have any yet", sv.owner is None and not sv.add_btn.isEnabled())
+    w.nav.button(app.PAGE_MACROS).click()
+    pump(50)
+
     # ------------------------------------------------------------ styling guardrail
     unscoped = []
     for page in (w.macro_page, w.visualizer_page, w.settings_page, w.editor_page):

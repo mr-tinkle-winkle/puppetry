@@ -406,8 +406,12 @@ class Palette(QWidget):
                     nb.clicked.connect(ed.new_variable)
                     self._wrap(nb)
             flush_reps()
-        self._lay.addWidget(dim_label("Drag blocks onto the canvas. Drop a block back here to delete it. "
-                                      "Drag orange/green/red values into sockets -- and out of them."))
+        hint = dim_label("Drag blocks onto the canvas. Drop a block back here to delete it. "
+                         "Drag orange/green/red values into sockets -- and out of them.")
+        # wraps to whatever width the palette has; its own preferred width
+        # (font-dependent) must not widen the palette
+        hint.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self._lay.addWidget(hint)
         self._lay.addStretch(1)
 
     def _wrap(self, button) -> None:

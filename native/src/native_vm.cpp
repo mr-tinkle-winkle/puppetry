@@ -32,7 +32,9 @@
 #include <unordered_map>
 #include <unordered_set>
 #include "keycodes.hpp"
+#include "macro.hpp"
 #include "primitives.hpp"
+#include "saved_vars.hpp"
 #include "simplified_names.hpp"
 
 namespace puppetry {
@@ -330,6 +332,72 @@ Value mouse_point(Runtime& rt) {
     Value v = Value::of_list({Value::of_int(x), Value::of_int(y)}, true);
     v.is_point = true;
     return v;
+}
+
+Value motion_point(Runtime& rt) {
+    long long ox = 0, oy = 0, x = 0, y = 0;
+    if (Macro* m = current_macro()) { ox = m->runtime->motion_off_x.load(); oy = m->runtime->motion_off_y.load(); }
+    get_mouse_motion_fn(rt, ox, oy, x, y);
+    Value v = Value::of_list({Value::of_int(x), Value::of_int(y)}, true);
+    v.is_point = true;   // .x / .y
+    return v;
+}
+
+// saveVar / loadVar: Value <-> JSON (no dicts on this path).
+nlohmann::json value_to_json(const Value& v) {
+    switch (v.kind) {
+        case Value::Kind::None: return nullptr;
+        case Value::Kind::Bool: return v.b;
+        case Value::Kind::Int: return v.i;
+        case Value::Kind::Float: return v.d;
+        case Value::Kind::Str: return v.s;
+        case Value::Kind::List: {
+            nlohmann::json a = nlohmann::json::array();
+            for (const auto& e : *v.l) a.push_back(value_to_json(e));
+            return a;
+        }
+        default: break;
+    }
+    type_error(std::string("saveVar() can't save a value of type '") + v.type_name() + "'");
+}
+
+Value json_to_value(const nlohmann::json& j) {
+    if (j.is_null()) return Value::none();
+    if (j.is_boolean()) return Value::of_bool(j.get<bool>());
+    if (j.is_number_integer()) return Value::of_int(j.get<long long>());
+    if (j.is_number()) return Value::of_float(j.get<double>());
+    if (j.is_string()) return Value::of_str(j.get<std::string>());
+    if (j.is_array()) {
+        List out;
+        for (const auto& e : j) out.push_back(json_to_value(e));
+        return Value::of_list(std::move(out));
+    }
+    type_error("loadVar(): a dict value only works with Python on");
+}
+
+// remapProfile tables: [(key, target), ...] where target is a key, a list of
+// keys or None; intercepts [((combo...), (output...)), ...] (a lone key is a
+// one-key combo).
+std::vector<int> keys_of(const Value& v, const char* what) {
+    std::vector<int> out;
+    if (v.kind == Value::Kind::None) return out;
+    if (v.kind == Value::Kind::List) {
+        for (const auto& e : *v.l) out.push_back(e.as_key_code());
+        return out;
+    }
+    if (v.kind == Value::Kind::Int || v.kind == Value::Kind::Str) { out.push_back(v.as_key_code()); return out; }
+    type_error(std::string("remapProfile(): ") + what + " must be a key, a list of keys or None");
+}
+
+const List& pairs_of(const Value& v, const char* what) {
+    static const List kEmpty;
+    if (v.kind == Value::Kind::None) return kEmpty;
+    if (v.kind != Value::Kind::List)
+        type_error(std::string("remapProfile(): ") + what + " must be a list of (from, to) pairs");
+    for (const auto& e : *v.l)
+        if (e.kind != Value::Kind::List || e.l->size() != 2)
+            type_error(std::string("remapProfile(): every entry in ") + what + " must be a (from, to) pair");
+    return *v.l;
 }
 
 // =====================================================================
@@ -1266,6 +1334,8 @@ private:
                 if (obj->k == Expr::K::Name && obj->name == "getMousePosition" && !shadowed && !funcs_.count(obj->name)) {
                     // getMousePosition.x -- the live position, no call needed
                     base = [](Frame& f) { return mouse_point(*f.rt); };
+                } else if (obj->k == Expr::K::Name && obj->name == "getMouseMotion" && !shadowed && !funcs_.count(obj->name)) {
+                    base = [](Frame& f) { return motion_point(*f.rt); };
                 } else {
                     base = compile_expr(obj, sc);
                 }
@@ -1547,14 +1617,71 @@ private:
             });
         }
         if (n == "actAs") {
-            c.allow({});
+            c.allow({"immediate"});
             if (c.pos.size() < 2) throw err_at(c.line, "actAs() needs at least 2 arguments");
             std::vector<Arg> all = c.pos;
-            return EvalFn([all](Frame& f) {
+            Arg immediate = c.at(SIZE_MAX, "immediate", Value::of_bool(false));
+            return EvalFn([all, immediate](Frame& f) {
                 std::vector<int> acting;
                 for (size_t i = 2; i < all.size(); ++i) acting.push_back(all[i].key_code(f));
-                act_as_fn(*f.rt, all[0].key_code(f), all[1].flag(f), acting);
+                act_as_fn(*f.rt, all[0].key_code(f), all[1].flag(f), acting, immediate.flag(f),
+                          current_macro_paused_flag());
                 return Value::none();
+            });
+        }
+        if (n == "remapProfile") {
+            c.allow({"name", "keys", "intercept"});
+            c.max_pos(3);
+            Arg name = c.at(0, "name"), keys = c.at(1, "keys", Value::none()), icpt = c.at(2, "intercept", Value::none());
+            return EvalFn([name, keys, icpt](Frame& f) {
+                std::unordered_map<int, std::vector<int>> table;
+                Value kv = keys.get(f), iv = icpt.get(f);
+                for (const auto& e : pairs_of(kv, "keys")) {
+                    int from = (*e.l)[0].as_key_code();
+                    table[from] = keys_of((*e.l)[1], "a target");
+                }
+                std::vector<std::pair<std::vector<int>, std::vector<int>>> intercepts;
+                for (const auto& e : pairs_of(iv, "intercept")) {
+                    auto trig = keys_of((*e.l)[0], "a trigger combo");
+                    if (trig.empty()) type_error("remapProfile(): an intercept needs a trigger combo");
+                    intercepts.emplace_back(trig, keys_of((*e.l)[1], "an output combo"));
+                }
+                remap_profile_fn(*f.rt, name.text(f), table, intercepts, current_macro_paused_flag());
+                return Value::none();
+            });
+        }
+        if (n == "getMouseMotion") {
+            c.allow({});
+            if (!c.pos.empty()) throw err_at(c.line, "getMouseMotion() takes no arguments");
+            return EvalFn([](Frame& f) { return motion_point(*f.rt); });
+        }
+        if (n == "saveVar") {
+            c.allow({"name", "value"});
+            c.max_pos(2);
+            Arg name = c.at(0, "name"), value = c.at(1, "value");
+            return EvalFn([name, value](Frame& f) {
+                f.rt->check_abort();
+                saved_var_set(saved_var_owner(), name.text(f), value_to_json(value.get(f)));
+                return Value::none();
+            });
+        }
+        if (n == "loadVar") {
+            c.allow({"name", "default"});
+            c.max_pos(2);
+            Arg name = c.at(0, "name"), def = c.at(1, "default", Value::none());
+            return EvalFn([name, def](Frame& f) {
+                f.rt->check_abort();
+                nlohmann::json j;
+                if (!saved_var_get(saved_var_owner(), name.text(f), j)) return def.get(f);
+                return json_to_value(j);
+            });
+        }
+        if (n == "clearVar") {
+            c.allow({"name"});
+            c.max_pos(1);
+            Arg name = c.at(0, "name");
+            return EvalFn([name](Frame& f) {
+                return Value::of_bool(saved_var_clear(saved_var_owner(), name.text(f)));
             });
         }
         if (n == "checkpoint") {

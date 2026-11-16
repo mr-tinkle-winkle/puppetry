@@ -18,6 +18,7 @@
 //     to matter in practice.
 #include <atomic>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -141,7 +142,32 @@ enum class TriggerEdge { Down, Up };
 RepeatMode parse_repeat_mode(const std::string& s);
 TriggerEdge parse_trigger_edge(const std::string& s);
 
+// One "pause this macro when..." rule (macros.json "pause_conditions").
+//   {"kind": "keys", "keys": ["KEY_LEFTCTRL", "KEY_P"], "mode": "toggle"|"while"}
+//   {"kind": "app", "match": "class"|"title", "value": "sober",
+//    "state": "unfocused"|"focused", "mode": "toggle"|"while"}
+// toggle: each time it happens (the keys all go down / the app enters that
+// state) flips the macro between paused and running. while: the macro is
+// paused for as long as it holds.
+struct PauseCondition {
+    enum class Kind { Keys, App } kind = Kind::Keys;
+    bool toggle = true;
+    std::vector<int> keys;
+    std::string match = "class";
+    std::string value;           // lowercase
+    bool focused = false;        // app: true = "is focused", false = "is not focused"
+    bool holding = false;        // runtime: the condition is true right now
+};
+
 struct RunningMacroState {
+    // ---- pause conditions (pause.cpp) ----
+    std::mutex pause_mutex;          // guards toggle_paused + PauseCondition::holding
+    bool toggle_paused = false;
+    std::atomic<bool> paused{false}; // what everything else reads
+    // getMouseMotion() leaves out what moved while paused
+    std::atomic<long long> motion_off_x{0}, motion_off_y{0};
+    long long paused_at_x = 0, paused_at_y = 0;
+
     std::thread thread;
     std::atomic<bool> stop_flag{false};
     std::atomic<bool> active_hold{false};
@@ -164,6 +190,7 @@ public:
     RepeatMode repeat_mode = RepeatMode::None;
     TriggerEdge trigger_edge = TriggerEdge::Down;
     std::vector<int> combo; // resolved key/button codes
+    std::vector<PauseCondition> pause_conditions;
     std::shared_ptr<CompiledMacro> func;
     std::shared_ptr<RunningMacroState> runtime = std::make_shared<RunningMacroState>();
 
@@ -179,6 +206,9 @@ public:
 struct MacroThreadHooks {
     void (*enter)() = nullptr;
     void (*exit)() = nullptr;
+    // around a paused macro's wait (block_while_paused): Python drops the GIL
+    void* (*park_begin)() = nullptr;
+    void (*park_end)(void*) = nullptr;
 };
 MacroThreadHooks& macro_thread_hooks();
 
@@ -194,6 +224,9 @@ bool macro_is_looping(const Macro& macro);
 Macro* current_macro();
 // Test hook: pretend this thread belongs to `m`.
 void set_current_macro(Macro* m);
+// The current macro's paused flag (nullptr off a macro thread): actAs
+// mappings remember it, see ActAsMapping::owner_paused.
+const std::atomic<bool>* current_macro_paused_flag();
 
 // waitForReactivation(repress): blocks the current macro until it is
 // triggered again (its combo, or `puppetry --name=...`). That trigger is

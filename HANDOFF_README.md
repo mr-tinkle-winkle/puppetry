@@ -29,7 +29,7 @@ features. That document's content has been folded into this one
 (see "Prior session" below) rather than kept as a separate file, so
 this is now the single source of truth for project state.
 
-## Start here — current state (Session 29)
+## Start here — current state (Session 30)
 
 **What it is.** A NixOS input-macro system: a C++17 daemon (evdev in,
 `uinput` out; control socket; embedded CPython *or* a built-in interpreter
@@ -478,13 +478,94 @@ separately from profiles.
     (`DEFAULTS_REV` 3 moves them onto the elements; the simple list keeps
     its own `controller_labels`).
 
+- **Session 30: raw mouse motion, immediate actAs, remap profiles +
+  intercepts, saved variables, pause conditions.** Driven by a request for a
+  macro that swaps WASD while a Roblox camera is upside down (it rolls over
+  the top; the game recenters the camera on spawn).
+  - *getMouseMotion()* -- `Runtime::motion_x/motion_y`, summed from every
+    REL_X/REL_Y of the real mice in `watch_device` (raw counts, before
+    acceleration, our virtual mouse never counted; works while a game locks
+    the cursor, unlike getMousePosition/kdotool). Returns a point (.x/.y;
+    `getMouseMotion.x` reads it directly on both paths -- Python wrapper
+    `_GetMouseMotion`). Motion while the calling macro is paused is left
+    out (per-macro `motion_off_x/y`).
+  - *actAs(..., immediate=True)* -- a change to a held key applies to that
+    press at once instead of being queued (`act_as_pending`, default
+    unchanged). `act_as_transition_held(code, before, after)` releases what
+    the old mapping pressed and presses the new keys; the key itself is
+    pressed on the virtual keyboard when the new mapping lets it through,
+    tracked in `act_as_synth_originals` so its real release lets go of it
+    (grabbed or not). Limit: a press that went straight from an ungrabbed
+    real device can't be released (no virtual copy) -- start remaps with
+    nothing held, or keep the device grabbed (the example macro's
+    `ignore_keys` does).
+  - *remapProfile(name, keys=None, intercept=None)* -- named layers in
+    `Runtime::remap_profiles` (act_as_mutex). keys: code -> acting keys
+    (empty = blocked; original always suppressed). Last-added profile wins
+    a key; replacing keeps the layer position; name only removes.
+    `effective_mapping` = top non-paused profile, else non-paused actAs.
+    Changes snapshot held keys' effective mappings before/after
+    (`held_mapping_snapshot` / `transition_snapshots`). Profiles keep their
+    devices grabbed even while paused (keys act as themselves through
+    uinput), so resuming never grabs with a key held. Intercepts
+    (`apply_intercepts`, called before actAs in `watch_device`): the press
+    completing a trigger combo is swallowed, held trigger keys not in the
+    output are released on output, output keys pressed; releasing any
+    trigger key ends it (output up, still-held lifted keys back down).
+    A swallowed press whose intercept ended early stays swallowed until
+    its own release (`intercept_swallowed`). Keyboard/mouse only. Python
+    takes dicts or pairs; native takes lists of pairs (no dicts there).
+    Abort clears everything.
+  - *Saved variables* -- `saveVar(name, value)`, `loadVar(name,
+    default=None)`, `clearVar(name)`; `native/src/saved_vars.*`.
+    `~/.config/macro-daemon/saved_variables.json`:
+    `{"<macro id>": {"<name>": value}}` ("_global" off a macro thread).
+    Re-read when its mtime changes, written atomically. Python converts
+    through its json module (dicts allowed); native Value<->JSON (no
+    dicts). GUI: `gui/macro_extras.py` `SavedVariablesEditor` in the editor
+    column -- writes straight to the file (not with the macro), re-reads
+    every second while visible; values typed as JSON, else Python literal,
+    else text.
+  - *Pause conditions* -- macro field `pause_conditions`: `{"kind": "keys",
+    "keys": [...], "mode": "toggle"|"while"}` or `{"kind": "app", "match":
+    "class"|"title", "value": "...", "state": "unfocused"|"focused",
+    "mode": ...}`. `native/src/pause.*`: keys evaluated in
+    `handle_key_event` (`pause_on_key`), app focus polled every 0.25 s via
+    kdotool (`run_pause_focus_watch`, only when some macro has one; no
+    kdotool = never paused by it). Paused = toggle state OR any holding
+    while-condition. Effects: the macro thread parks in
+    `Runtime::check_abort` (thread-local `pause_hook`, Python drops the GIL
+    while parked via `MacroThreadHooks::park_begin/end`; abort and a loop's
+    stop request unwind it); triggers start nothing (a looping toggle macro
+    can still be stopped); its actAs mappings / remap profiles act as plain
+    keys and its intercepts end (`owner_paused`); motion offset as above.
+    `$XDG_RUNTIME_DIR/puppetry/paused_macros.json` lists paused macro ids
+    (not shown in the GUI yet). GUI: `PauseConditionsEditor` rows (Keys
+    with Record via `ComboRecorder` / App with class-or-title, focused-or-
+    not; Toggle/While).
+  - *Example macro* -- `docs/examples/roblox_upside_down_wasd.py` (Python
+    on, No Repeat; the combo again stops it via module globals). Six-press
+    calibration (level, flip point up, top, level, flip point down,
+    bottom) into saved variables; LEVEL re-zeroes after a respawn;
+    CALIBRATE redoes it. Pitch = summed raw Y clamped to the calibrated
+    extremes (the camera's own clamp, so hitting the top/bottom resyncs
+    it); past a flip point -> `remapProfile("upside down", swaps)`. Sign
+    agnostic (inverted cameras). Driven end to end in `test_pause`.
+  - Tests: `native/tests/test_pause.cpp` (88 checks: immediate actAs,
+    profiles/intercepts, pause conditions + effects incl. parked threads,
+    saved vars on both backends, the example macro). GUI +15 checks. The
+    palette hint label no longer widens the palette (its preferred width
+    is font-dependent and failed the width check on a fresh PySide6).
+
 **Not verified on real hardware / display.** Everything above ran under
 `QT_QPA_PLATFORM=offscreen`; OBS pages were rendered in headless Chromium
 (the engine behind OBS's browser source). Unchecked: a real OBS (tested
 against a protocol-faithful fake server; the replay-output lookup by kind is
 the least certain part), the daemon spawning the helper under systemd,
 scan-code mapping on X11 vs Wayland (visualizer), drag feel in the block
-canvas, evdev grab/repress behaviour, `kdotool` mouse position, `nix build`
+canvas, evdev grab/repress behaviour (now also immediate actAs, remap
+profiles and intercepts in a real game), `kdotool` mouse position and focus
+polling for pause conditions, the Roblox example's calibration in-game, `nix build`
 of the flake/module, real controllers (axis ranges and trigger axes vary
 by model; GAS/BRAKE are mapped to RT/LT) and games' reaction to the virtual
 controller (it identifies as vendor 0x1234, not as an Xbox pad, so games
@@ -509,18 +590,20 @@ that only accept known pads may ignore it). Visualizer mouse movement is measure
    absolute-position mode for recorded mouse movement; per-key custom
    colors in the overlay.
 
-**Open questions.** Whether the Dictionary should also preview the matching
+**Open questions.** Whether paused macros should be marked on the Macros
+page (the daemon already writes `paused_macros.json`); whether a paused
+macro should release the keys it is itself holding (it doesn't today); whether the Dictionary should also preview the matching
 block; which easing recorded movement should use (`linear` today); whether the OBS password should move from
 `overlay.json` (mode 0600) to a keyring.
 
 **Run the checks.** GUI: `cd gui && QT_QPA_PLATFORM=offscreen python3
-test_app.py` (335 checks), `python3 test_overlay.py` (172 checks: layouts,
+test_app.py` (350 checks), `python3 test_overlay.py` (172 checks: layouts,
 scene, movement-view math, replay file, helper over HTTP/SSE with a fake daemon, fake OBS
 server, renderer + CLI, pieces/controller/source colors, transparency per
 format, align/layer, JS parity; needs ffmpeg, node optional) and
 `python3 ui_kit_test_kit.py`. Daemon: `cd native && mkdir build && cd build
-&& cmake .. && cmake --build . -j && ctest -LE timing` (8 tests, incl.
-`test_event_stream`). The sections below are the per-session history; the
+&& cmake .. && cmake --build . -j && ctest -LE timing` (9 tests, incl.
+`test_event_stream`, `test_pause`). The sections below are the per-session history; the
 newest facts are above.
 
 ## Prior session (folded in from the previous handoff)

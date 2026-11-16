@@ -8,6 +8,7 @@
 #include "keycodes.hpp"
 #include "macro.hpp"
 #include "primitives.hpp"
+#include "saved_vars.hpp"
 #include "simplified_names.hpp"
 
 namespace puppetry {
@@ -19,6 +20,7 @@ static Runtime* g_runtime = nullptr;
 // from kMouseHelpersSource (see install_mouse_helpers()).
 static PyObject* g_mouse_position_type = nullptr;
 static PyObject* g_get_mouse_position = nullptr;
+static PyObject* g_get_mouse_motion = nullptr;   // same idea for getMouseMotion
 static PyThreadState* g_main_thread_state = nullptr;
 
 // ---------------------------------------------------------------------
@@ -312,7 +314,10 @@ FASTCALL_SIG(py_ignore_keys) {
 }
 
 FASTCALL_SIG(py_act_as) {
-    (void)kwnames;
+    FastArgs a{args, nargs, kwnames};
+    if (!a.check_kwargs("actAs", {"immediate"})) return nullptr;
+    bool immediate = false;
+    if (!bool_arg(a.get(-1, "immediate"), false, immediate)) return nullptr;
     if (nargs < 2) {
         PyErr_SetString(PyExc_TypeError, "actAs(key_pressing, ignore, *acting_keys) needs at least 2 arguments");
         return nullptr;
@@ -327,7 +332,8 @@ FASTCALL_SIG(py_act_as) {
         if (!key_arg(args[i], "actAs", code)) return nullptr;
         acting.push_back(code);
     }
-    return run_native(false, [&] { act_as_fn(*g_runtime, key_pressing, ignore_val != 0, acting); });
+    const std::atomic<bool>* owner = current_macro_paused_flag();
+    return run_native(false, [&] { act_as_fn(*g_runtime, key_pressing, ignore_val != 0, acting, immediate, owner); });
 }
 
 FASTCALL_SIG(py_command) {
@@ -352,6 +358,174 @@ FASTCALL_SIG(py_get_mouse_position) {
     if (!r) return nullptr;
     Py_DECREF(r);
     return Py_BuildValue("(ii)", x, y);
+}
+
+FASTCALL_SIG(py_get_mouse_motion) {
+    ARGS;
+    if (!a.check_kwargs("getMouseMotion", {})) return nullptr;
+    long long ox = 0, oy = 0, x = 0, y = 0;
+    if (Macro* m = current_macro()) { ox = m->runtime->motion_off_x.load(); oy = m->runtime->motion_off_y.load(); }
+    PyObject* r = run_native(true, [&] { get_mouse_motion_fn(*g_runtime, ox, oy, x, y); });
+    if (!r) return nullptr;
+    Py_DECREF(r);
+    return Py_BuildValue("(LL)", x, y);
+}
+
+// saveVar / loadVar: values cross as JSON text through Python's own json
+// module (numbers, strings, bools, None, lists, tuples, dicts).
+static PyObject* json_module() {
+    static PyObject* mod = nullptr;
+    if (!mod) mod = PyImport_ImportModule("json");
+    return mod;
+}
+
+FASTCALL_SIG(py_save_var) {
+    ARGS;
+    if (!a.check_kwargs("saveVar", {"name", "value"})) return nullptr;
+    PyObject* name = a.get(0, "name");
+    PyObject* value = a.get(1, "value");
+    if (!name || !PyUnicode_Check(name) || !value) {
+        PyErr_SetString(PyExc_TypeError, "saveVar(name, value): name must be a string");
+        return nullptr;
+    }
+    PyObject* mod = json_module();
+    if (!mod) return nullptr;
+    PyObject* text = PyObject_CallMethod(mod, "dumps", "O", value);
+    if (!text) return nullptr;
+    std::string owner = saved_var_owner(), key = PyUnicode_AsUTF8(name), body = PyUnicode_AsUTF8(text);
+    Py_DECREF(text);
+    return run_native(true, [&] {
+        g_runtime->check_abort();
+        saved_var_set(owner, key, nlohmann::json::parse(body));
+    });
+}
+
+FASTCALL_SIG(py_load_var) {
+    ARGS;
+    if (!a.check_kwargs("loadVar", {"name", "default"})) return nullptr;
+    PyObject* name = a.get(0, "name");
+    PyObject* def = a.get(1, "default");
+    if (!name || !PyUnicode_Check(name)) {
+        PyErr_SetString(PyExc_TypeError, "loadVar(name, default=None): name must be a string");
+        return nullptr;
+    }
+    std::string owner = saved_var_owner(), key = PyUnicode_AsUTF8(name);
+    nlohmann::json j;
+    bool found = false;
+    PyObject* r = run_native(true, [&] { g_runtime->check_abort(); found = saved_var_get(owner, key, j); });
+    if (!r) return nullptr;
+    Py_DECREF(r);
+    if (!found) {
+        PyObject* out = def ? def : Py_None;
+        Py_INCREF(out);
+        return out;
+    }
+    PyObject* mod = json_module();
+    if (!mod) return nullptr;
+    return PyObject_CallMethod(mod, "loads", "s", j.dump().c_str());
+}
+
+FASTCALL_SIG(py_clear_var) {
+    ARGS;
+    if (!a.check_kwargs("clearVar", {"name"})) return nullptr;
+    PyObject* name = a.get(0, "name");
+    if (!name || !PyUnicode_Check(name)) {
+        PyErr_SetString(PyExc_TypeError, "clearVar(name): name must be a string");
+        return nullptr;
+    }
+    return PyBool_FromLong(saved_var_clear(saved_var_owner(), PyUnicode_AsUTF8(name)));
+}
+
+// a key, a sequence of keys, or None -> codes
+static bool keys_from_py(PyObject* o, const char* what, std::vector<int>& out) {
+    out.clear();
+    if (!o || o == Py_None) return true;
+    int code;
+    if (PyLong_Check(o) || PyUnicode_Check(o)) {
+        if (!resolve_key_arg(o, code)) { PyErr_Format(PyExc_ValueError, "remapProfile(): unknown key %R", o); return false; }
+        out.push_back(code);
+        return true;
+    }
+    PyObject* seq = PySequence_Fast(o, "");
+    if (!seq) { PyErr_Clear(); PyErr_Format(PyExc_TypeError, "remapProfile(): %s must be a key, keys or None", what); return false; }
+    for (Py_ssize_t i = 0; i < PySequence_Fast_GET_SIZE(seq); ++i) {
+        PyObject* e = PySequence_Fast_GET_ITEM(seq, i);
+        if (!resolve_key_arg(e, code)) {
+            PyErr_Format(PyExc_ValueError, "remapProfile(): unknown key %R", e);
+            Py_DECREF(seq);
+            return false;
+        }
+        out.push_back(code);
+    }
+    Py_DECREF(seq);
+    return true;
+}
+
+// a dict or a sequence of (from, to) pairs -> new list of 2-tuples (or nullptr + error)
+static PyObject* pairs_from_py(PyObject* o, const char* what) {
+    if (!o || o == Py_None) return PyList_New(0);
+    PyObject* items = PyDict_Check(o) ? PyDict_Items(o) : PySequence_List(o);
+    if (!items) {
+        PyErr_Clear();
+        PyErr_Format(PyExc_TypeError, "remapProfile(): %s must be a dict or a list of (from, to) pairs", what);
+        return nullptr;
+    }
+    for (Py_ssize_t i = 0; i < PyList_GET_SIZE(items); ++i) {
+        PyObject* e = PyList_GET_ITEM(items, i);
+        if (!PySequence_Check(e) || PySequence_Size(e) != 2) {
+            Py_DECREF(items);
+            PyErr_Format(PyExc_TypeError, "remapProfile(): every entry in %s must be a (from, to) pair", what);
+            return nullptr;
+        }
+    }
+    return items;
+}
+
+FASTCALL_SIG(py_remap_profile) {
+    ARGS;
+    if (!a.check_kwargs("remapProfile", {"name", "keys", "intercept"})) return nullptr;
+    PyObject* name = a.get(0, "name");
+    if (!name || !PyUnicode_Check(name)) {
+        PyErr_SetString(PyExc_TypeError, "remapProfile(name, keys=None, intercept=None): name must be a string");
+        return nullptr;
+    }
+    std::unordered_map<int, std::vector<int>> table;
+    std::vector<std::pair<std::vector<int>, std::vector<int>>> intercepts;
+    PyObject* kp = pairs_from_py(a.get(1, "keys"), "keys");
+    if (!kp) return nullptr;
+    for (Py_ssize_t i = 0; i < PyList_GET_SIZE(kp); ++i) {
+        PyObject* e = PyList_GET_ITEM(kp, i);
+        PyObject* from = PySequence_GetItem(e, 0);
+        PyObject* to = PySequence_GetItem(e, 1);
+        int code;
+        std::vector<int> targets;
+        bool ok = from && to && resolve_key_arg(from, code);
+        if (from && to && !ok) PyErr_Format(PyExc_ValueError, "remapProfile(): unknown key %R", from);
+        if (ok) ok = keys_from_py(to, "a target", targets);
+        Py_XDECREF(from);
+        Py_XDECREF(to);
+        if (!ok) { Py_DECREF(kp); return nullptr; }
+        table[code] = targets;
+    }
+    Py_DECREF(kp);
+    PyObject* ip = pairs_from_py(a.get(2, "intercept"), "intercept");
+    if (!ip) return nullptr;
+    for (Py_ssize_t i = 0; i < PyList_GET_SIZE(ip); ++i) {
+        PyObject* e = PyList_GET_ITEM(ip, i);
+        PyObject* trig = PySequence_GetItem(e, 0);
+        PyObject* out = PySequence_GetItem(e, 1);
+        std::vector<int> t, o;
+        bool ok = trig && out && keys_from_py(trig, "a trigger combo", t) && keys_from_py(out, "an output combo", o);
+        Py_XDECREF(trig);
+        Py_XDECREF(out);
+        if (ok && t.empty()) { PyErr_SetString(PyExc_ValueError, "remapProfile(): an intercept needs a trigger combo"); ok = false; }
+        if (!ok) { Py_DECREF(ip); return nullptr; }
+        intercepts.emplace_back(t, o);
+    }
+    Py_DECREF(ip);
+    std::string nm = PyUnicode_AsUTF8(name);
+    const std::atomic<bool>* owner = current_macro_paused_flag();
+    return run_native(false, [&] { remap_profile_fn(*g_runtime, nm, table, intercepts, owner); });
 }
 
 FASTCALL_SIG(py_get_buttons_held) {
@@ -444,6 +618,11 @@ class _GetMousePosition:
     y = property(lambda self: self._raw()[1])
     def __repr__(self):
         return "<getMousePosition>"
+
+class _GetMouseMotion(_GetMousePosition):
+    __slots__ = ()
+    def __repr__(self):
+        return "<getMouseMotion>"
 )PY";
 
 static void install_mouse_helpers(PyObject* native_dict) {
@@ -461,6 +640,9 @@ static void install_mouse_helpers(PyObject* native_dict) {
         Py_INCREF(cls);
         g_mouse_position_type = cls;
     }
+    PyObject* motion_cls = PyDict_GetItemString(ns, "_GetMouseMotion");
+    PyObject* motion_raw = PyDict_GetItemString(native_dict, "getMouseMotion");
+    if (motion_cls && motion_raw) g_get_mouse_motion = PyObject_CallOneArg(motion_cls, motion_raw);
     PyErr_Clear();
     Py_DECREF(ns);
 }
@@ -474,6 +656,8 @@ static PyMethodDef kMethods[] = {
     FC("getMousePosition", py_get_mouse_position), FC("getButtonsHeld", py_get_buttons_held),
     FC("waitForReactivation", py_wait_for_reactivation), FC("waitForPress", py_wait_for_press),
     FC("axis", py_axis), FC("getAxis", py_get_axis),
+    FC("getMouseMotion", py_get_mouse_motion), FC("saveVar", py_save_var), FC("loadVar", py_load_var),
+    FC("clearVar", py_clear_var), FC("remapProfile", py_remap_profile),
     {nullptr, nullptr, 0, nullptr},
 };
 #undef FC
@@ -517,6 +701,15 @@ void python_embed_init(Runtime& rt) {
     g_main_thread_state = PyEval_SaveThread(); // release the GIL -- each macro run acquires it itself
     macro_thread_hooks().enter = &python_thread_enter;
     macro_thread_hooks().exit = &python_thread_exit;
+    // A paused macro parks inside a primitive; if that primitive kept the
+    // GIL (a short call), let the other Python macros run meanwhile.
+    macro_thread_hooks().park_begin = []() -> void* {
+        if (!Py_IsInitialized() || !PyGILState_Check()) return nullptr;
+        return PyEval_SaveThread();
+    };
+    macro_thread_hooks().park_end = [](void* ts) {
+        if (ts) PyEval_RestoreThread((PyThreadState*)ts);
+    };
 }
 
 void python_embed_shutdown() {
@@ -524,6 +717,7 @@ void python_embed_shutdown() {
     if (g_main_thread_state) {
         PyEval_RestoreThread(g_main_thread_state);
         Py_CLEAR(g_get_mouse_position);
+        Py_CLEAR(g_get_mouse_motion);
         Py_CLEAR(g_mouse_position_type);
         Py_Finalize();
         g_main_thread_state = nullptr;
@@ -802,6 +996,7 @@ std::shared_ptr<CompiledMacro> compile_python_macro(const json& macro_def, Macro
         PyDict_SetItemString(globals, "getMousePosition", g_get_mouse_position);
         PyDict_SetItemString(globals, "MousePosition", g_mouse_position_type);
     }
+    if (g_get_mouse_motion) PyDict_SetItemString(globals, "getMouseMotion", g_get_mouse_motion);
     PyObject* time_module = PyImport_ImportModule("time");
     if (time_module) { PyDict_SetItemString(globals, "time", time_module); Py_DECREF(time_module); }
 
