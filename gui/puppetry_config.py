@@ -21,6 +21,7 @@ import os
 import shutil
 import socket as _socket
 import subprocess
+import time
 from dataclasses import asdict
 from functools import lru_cache
 from pathlib import Path
@@ -188,17 +189,63 @@ def delete_profile(profile_id: str) -> None:
 # daemon process + control socket
 # ---------------------------------------------------------------------------
 
-def restart_daemon_service() -> tuple[bool, str]:
-    """Applies saved config the same way the old GTK editor did: restart
-    the service (the daemon has no live-reload, by design)."""
+RESTART_ATTEMPTS = 4
+RESTART_WAITS = (0.5, 1.0, 2.0)          # seconds between attempts
+
+
+def _wait_responsive(seconds: float) -> None:
+    """Waits without freezing the window: Qt events keep running if there is an app."""
+    end = time.monotonic() + seconds
+    try:
+        from PySide6.QtCore import QCoreApplication
+        app = QCoreApplication.instance()
+    except Exception:
+        app = None
+    while True:
+        left = end - time.monotonic()
+        if left <= 0:
+            return
+        if app is not None:
+            app.processEvents()
+        time.sleep(min(0.03, left))
+
+
+def _restart_once() -> tuple[bool, str]:
     try:
         result = subprocess.run(["systemctl", "--user", "restart", "macro-daemon.service"],
                                 capture_output=True, text=True, timeout=10)
     except Exception as exc:
-        return False, f"couldn't restart daemon: {exc}"
-    if result.returncode == 0:
-        return True, "Saved. Daemon restarted."
-    return False, f"Saved, but restart failed: {result.stderr.strip() or result.returncode}"
+        return False, str(exc)
+    if result.returncode != 0:
+        return False, result.stderr.strip() or f"exit code {result.returncode}"
+    # systemctl returns once the process has started; a daemon that dies
+    # right away (bad config, device busy) shows up a moment later
+    _wait_responsive(0.4)
+    try:
+        state = subprocess.run(["systemctl", "--user", "is-active", "macro-daemon.service"],
+                               capture_output=True, text=True, timeout=5).stdout.strip()
+    except Exception:
+        return True, ""
+    if state in ("failed", "inactive"):
+        return False, f"the daemon stopped right after starting ({state})"
+    return True, ""
+
+
+def restart_daemon_service() -> tuple[bool, str]:
+    """Applies saved config the same way the old GTK editor did: restart
+    the service (the daemon has no live-reload, by design). A restart that
+    fails is tried again a few times, waiting a little longer each time
+    (the device may still be held by the old process, or the user
+    session's systemd may be busy)."""
+    last = ""
+    for attempt in range(RESTART_ATTEMPTS):
+        if attempt:
+            _wait_responsive(RESTART_WAITS[min(attempt - 1, len(RESTART_WAITS) - 1)])
+        ok, last = _restart_once()
+        if ok:
+            return True, "Saved. Daemon restarted." if attempt == 0 else \
+                f"Saved. Daemon restarted (on try {attempt + 1})."
+    return False, f"Saved, but the daemon wouldn't restart after {RESTART_ATTEMPTS} tries: {last}"
 
 
 def send_control_command(payload: dict[str, Any], timeout: float = 3.0) -> tuple[bool, str]:

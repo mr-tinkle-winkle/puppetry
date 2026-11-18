@@ -619,6 +619,25 @@ separately from profiles.
     noise, ~3 M taps/s), GUI start (0.7 s with 40 macros), pyflakes clean,
     ASan/UBSan clean.
 
+- **Session 31b.** Block editor multi-select (`block_editor.py`): a
+  selection model on top of the primary `selected` (property; assigning it
+  collapses the selection), `selection()` / `is_selected()` /
+  `set_selection()`. Ctrl+click toggles a block, Shift+click selects the
+  reading-order range from the last clicked block (`ordered_blocks`:
+  main, function bodies, loose stacks), Shift+drag on empty canvas box-
+  selects (adds), Ctrl+drag box-toggles, plain drag on empty canvas still
+  pans. Dragging a selected block carries every selection root
+  (`selection_roots`: selected blocks not inside another selected one) as
+  one stack; Ctrl+drag keeps its single-block meaning. Delete, Ctrl+D
+  (duplicate each root after itself), Ctrl+A, Escape, and a multi-
+  selection context menu. The box tests block bodies, not the notch
+  `LaidBlock.rect` includes. Daemon restarts (`restart_daemon_service`)
+  are tried up to 4 times, 0.5 / 1 / 2 s apart, and a daemon that is
+  "failed"/"inactive" 0.4 s after a successful `systemctl restart` counts
+  as a failure; waits keep Qt events running. `test_pause` skips its
+  example-macro check when `docs/` is absent (the Nix build copies only
+  `native/`).
+
 **Not verified on real hardware / display.** Everything above ran under
 `QT_QPA_PLATFORM=offscreen`; OBS pages were rendered in headless Chromium
 (the engine behind OBS's browser source). Unchecked: a real OBS (tested
@@ -659,7 +678,7 @@ block; which easing recorded movement should use (`linear` today); whether the O
 `overlay.json` (mode 0600) to a keyring.
 
 **Run the checks.** GUI: `cd gui && QT_QPA_PLATFORM=offscreen python3
-test_app.py` (364 checks), `python3 test_overlay.py` (172 checks: layouts,
+test_app.py` (384 checks), `python3 test_overlay.py` (172 checks: layouts,
 scene, movement-view math, replay file, helper over HTTP/SSE with a fake daemon, fake OBS
 server, renderer + CLI, pieces/controller/source colors, transparency per
 format, align/layer, JS parity; needs ffmpeg, node optional) and

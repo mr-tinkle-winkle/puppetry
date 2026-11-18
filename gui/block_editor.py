@@ -464,7 +464,7 @@ class StackItem(QGraphicsItem):
         ed = self.editor
         drop = ed.drop_target
         for lb in self.layout.visible(option.exposedRect):
-            br.paint_block(p, lb, ed.metrics, ed.theme, selected=(lb.block is ed.selected),
+            br.paint_block(p, lb, ed.metrics, ed.theme, selected=ed.is_selected(lb.block),
                            drop_ref=(drop[1] if drop and drop[0] is lb.block else None), customs=ed.customs)
 
     def hit(self, pos: QPointF):
@@ -588,6 +588,7 @@ class BlockView(QGraphicsView):
         self.zoom = 1.0
         self._press = None      # (scene_pos, view_pos, Hit, modifiers)
         self._pan = None
+        self._band = None       # box selection in progress (BlockEditor.begin_band)
         self._tip = ""
 
     def resizeEvent(self, e) -> None:
@@ -619,10 +620,18 @@ class BlockView(QGraphicsView):
         self.setFocus()
         sp = self.mapToScene(e.position().toPoint())
         hit = ed.hit_test(sp)
+        mods = e.modifiers()
+        multi_mod = bool(mods & (Qt.ControlModifier | Qt.ShiftModifier))
         if e.button() == Qt.RightButton:
             if hit:
-                ed.select_hit(hit)
+                # right-clicking inside a multi-selection keeps it (the menu acts on all of it)
+                if not (hit.lb is not None and ed.is_selected(hit.lb.block) and len(ed.selection()) > 1):
+                    ed.select_hit(hit)
                 ed.context_menu(hit, e.globalPosition().toPoint())
+            return
+        if e.button() == Qt.LeftButton and hit is None and multi_mod:
+            # box select on empty canvas: Shift adds to the selection, Ctrl toggles
+            self._band = ed.begin_band(sp, "toggle" if mods & Qt.ControlModifier else "add")
             return
         if e.button() == Qt.MiddleButton or (e.button() == Qt.LeftButton and hit is None):
             ed.select(None)
@@ -630,11 +639,20 @@ class BlockView(QGraphicsView):
             self.viewport().setCursor(Qt.ClosedHandCursor)
             return
         if e.button() == Qt.LeftButton:
-            self._press = (sp, e.position().toPoint(), hit, e.modifiers())
+            self._press = (sp, e.position().toPoint(), hit, mods)
+            on_block = hit is not None and hit.lb is not None and not hit.lb.hat
+            if multi_mod and on_block:
+                return                       # Ctrl / Shift: decided on release (toggle / range) unless it becomes a drag
+            if on_block and ed.is_selected(hit.lb.block) and len(ed.selection()) > 1:
+                return                       # pressing inside a multi-selection: keep it, a drag moves all of it
             ed.select_hit(hit)
 
     def mouseMoveEvent(self, e) -> None:
         ed = self.editor
+        if self._band is not None:
+            ed.update_band(self._band, self.mapToScene(e.position().toPoint()))
+            self._autoscroll(e.position().toPoint())
+            return
         if self._pan is not None:
             start, hx, vy = self._pan
             d = e.position().toPoint() - start
@@ -650,6 +668,9 @@ class BlockView(QGraphicsView):
             if (e.position().toPoint() - self._press[1]).manhattanLength() > 6:
                 psp, _vp, hit, mods = self._press
                 self._press = None
+                if hit is not None and hit.lb is not None and not hit.lb.hat and not ed.is_selected(hit.lb.block) \
+                        and not (mods & Qt.ControlModifier):
+                    ed.select_hit(hit)       # Shift-dragging an unselected block: it alone is the selection
                 ed.begin_drag(hit, psp, single=bool(mods & Qt.ControlModifier))
                 if ed.drag is not None:
                     ed.drag_move(sp)
@@ -684,6 +705,10 @@ class BlockView(QGraphicsView):
 
     def mouseReleaseEvent(self, e) -> None:
         ed = self.editor
+        if self._band is not None:
+            ed.end_band(self._band)
+            self._band = None
+            return
         if self._pan is not None:
             self._pan = None
             self.viewport().setCursor(Qt.ArrowCursor)
@@ -692,8 +717,17 @@ class BlockView(QGraphicsView):
             ed.end_drag(self.mapToScene(e.position().toPoint()))
             return
         if self._press is not None:
-            _sp, _vp, hit, _m = self._press
+            _sp, _vp, hit, mods = self._press
             self._press = None
+            on_block = hit is not None and hit.lb is not None and not hit.lb.hat
+            if on_block and mods & Qt.ShiftModifier:
+                ed.select_range(hit.lb.block)        # Shift: everything from the last clicked block to this one
+                return
+            if on_block and mods & Qt.ControlModifier:
+                ed.toggle_selected(hit.lb.block)     # Ctrl: add / remove this one
+                return
+            if on_block and len(ed.selection()) > 1:
+                ed.select_hit(hit)                   # a plain click inside a multi-selection: just this one
             if hit:
                 ed.click(hit)
 
@@ -702,10 +736,20 @@ class BlockView(QGraphicsView):
 
     def keyPressEvent(self, e) -> None:
         ed = self.editor
+        ctrl = bool(e.modifiers() & Qt.ControlModifier)
         if e.key() in (Qt.Key_Delete, Qt.Key_Backspace) and ed.selected is not None:
             ed.delete_selected()
             return
-        if e.modifiers() & Qt.ControlModifier and e.key() == Qt.Key_0:
+        if e.key() == Qt.Key_Escape and ed.selected is not None:
+            ed.select(None)
+            return
+        if ctrl and e.key() == Qt.Key_A:
+            ed.select_all()
+            return
+        if ctrl and e.key() == Qt.Key_D and ed.selection():
+            ed.duplicate_selection()
+            return
+        if ctrl and e.key() == Qt.Key_0:
             self.set_zoom(1.0)
             return
         super().keyPressEvent(e)
@@ -1050,10 +1094,188 @@ class BlockEditor(QWidget):
                 return Hit(it, lb, fh, part)
         return None
 
+    # The selection: `selected` is the primary object (a Block or a Note --
+    # what field editing, the context menu and single-block actions use);
+    # `selection()` is every selected Block, the primary included. Setting
+    # `selected` directly collapses the selection to that one object.
+
+    @property
+    def selected(self):
+        return self._selected
+
+    @selected.setter
+    def selected(self, obj) -> None:
+        self._selected = obj
+        self._multi = [obj] if isinstance(obj, bm.Block) else []
+        self._multi_ids = {id(b) for b in self._multi}
+
+    def selection(self) -> list:
+        return list(self._multi)
+
+    def is_selected(self, block) -> bool:
+        return id(block) in self._multi_ids
+
+    def set_selection(self, blocks, primary=None) -> None:
+        seen, out = set(), []
+        for b in blocks:
+            if isinstance(b, bm.Block) and id(b) not in seen and not self._is_function_head(b):
+                seen.add(id(b))
+                out.append(b)
+        self._selected = primary if primary is not None and id(primary) in seen else (out[-1] if out else None)
+        self._multi = out
+        self._multi_ids = seen
+        self.scene.update()
+
+    def _is_function_head(self, b) -> bool:
+        return any(b is f for f in self.doc.functions)
+
     def select(self, obj) -> None:
-        if obj is not self.selected:
+        if obj is not self.selected or len(self._multi) > 1:
             self.selected = obj
             self.scene.update()
+        if isinstance(obj, bm.Block):
+            self._anchor = obj
+
+    def ordered_blocks(self) -> list:
+        """Every selectable block in reading order: the main script, each
+        function's body, then the loose stacks (function heads excluded)."""
+        out = list(bm.walk(self.doc.main))
+        for f in self.doc.functions:
+            for body in f.bodies:
+                out.extend(bm.walk(body))
+        for st in self.doc.loose:
+            out.extend(bm.walk(st.blocks))
+        return out
+
+    def toggle_selected(self, block) -> None:
+        if self._is_function_head(block):
+            return
+        if self.is_selected(block):
+            rest = [b for b in self._multi if b is not block]
+            self.set_selection(rest, primary=rest[-1] if rest else None)
+        else:
+            self.set_selection(self._multi + [block], primary=block)
+        self._anchor = block
+
+    def select_range(self, block) -> None:
+        """Shift-click: every block from the last clicked one to this one, in
+        reading order, added to what is already selected."""
+        order = self.ordered_blocks()
+        ids = [id(b) for b in order]
+        anchor = getattr(self, "_anchor", None)
+        if anchor is None or id(anchor) not in ids or id(block) not in ids:
+            self.toggle_selected(block)
+            return
+        a, b = ids.index(id(anchor)), ids.index(id(block))
+        lo, hi = min(a, b), max(a, b)
+        self.set_selection(self._multi + order[lo:hi + 1], primary=block)
+
+    def select_all(self) -> None:
+        order = self.ordered_blocks()
+        self.set_selection(order, primary=order[0] if order else None)
+
+    def selection_roots(self) -> list:
+        """The selected blocks minus any inside another selected block (those
+        travel with it), in reading order."""
+        out = []
+
+        def visit(lst):
+            for b in lst:
+                if self.is_selected(b):
+                    out.append(b)
+                else:
+                    for body in b.bodies:
+                        visit(body)
+
+        visit(self.doc.main)
+        for f in self.doc.functions:
+            for body in f.bodies:
+                visit(body)
+        for st in self.doc.loose:
+            visit(st.blocks)
+        return out
+
+    # -- box selection --------------------------------------------------------
+    def begin_band(self, sp: QPointF, mode: str):
+        from PySide6.QtWidgets import QGraphicsRectItem
+        item = QGraphicsRectItem(QRectF(sp, sp))
+        pen = QPen(self.theme.text())
+        pen.setStyle(Qt.DashLine)
+        pen.setCosmetic(True)
+        item.setPen(pen)
+        fill = QColor(self.theme.text())
+        fill.setAlpha(28)
+        item.setBrush(fill)
+        item.setZValue(2000)
+        self.scene.addItem(item)
+        return {"start": sp, "mode": mode, "base": list(self._multi), "item": item}
+
+    def blocks_in_rect(self, rect: QRectF) -> list:
+        hits = []
+        for it in self._items:
+            if not isinstance(it, StackItem) or it.layout is None:
+                continue
+            for lb in it.layout.blocks:
+                if lb.hat:
+                    continue
+                # the block's own body: lb.rect also covers the notch it pokes into the block below
+                if it.mapRectToScene(QRectF(lb.x, lb.y, lb.w, lb.h)).intersects(rect):
+                    hits.append(lb.block)
+        return hits
+
+    def update_band(self, band: dict, sp: QPointF) -> None:
+        rect = QRectF(band["start"], sp).normalized()
+        band["item"].setRect(rect)
+        hits = self.blocks_in_rect(rect)
+        if band["mode"] == "toggle":
+            hit_ids = {id(b) for b in hits}
+            base_ids = {id(b) for b in band["base"]}
+            chosen = [b for b in band["base"] if id(b) not in hit_ids] + [b for b in hits if id(b) not in base_ids]
+        else:
+            chosen = band["base"] + hits
+        order = {id(b): i for i, b in enumerate(self.ordered_blocks())}
+        chosen.sort(key=lambda b: order.get(id(b), 1 << 30))
+        self.set_selection(chosen)
+
+    def end_band(self, band: dict) -> None:
+        self.scene.removeItem(band["item"])
+        if self._multi:
+            self._anchor = self._multi[-1]
+        self.scene.update()
+
+    # -- acting on the whole selection ----------------------------------------
+    def delete_selection(self) -> None:
+        roots = self.selection_roots()
+        if not roots:
+            return
+        self.push_undo()
+        for b in roots:
+            loc = self._find_container(b)
+            if loc:
+                lst, i = loc
+                del lst[i]
+        self.doc.loose = [st for st in self.doc.loose if st.blocks]
+        self.selected = None
+        self._mutated()
+
+    def duplicate_selection(self) -> None:
+        roots = self.selection_roots()
+        if not roots:
+            return
+        self.push_undo()
+        copies = []
+        for b in reversed(roots):          # back to front, so earlier indices stay valid
+            loc = self._find_container(b)
+            if not loc:
+                continue
+            lst, i = loc
+            c = b.clone()
+            c.blank_before = 0
+            lst.insert(i + 1, c)
+            copies.append(c)
+        copies.reverse()
+        self.set_selection(copies)
+        self._mutated()
 
     def select_hit(self, hit: "Hit | None") -> None:
         if hit is None:
@@ -1177,12 +1399,21 @@ class BlockEditor(QWidget):
         it = hit.item
         container, idx = lb.container, lb.index
         origin = it.mapToScene(QPointF(lb.x, lb.y))
-        if single:
+        if not single and self.is_selected(lb.block) and len(self._multi) > 1:
+            # the whole selection travels, in reading order, as one stack
+            moved = []
+            for b in self.selection_roots():
+                loc = self._find_container(b)
+                if loc:
+                    lst, i = loc
+                    moved.append(lst.pop(i))
+            self.doc.loose = [st for st in self.doc.loose if st.blocks]
+        elif single:
             moved = [container.pop(idx)]
         else:
             moved = container[idx:]
             del container[idx:]
-        if it.stack is not None and not it.stack.blocks:
+        if it.stack is not None and not it.stack.blocks and it.stack in self.doc.loose:
             self.doc.loose.remove(it.stack)
         st = bm.Stack(moved, origin.x(), origin.y())
         item = StackItem(self, "loose", st.blocks, st)
@@ -1438,6 +1669,9 @@ class BlockEditor(QWidget):
         return None
 
     def delete_selected(self) -> None:
+        if len(self._multi) > 1:
+            self.delete_selection()
+            return
         if isinstance(self.selected, bm.Note):
             self.push_undo()
             self.doc.notes = [n for n in self.doc.notes if n is not self.selected]
@@ -1635,6 +1869,13 @@ class BlockEditor(QWidget):
         b = lb.block
         if lb.hat == "def":
             menu.addAction("Delete this function (and its blocks)", lambda: self.delete_block(b))
+            menu.exec(global_pos)
+            return
+        if len(self._multi) > 1 and self.is_selected(b):
+            n = len(self.selection_roots())
+            menu.addAction(f"Duplicate {n} selected blocks", self.duplicate_selection)
+            menu.addAction(f"Delete {n} selected blocks", self.delete_selection)
+            menu.addAction("Select only this block", lambda: self.select(b))
             menu.exec(global_pos)
             return
         menu.addAction("Duplicate", lambda: self.duplicate_block(b))

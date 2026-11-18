@@ -1555,6 +1555,139 @@ def main() -> int:
     w.nav.button(app.PAGE_MACROS).click()
     pump(200)
 
+    # ------------------------------------------------------------ daemon restart retries
+    import subprocess as _sp
+    real_run, real_wait = cfg.subprocess.run, cfg._wait_responsive
+    calls = []
+    script = []
+
+    def fake_run(args, **kw):
+        calls.append(args[2])
+        code, out = script.pop(0)
+        return _sp.CompletedProcess(args, code, stdout=out, stderr="busy" if code else "")
+
+    cfg.subprocess.run = fake_run
+    waits = []
+    cfg._wait_responsive = lambda s_: waits.append(s_)
+    try:
+        script[:] = [(1, ""), (0, ""), (0, "failed\n"), (0, ""), (0, "active\n")]
+        ok, msg = cfg.restart_daemon_service()
+        check("restart: a failed restart and a daemon that died at once are both retried",
+              ok and calls == ["restart", "restart", "is-active", "restart", "is-active"] and "try 3" in msg)
+        check("restart: it waits longer before each retry", [w_ for w_ in waits if w_ != 0.4] == [0.5, 1.0])
+        calls.clear(); waits.clear()
+        script[:] = [(1, "")] * cfg.RESTART_ATTEMPTS
+        ok, msg = cfg.restart_daemon_service()
+        check("restart: gives up after its tries, saying why", not ok and calls == ["restart"] * cfg.RESTART_ATTEMPTS
+              and "busy" in msg and str(cfg.RESTART_ATTEMPTS) in msg)
+        calls.clear()
+        script[:] = [(0, ""), (0, "active\n")]
+        ok, msg = cfg.restart_daemon_service()
+        check("restart: first try succeeding needs no retry", ok and msg == "Saved. Daemon restarted." and len(calls) == 2)
+    finally:
+        cfg.subprocess.run, cfg._wait_responsive = real_run, real_wait
+
+    # ------------------------------------------------------------ block editor: multi-select
+    m = model.find("m1")
+    m["code"], m["python_on"] = "tap(KEY_A)\ntap(KEY_B)\nwait(0.1)\ntap(KEY_C)\n", True
+    ed.load_macro("m1")
+    ed.set_view_mode("blocks")
+    pump(50)
+    be = ed.blocks
+    v, vpt = be.view, be.view.viewport()
+    A, B, W8, C = be.doc.main
+
+    def lb_of2(block):
+        for it in be._items:
+            lay = getattr(it, "layout", None)
+            for lb in (lay.blocks if lay else []):
+                if lb.block is block:
+                    return it, lb
+        return None, None
+
+    def at(block, dx=6):
+        it, lb = lb_of2(block)
+        return v.mapFromScene(it.mapToScene(QPointF(lb.x + dx, lb.y + lb.h / 2)))
+
+    def sel_names():
+        return [bm_mod.blocks_to_code([b]).strip() for b in be.selection()]
+
+    import block_model as bm_mod
+
+    def drag(p0, p1, steps=10, mods=Qt.NoModifier):
+        QTest.mousePress(vpt, Qt.LeftButton, mods, p0)
+        for k in range(1, steps + 1):
+            QTest.mouseMove(vpt, p0 + (p1 - p0) * k / steps)
+        QTest.mouseRelease(vpt, Qt.LeftButton, mods, p1)
+
+    QTest.mouseClick(vpt, Qt.LeftButton, Qt.NoModifier, at(A))
+    check("multi-select: a plain click selects one block", be.selection() == [A])
+    QTest.mouseClick(vpt, Qt.LeftButton, Qt.ControlModifier, at(C))
+    check("multi-select: Ctrl+click adds a block", be.selection() == [A, C])
+    QTest.mouseClick(vpt, Qt.LeftButton, Qt.ControlModifier, at(A))
+    check("multi-select: Ctrl+click on a selected block removes it", be.selection() == [C])
+    QTest.mouseClick(vpt, Qt.LeftButton, Qt.NoModifier, at(A))
+    QTest.mouseClick(vpt, Qt.LeftButton, Qt.ShiftModifier, at(W8))
+    check("multi-select: Shift+click selects the range from the last clicked block", be.selection() == [A, B, W8])
+    QTest.mouseClick(vpt, Qt.LeftButton, Qt.NoModifier, at(B))
+    check("multi-select: a plain click inside a selection narrows it to that block", be.selection() == [B])
+
+    # box select on empty canvas
+    itB, lbB = lb_of2(B)
+    itW, lbW = lb_of2(W8)
+    p0 = v.mapFromScene(itB.mapToScene(QPointF(lbB.x + lbB.w + 160, lbB.y + 3)))
+    p1 = v.mapFromScene(itW.mapToScene(QPointF(lbW.x + 4, lbW.y + lbW.h - 3)))
+    check("box select starts on empty canvas", be.hit_test(v.mapToScene(p0)) is None)
+    be.select(None)
+    drag(p0, p1, mods=Qt.ShiftModifier)
+    check("multi-select: Shift+drag on empty canvas box-selects", be.selection() == [B, W8])
+    check("multi-select: the box is gone after the drag",
+          not any(type(i).__name__ == "QGraphicsRectItem" for i in be.scene.items()))
+    QTest.mouseClick(vpt, Qt.LeftButton, Qt.ControlModifier, at(A))
+    q0 = v.mapFromScene(itW.mapToScene(QPointF(lbW.x + lbW.w + 160, lbW.y + 3)))
+    q1 = v.mapFromScene(itW.mapToScene(QPointF(lbW.x + 4, lbW.y + lbW.h - 3)))
+    drag(q0, q1, mods=Qt.ControlModifier)
+    check("multi-select: Ctrl+drag box toggles what it touches", be.selection() == [A, B])
+    QTest.mousePress(vpt, Qt.LeftButton, Qt.NoModifier, v.mapFromScene(itW.mapToScene(QPointF(lbW.x + lbW.w + 160, lbW.y + 3))))
+    QTest.mouseRelease(vpt, Qt.LeftButton, Qt.NoModifier, v.mapFromScene(itW.mapToScene(QPointF(lbW.x + lbW.w + 160, lbW.y + 3))))
+    check("multi-select: a plain click on empty canvas clears it", be.selection() == [])
+
+    # acting on the selection
+    be.set_selection([A, C])
+    QTest.keyClick(vpt, Qt.Key_Delete)
+    check("multi-select: Delete removes every selected block", [bm_mod.blocks_to_code([b]).strip() for b in be.doc.main]
+          == ["tap(KEY_B)", "wait(0.1)"])
+    be.undo()
+    pump(20)
+    A, B, W8, C = be.doc.main
+    check("multi-select: undo brings them back", len(be.doc.main) == 4)
+    be.set_selection([A, W8])
+    QTest.keyClick(vpt, Qt.Key_D, Qt.ControlModifier)
+    check("multi-select: Ctrl+D duplicates each selected block after itself",
+          [bm_mod.blocks_to_code([b]).strip() for b in be.doc.main]
+          == ["tap(KEY_A)", "tap(KEY_A)", "tap(KEY_B)", "wait(0.1)", "wait(0.1)", "tap(KEY_C)"]
+          and len(be.selection()) == 2 and be.selection()[0] is not A)
+    be.undo()
+    pump(20)
+    A, B, W8, C = be.doc.main
+    QTest.keyClick(vpt, Qt.Key_A, Qt.ControlModifier)
+    check("multi-select: Ctrl+A selects every block", be.selection() == [A, B, W8, C])
+    QTest.keyClick(vpt, Qt.Key_Escape)
+    check("multi-select: Escape clears it", be.selection() == [])
+
+    # dragging one block of a selection moves all of it, as one stack
+    be.set_selection([A, C])
+    itA, lbA = lb_of2(A)
+    start = at(A)
+    drag(start, start + QPoint(420, 260))
+    main_now = [bm_mod.blocks_to_code([b]).strip() for b in be.doc.main]
+    loose = [[bm_mod.blocks_to_code([b]).strip() for b in st.blocks] for st in be.doc.loose]
+    check("multi-select: dragging a selected block carries the whole selection",
+          main_now == ["tap(KEY_B)", "wait(0.1)"] and loose == [["tap(KEY_A)", "tap(KEY_C)"]])
+    be.undo()
+    pump(20)
+    ed._snapshot = ed._fingerprint()
+
     # ------------------------------------------------------------ pause conditions + saved variables
     import macro_extras as mx
     check("pause conditions: incomplete rows dropped, values normalized",
