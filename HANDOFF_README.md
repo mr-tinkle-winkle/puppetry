@@ -518,7 +518,7 @@ separately from profiles.
     Abort clears everything.
   - *Saved variables* -- `saveVar(name, value)`, `loadVar(name,
     default=None)`, `clearVar(name)`; `native/src/saved_vars.*`.
-    `~/.config/macro-daemon/saved_variables.json`:
+    `~/.config/puppetry/saved_variables.json`:
     `{"<macro id>": {"<name>": value}}` ("_global" off a macro thread).
     Re-read when its mtime changes, written atomically. Python converts
     through its json module (dicts allowed); native Value<->JSON (no
@@ -638,6 +638,37 @@ separately from profiles.
   example-macro check when `docs/` is absent (the Nix build copies only
   `native/`).
 
+- **Session 31c: structural looks; rename to puppetry-daemon.**
+  - *Looks.* Eight looks plus Classic in `gui/themes.py`; Marionette is
+    the default (`DEFAULT_LOOK`); Brutalist, Patchbay and Blackout were
+    dropped (`RETIRED_LOOKS`). `ensure_default_look` (run before the
+    window is built, once per `LOOK_VERSION` in state.json) moves anyone
+    on Classic, no look, or a retired look to Marionette. Beyond colors and
+    fonts a look sets `nav_position` / `nav_style`, `frame` and
+    `block_style` (new `ThemeSettings` fields). `gui/look_chrome.py`:
+    `LookFrame` is the main window's central widget (stage valance and
+    footlights, lit screen, wooden bench, terminal status line, drawing
+    border, scanlines, felt, craft table; `FRAME_MARGINS` reserve room);
+    `NavTab` draws one navigation entry per style (playbill, rod, index,
+    fkeys, sheets, arcade, sewn, taped); `build_nav` lays them on the
+    look's side; Classic keeps the kit's `SegmentButton` sidebar. Block
+    styles in `block_render._paint_body` (strings, silhouette, cards,
+    outline, schematic, pixel, stitched, materials; puzzle = Classic); the
+    block's real path is always the outline, so nesting and hit areas are
+    unchanged. `pill_fill` uses the page color under silhouettes. Fonts
+    added: Fredoka, Nunito (OFL); Archivo, Archivo Black, Space Grotesk
+    removed. Concept mockups of each look: a Design canvas outside the
+    repo.
+  - *Rename.* systemd user unit `puppetry-daemon.service` (module.nix,
+    `conflicts = [ "macro-daemon.service" ]` so a pre-rebuild copy is
+    stopped), config folder `~/.config/puppetry` (daemon `config_dir()` and
+    GUI `_config_dir()` move an existing `~/.config/macro-daemon` once and
+    leave a symlink), virtual devices `puppetry-virtual-*` (the old names
+    are still recognized as ours; the udev rule matches both). The GUI's
+    restart falls back to `macro-daemon.service` while the renamed unit is
+    not installed yet. `macro_daemon.py` / `macro_gui.py` (the original
+    Python versions) keep their names.
+
 **Not verified on real hardware / display.** Everything above ran under
 `QT_QPA_PLATFORM=offscreen`; OBS pages were rendered in headless Chromium
 (the engine behind OBS's browser source). Unchecked: a real OBS (tested
@@ -678,7 +709,7 @@ block; which easing recorded movement should use (`linear` today); whether the O
 `overlay.json` (mode 0600) to a keyring.
 
 **Run the checks.** GUI: `cd gui && QT_QPA_PLATFORM=offscreen python3
-test_app.py` (384 checks), `python3 test_overlay.py` (172 checks: layouts,
+test_app.py` (390 checks), `python3 test_overlay.py` (172 checks: layouts,
 scene, movement-view math, replay file, helper over HTTP/SSE with a fake daemon, fake OBS
 server, renderer + CLI, pieces/controller/source colors, transparency per
 format, align/layer, JS parity; needs ffmpeg, node optional) and
@@ -702,7 +733,7 @@ newest facts are above.
   invisible), and the daemon's PATH, as a systemd user service, didn't
   reliably include where NixOS keeps binaries. Both fixed —
   stdout/stderr now inherit the daemon's own (surfacing in
-  `journalctl --user -u macro-daemon`), and PATH gets a few common
+  `journalctl --user -u puppetry-daemon`), and PATH gets a few common
   NixOS binary locations appended.
 - An earlier "mouse macro primitives do nothing" report turned out to
   be a disabled input device on the user's end, not a code bug.
@@ -730,7 +761,7 @@ newest facts are above.
   specific one fires.
 
 **GUI features added:**
-- A control socket (`~/.config/macro-daemon/control.sock`, JSON-line
+- A control socket (`~/.config/puppetry/control.sock`, JSON-line
   protocol: `{"cmd": "FIRE"/"ABORT"/"PAUSE"/"RESUME", ...}`). Used by:
   - `puppetry --name="Macro Name" [arg1 arg2 ...]` — triggers a macro
     by exact display name without restarting the daemon, passing any
@@ -792,7 +823,7 @@ newest facts are above.
 - **Not yet independently reconfirmed against the user's exact
   originally-reported failure** (`powerprofiles set power-saver`
   doing nothing) — reasoned fix, not yet verified live. If it's still
-  silent, `journalctl --user -u macro-daemon` right after triggering
+  silent, `journalctl --user -u puppetry-daemon` right after triggering
   it is the next diagnostic step, now that stderr isn't discarded.
 
 ### How to pass arguments to `command()`
@@ -2278,7 +2309,7 @@ line number. Every loop iteration checks the abort flag.
 
 ### 3. Custom blocks (daemon side)
 
-`~/.config/macro-daemon/custom_blocks.json` (`gui/custom_blocks.py`). The
+`~/.config/puppetry/custom_blocks.json` (`gui/custom_blocks.py`). The
 daemon (`main.cpp`) registers each entry's `code` under
 `sanitize(name)` like a macro with no combo, and adds the names to the
 Python trampoline list, so any macro can call `click_at(100, 200)` on
@@ -2429,12 +2460,12 @@ run the structural tests, or `python3 app.py` (needs a real display,
 before trusting the GUI is done**, per "Verified vs. not verified"
 above.
 
-Config still lives at `~/.config/macro-daemon/` (state.json,
+Config still lives at `~/.config/puppetry/` (state.json,
 macros.json, profiles/*.json, aliases.json), same paths and format as
 the previous Python daemon. The daemon is still a `systemd --user`
 service (`macro-daemon.service`) — after a config change made outside
 the GUI's own Save button, `systemctl --user restart macro-daemon` is
-what actually applies it. Logs: `journalctl --user -u macro-daemon`.
+what actually applies it. Logs: `journalctl --user -u puppetry-daemon`.
 
 
 ## Session 15 — palette clipping + symmetric scroll bars

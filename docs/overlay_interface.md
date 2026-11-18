@@ -11,7 +11,7 @@ code; `afterglow_input_overlay.py` wraps it for convenience.
 | `overlay_status.json` | overlay helper | Whether it's running, the buffer length and where it came from |
 | `events.sock` | daemon | Live event stream (the helper's input; not needed by afterglow) |
 
-If `XDG_RUNTIME_DIR` is unset, both live in `~/.config/macro-daemon/` instead.
+If `XDG_RUNTIME_DIR` is unset, both live in `~/.config/puppetry/` instead.
 Both files are mode 0600.
 
 ### `input_buffer.jsonl`
@@ -162,7 +162,7 @@ Options:
   `partial` when it doesn't. A partial render still works; earlier inputs
   are simply absent.
 - Look (colors, key size, timers, movement views, fonts, controller labels) comes
-  from Puppetry's `~/.config/macro-daemon/overlay.json`, the same settings
+  from Puppetry's `~/.config/puppetry/overlay.json`, the same settings
   as the OBS pages.
 
 ### Transparency

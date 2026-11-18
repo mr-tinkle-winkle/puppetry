@@ -22,9 +22,9 @@ namespace puppetry {
 // vendor/product ids are half of that same key. Changing any of these
 // changes the KDE settings group a user's saved preferences live under,
 // so don't, casually.
-inline constexpr const char* kVirtualKeyboardName = "macro-daemon-virtual-keyboard";
-inline constexpr const char* kVirtualMouseName = "macro-daemon-virtual-mouse";
-inline constexpr const char* kVirtualGamepadName = "macro-daemon-virtual-gamepad";
+inline constexpr const char* kVirtualKeyboardName = "puppetry-virtual-keyboard";
+inline constexpr const char* kVirtualMouseName = "puppetry-virtual-mouse";
+inline constexpr const char* kVirtualGamepadName = "puppetry-virtual-gamepad";
 inline constexpr int kVirtualVendorId = 0x1234;
 inline constexpr int kVirtualProductId = 0x5678;
 

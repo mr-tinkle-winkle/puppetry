@@ -13,7 +13,23 @@ static fs::path home_dir() {
     return fs::path("/");
 }
 
-fs::path config_dir() { return home_dir() / ".config" / "macro-daemon"; }
+// ~/.config/puppetry. Older versions used ~/.config/macro-daemon: the first
+// call that finds only the old folder moves it here and leaves a symlink
+// behind, so anything still pointing at the old path keeps working. If the
+// move fails (another process holds it, odd permissions), the old folder
+// keeps being used.
+fs::path config_dir() {
+    const fs::path base = home_dir() / ".config";
+    const fs::path now = base / "puppetry", old = base / "macro-daemon";
+    std::error_code ec;
+    if (fs::exists(now, ec)) return now;
+    if (fs::is_directory(old, ec) && !fs::is_symlink(old, ec)) {
+        fs::rename(old, now, ec);
+        if (ec) return fs::exists(now) ? now : old;
+        fs::create_directory_symlink("puppetry", old, ec);
+    }
+    return now;
+}
 fs::path state_file() { return config_dir() / "state.json"; }
 fs::path macros_file() { return config_dir() / "macros.json"; }
 fs::path aliases_file() { return config_dir() / "aliases.json"; }

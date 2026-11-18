@@ -25,7 +25,9 @@ try:
 except ImportError:  # the GUI still opens; recording/detection just report failure
     HAVE_EVDEV = False
 
-OUR_VIRTUAL_DEVICE_NAMES = frozenset({"macro-daemon-virtual-keyboard", "macro-daemon-virtual-mouse",
+OUR_VIRTUAL_DEVICE_NAMES = frozenset({"puppetry-virtual-keyboard", "puppetry-virtual-mouse", "puppetry-virtual-gamepad",
+                                      # the names before the rename
+                                      "macro-daemon-virtual-keyboard", "macro-daemon-virtual-mouse",
                                       "macro-daemon-virtual-gamepad"})
 
 

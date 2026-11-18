@@ -1072,7 +1072,7 @@ void command_fn(const std::string& cmd) {
         int devnull = open("/dev/null", O_RDONLY);
         if (devnull >= 0) { dup2(devnull, STDIN_FILENO); close(devnull); }
         // stdout/stderr stay inherited -> failures show up in
-        // `journalctl --user -u macro-daemon`, same as the original.
+        // `journalctl --user -u puppetry-daemon`, same as the original.
         execle("/bin/sh", "sh", "-c", cmd.c_str(), (char*)nullptr, envp.data());
         _exit(127);
     }

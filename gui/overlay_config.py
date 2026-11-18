@@ -2,7 +2,7 @@
 overlay.json: everything about the OBS pages, the layered replay buffer
 and how the keyboard/mouse overlay looks.
 
-Stored at ~/.config/macro-daemon/overlay.json. The daemon only reads the
+Stored at ~/.config/puppetry/overlay.json. The daemon only reads the
 "enabled" flags (to decide whether to start puppetry-overlay); the helper
 re-reads the file whenever it changes, so style edits show up live in OBS
 without a restart.

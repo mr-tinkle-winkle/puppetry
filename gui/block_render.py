@@ -22,7 +22,7 @@ import bisect
 from dataclasses import dataclass, field
 
 from PySide6.QtCore import QPointF, QRectF, Qt
-from PySide6.QtGui import QColor, QFont, QFontMetricsF, QPainter, QPainterPath, QPen
+from PySide6.QtGui import QBrush, QColor, QFont, QFontMetricsF, QLinearGradient, QPainter, QPainterPath, QPen
 
 from block_model import COMPARE_OPS, COMPOUND_KINDS, Block, Rep, expr_text, rep_label
 from reference import PRIMITIVES_BY_NAME
@@ -699,7 +699,11 @@ def hex_path(r: QRectF) -> QPainterPath:
 
 def pill_fill(theme: Theme) -> QColor:
     """Socket fill: the theme's text color (light on the default dark
-    theme), so sockets read as "type here" without a hardcoded hex."""
+    theme), so sockets read as "type here" without a hardcoded hex. On a
+    look whose blocks are drawn in the text color (Shadow play's
+    silhouettes) that would vanish, so there it's the page color."""
+    if getattr(theme.settings, "block_style", "") == "silhouette":
+        return QColor(theme.settings.color_page_background)
     return theme.text()
 
 
@@ -718,14 +722,13 @@ def paint_block(p: QPainter, lb: LaidBlock, m: Metrics, theme: Theme, selected: 
         color = block_color(b, theme, customs)
     if color is not None:
         path = lb.path()
-        p.setPen(QPen(color.darker(145), 1.2))
-        p.setBrush(color)
-        p.drawPath(path)
+        style = getattr(theme.settings, "block_style", "puzzle") or "puzzle"
+        role = "input" if lb.hat == "main" else _block_role(b)
+        ink = _paint_body(p, lb, path, color, theme, style, role)
         if selected:
             p.setPen(QPen(theme.text(), 2.2))
             p.setBrush(Qt.NoBrush)
             p.drawPath(path)
-        ink = contrast_text(color)
     else:
         color = theme.input_color()
         ink = contrast_text(color)
@@ -759,6 +762,135 @@ def paint_block(p: QPainter, lb: LaidBlock, m: Metrics, theme: Theme, selected: 
                     p.setFont(m.base)
                     p.setPen(c)
                     p.drawText(rect, Qt.AlignVCenter | Qt.AlignLeft, text)
+
+
+def _block_role(b: Block) -> str:
+    """input | output | control (timing, loops, ifs, notes) | function (functions, custom, raw)."""
+    if b.kind in ("def", "func_call", "return", "custom", "raw"):
+        return "function"
+    cat = block_category(b)
+    return cat if cat in ("input", "output") else "control"
+
+
+def _paint_body(p: QPainter, lb: LaidBlock, path: QPainterPath, color: QColor, theme: Theme, style: str,
+                role: str) -> QColor:
+    """Draws a block's body in the look's block_style (gui/themes.py) and
+    returns the color its own text should use. The outline is always the
+    block's real shape (path), so nesting, notches and hit areas read the
+    same in every style."""
+    rect = path.boundingRect()
+    s = theme.settings
+    if style == "strings":                       # Marionette: brass-edged cards hanging on a thread
+        p.setPen(QPen(QColor(s.color_accent), 1.4))
+        p.setBrush(color)
+        p.drawPath(path)
+        eyelet = QPointF(lb.x + 14, lb.y + 5)
+        p.setPen(QPen(QColor(s.color_text), 0.9))
+        p.drawLine(QPointF(eyelet.x(), lb.y - 4), eyelet)
+        p.setPen(QPen(QColor(s.color_accent), 1.4))
+        p.setBrush(QColor(s.color_app_background))
+        p.drawEllipse(eyelet, 2.6, 2.6)
+        return contrast_text(color)
+    if style == "silhouette":                    # Shadow play: black cut-outs, the role as a lit edge
+        dark = theme.text()
+        p.setPen(Qt.NoPen)
+        p.setBrush(dark)
+        p.drawPath(path)
+        p.save()
+        p.setClipPath(path)
+        p.fillRect(QRectF(rect.left(), rect.top(), 5, rect.height()), color)
+        p.restore()
+        return QColor(s.color_page_background)
+    if style == "cards":                         # Workbench: white index cards with a colored strip on top
+        p.setPen(QPen(QColor(s.color_accent).lighter(150), 1.0))
+        p.setBrush(QColor("#ffffff"))
+        p.drawPath(path)
+        p.save()
+        p.setClipPath(path)
+        p.fillRect(QRectF(rect.left(), lb.y, rect.width(), 5), color)
+        p.restore()
+        return theme.text()
+    if style == "outline":                       # Console: line drawing only, text in the role color
+        p.setPen(QPen(color, 1.3))
+        p.setBrush(QColor(s.color_page_background))
+        p.drawPath(path)
+        return color.lighter(115) if role != "control" else theme.text()
+    if style == "schematic":                     # Blueprint: components in line-work, faintly tinted
+        tint = QColor(color)
+        tint.setAlpha(38)
+        p.setPen(QPen(color, 2.0))
+        p.setBrush(tint)
+        p.drawPath(path)
+        return theme.text()
+    if style == "pixel":                         # Arcade: hard drop shadow, thick outline
+        shadow = QColor(color).darker(260)
+        p.setPen(Qt.NoPen)
+        p.setBrush(shadow)
+        p.drawPath(path.translated(4, 4))
+        p.setPen(QPen(QColor(s.color_app_background), 2.5))
+        p.setBrush(color)
+        p.drawPath(path)
+        return contrast_text(color)
+    if style == "stitched":                      # Felt: soft fill with a stitched line inside the edge
+        p.setPen(QPen(color.darker(135), 2.2))
+        p.setBrush(color)
+        p.drawPath(path)
+        if rect.width() > 16 and rect.height() > 12:
+            from PySide6.QtGui import QTransform
+            c = rect.center()
+            t = QTransform().translate(c.x(), c.y()).scale((rect.width() - 8) / rect.width(),
+                                                             (rect.height() - 8) / rect.height()).translate(-c.x(), -c.y())
+            stitch = QColor("#ffffff")
+            stitch.setAlpha(150)
+            p.setPen(QPen(stitch, 1.3, Qt.DashLine))
+            p.setBrush(Qt.NoBrush)
+            p.drawPath(t.map(path))
+        return contrast_text(color)
+    if style == "materials":                     # Scrapbook: cut from a material that says what it is
+        p.setPen(QPen(color.darker(150), 1.4))
+        if role == "output":                     # glossy plastic
+            g = QLinearGradient(rect.topLeft(), rect.bottomLeft())
+            g.setColorAt(0.0, color.lighter(135))
+            g.setColorAt(1.0, color.darker(112))
+            p.setBrush(QBrush(g))
+            p.drawPath(path)
+            p.save()
+            p.setClipPath(path)
+            hi = QColor("#ffffff")
+            hi.setAlpha(110)
+            p.fillRect(QRectF(rect.left() + 4, lb.y + 2, rect.width() - 8, 2), hi)
+            p.restore()
+            return contrast_text(color)
+        p.setBrush(color)
+        p.drawPath(path)
+        p.save()
+        p.setClipPath(path)
+        grain = QColor(color.darker(140))
+        grain.setAlpha(70)
+        p.setPen(QPen(grain, 1.6))
+        if role == "input":                      # corrugated cardboard
+            x = rect.left() + 3
+            while x < rect.right():
+                p.drawLine(QPointF(x, rect.top()), QPointF(x, rect.bottom()))
+                x += 6
+        elif role == "function":                 # wood grain
+            y = rect.top() + 4
+            while y < rect.bottom():
+                p.drawLine(QPointF(rect.left(), y), QPointF(rect.right(), y + 1.5))
+                y += 7
+        else:                                    # felt / sponge: fuzzy dots
+            light = QColor("#ffffff")
+            light.setAlpha(45)
+            p.setPen(QPen(light, 1.6))
+            p.drawPoints([QPointF(x, y) for y in range(int(rect.top()) + 2, int(rect.bottom()), 4)
+                          for x in range(int(rect.left()) + 2 + (y // 4) % 2 * 2, int(rect.right()), 4)])
+        p.restore()
+        return contrast_text(color)
+    # puzzle (Classic)
+    p.setPen(QPen(color.darker(145), 1.2))
+    p.setBrush(color)
+    p.drawPath(path)
+    return contrast_text(color)
 
 
 def _paint_field(p: QPainter, fh: FieldHit, m: Metrics, theme: Theme, color: QColor, ink: QColor,

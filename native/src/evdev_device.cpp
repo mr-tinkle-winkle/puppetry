@@ -22,6 +22,10 @@ static const std::set<std::string> kOurVirtualDeviceNames = {
     kVirtualKeyboardName,
     kVirtualMouseName,
     kVirtualGamepadName,
+    // the names before the rename (a daemon from an older version may still be running)
+    "macro-daemon-virtual-keyboard",
+    "macro-daemon-virtual-mouse",
+    "macro-daemon-virtual-gamepad",
 };
 
 bool is_our_virtual_device_name(const std::string& name) {

@@ -212,8 +212,8 @@ static void test_arguments_extraction() {
 // "leaves everything else alone" is the property under test.
 // ---------------------------------------------------------------------
 static void test_kcminputrc_flat_accel() {
-    const std::string group = libinput_config_group(0x1234, 0x5678, "macro-daemon-virtual-mouse");
-    CHECK(group == "[Libinput][4660][22136][macro-daemon-virtual-mouse]");
+    const std::string group = libinput_config_group(0x1234, 0x5678, "puppetry-virtual-mouse");
+    CHECK(group == "[Libinput][4660][22136][puppetry-virtual-mouse]");
 
     // Empty file -> just our group.
     std::string out = kcminputrc_with_flat_accel("", group);
@@ -371,7 +371,8 @@ int main() {
     CHECK(normalize_abs_axis(ABS_HAT0X, -1, 1, -1) == -1.0);
     CHECK(is_gamepad_button(BTN_SOUTH) && is_gamepad_button(BTN_THUMBR) && is_gamepad_button(BTN_DPAD_UP));
     CHECK(!is_gamepad_button(BTN_LEFT) && !is_gamepad_button(KEY_A));
-    CHECK(is_our_virtual_device_name("macro-daemon-virtual-gamepad"));
+    CHECK(is_our_virtual_device_name("puppetry-virtual-gamepad"));
+    CHECK(is_our_virtual_device_name("macro-daemon-virtual-gamepad"));   // the old name still counts
 
     std::printf("All %d checks passed.\n", test_count);
     return 0;

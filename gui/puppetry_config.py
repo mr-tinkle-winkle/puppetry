@@ -1,6 +1,6 @@
 """
 Puppetry's on-disk config I/O for the Qt GUI -- reads/writes the exact
-same files the C++ daemon uses (~/.config/macro-daemon/state.json,
+same files the C++ daemon uses (~/.config/puppetry/state.json,
 macros.json, profiles/*.json, aliases.json), same paths and format as
 native/src/config.cpp and the old Python daemon.
 
@@ -29,7 +29,29 @@ from typing import Any
 
 from ui_kit.theme_config import ThemeSettings
 
-CONFIG_DIR = Path.home() / ".config" / "macro-daemon"
+def _config_dir() -> Path:
+    """~/.config/puppetry; an old ~/.config/macro-daemon is moved here once
+    (a symlink is left at the old path). Same rule as the daemon's
+    config_dir()."""
+    base = Path.home() / ".config"
+    now, old = base / "puppetry", base / "macro-daemon"
+    if now.exists():
+        return now
+    if old.is_dir() and not old.is_symlink():
+        try:
+            old.rename(now)
+        except OSError:
+            return now if now.exists() else old
+        try:
+            old.symlink_to("puppetry", target_is_directory=True)
+        except OSError:
+            pass
+    return now
+
+
+CONFIG_DIR = _config_dir()
+SERVICE = "puppetry-daemon.service"
+OLD_SERVICE = "macro-daemon.service"   # the unit's name before the rename
 STATE_FILE = CONFIG_DIR / "state.json"
 MACROS_FILE = CONFIG_DIR / "macros.json"
 ALIASES_FILE = CONFIG_DIR / "aliases.json"
@@ -211,9 +233,15 @@ def _wait_responsive(seconds: float) -> None:
 
 
 def _restart_once() -> tuple[bool, str]:
+    global SERVICE
     try:
-        result = subprocess.run(["systemctl", "--user", "restart", "macro-daemon.service"],
+        result = subprocess.run(["systemctl", "--user", "restart", SERVICE],
                                 capture_output=True, text=True, timeout=10)
+        if result.returncode != 0 and "not found" in (result.stderr or "") and SERVICE != OLD_SERVICE:
+            # the system hasn't been rebuilt with the renamed unit yet
+            SERVICE = OLD_SERVICE
+            result = subprocess.run(["systemctl", "--user", "restart", SERVICE],
+                                    capture_output=True, text=True, timeout=10)
     except Exception as exc:
         return False, str(exc)
     if result.returncode != 0:
@@ -222,7 +250,7 @@ def _restart_once() -> tuple[bool, str]:
     # right away (bad config, device busy) shows up a moment later
     _wait_responsive(0.4)
     try:
-        state = subprocess.run(["systemctl", "--user", "is-active", "macro-daemon.service"],
+        state = subprocess.run(["systemctl", "--user", "is-active", SERVICE],
                                capture_output=True, text=True, timeout=5).stdout.strip()
     except Exception:
         return True, ""
@@ -252,7 +280,7 @@ def send_control_command(payload: dict[str, Any], timeout: float = 3.0) -> tuple
     """Client for the daemon's JSON-line control socket (FIRE / ABORT /
     PAUSE / RESUME -- see native/src/control_socket.cpp)."""
     if not CONTROL_SOCKET.exists():
-        return False, "macro-daemon isn't running (no control socket found)"
+        return False, "the Puppetry daemon isn't running (no control socket found)"
     try:
         sock = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
         sock.settimeout(timeout)
@@ -261,11 +289,11 @@ def send_control_command(payload: dict[str, Any], timeout: float = 3.0) -> tuple
         raw = sock.recv(65536).decode("utf-8", "replace").strip()
         sock.close()
     except OSError as exc:
-        return False, f"couldn't reach macro-daemon: {exc}"
+        return False, f"couldn't reach the Puppetry daemon: {exc}"
     try:
         resp = json.loads(raw)
     except (ValueError, TypeError):
-        return False, raw or "no response from macro-daemon"
+        return False, raw or "no response from the Puppetry daemon"
     if resp.get("ok"):
         return True, resp.get("message", "OK")
     return False, resp.get("error", "unknown error")

@@ -14,8 +14,11 @@ Fonts are bundled (gui/resources/fonts and the overlay's own
 gui/overlay_web/fonts, all SIL Open Font License), so a look reads the same
 on any desktop.
 
-These ten are CONCEPTS: colors, type, shape and pattern. Tab styles and
-motion (as in Jeeves' looks) are not part of them yet.
+Each look also changes structure, not just paint: where the navigation
+sits and how its tabs are drawn (nav_position / nav_style -> NavTab
+below), what surrounds the pages (frame -> LookFrame) and how macro
+blocks are drawn (block_style -> block_render.paint_block). Marionette is
+the default; Classic keeps the original look.
 """
 from __future__ import annotations
 
@@ -54,116 +57,138 @@ class Look:
 
 LOOKS: dict[str, Look] = {}
 
+DEFAULT_LOOK = "marionette"
+# looks that existed once and were dropped: whoever had one gets the default
+RETIRED_LOOKS = ("brutalist", "patchbay", "blackout")
+
 
 def _look(key: str, name: str, blurb: str, **values: Any) -> None:
     LOOKS[key] = Look(key, name, blurb, values)
 
 
-_look("classic", "Classic", "The original grey look, desktop fonts.")
-
 _look("marionette", "Marionette",
-      "The house look: a velvet curtain, brass fittings and a serif. Strings are thin.",
-      color_app_background="#1a0f10", color_page_background="#140b0c", color_surface="#2a1719",
-      color_accent="#7a5a34", color_highlight="#3a2022", color_text="#f0e3cf", color_text_outline="#0c0607",
+      "A theatre: a velvet valance over the stage, a playbill for navigation, footlights below. "
+      "Blocks hang on brass-edged cards.",
+      color_app_background="#140b0c", color_page_background="#1a0f10", color_surface="#2a1719",
+      color_accent="#b8904a", color_highlight="#3a2022", color_text="#f0e3cf", color_text_outline="#0c0607",
       color_general="#8c2f39", color_input="#d9a441", color_output="#5f8fb8", color_neutral_block="#8c7f72",
       color_custom="#a0527a", color_function="#c2607a", color_true="#6fa56a", color_false="#d0473d",
       rounded_corner_radius=6, ui_padding=16, border_width=1.5,
       font_body="Manrope", font_display="Cormorant Garamond", font_mono="JetBrains Mono",
-      font_size=10, font_weight=500)
+      font_size=10, font_weight=500,
+      nav_position="left", nav_style="playbill", frame="stage", block_style="strings")
 
 _look("shadow_play", "Shadow play",
-      "A lit cloth screen and black silhouettes, after wayang shadow puppets. Light.",
-      color_app_background="#e2bd78", color_page_background="#f3dba6", color_surface="#f8e9c4",
+      "A lit cloth screen: pages glow warm, navigation is a row of silhouette puppets on rods along "
+      "the bottom, blocks are black cut-outs. Light.",
+      color_app_background="#c99a52", color_page_background="#f3dba6", color_surface="#f8e9c4",
       color_accent="#2a1c10", color_highlight="#d3a85c", color_text="#1c120a", color_text_outline="#f3dba6",
       color_general="#2a1c10", color_input="#b3541e", color_output="#1f5f8b", color_neutral_block="#6b5a45",
       color_custom="#7a3f8f", color_function="#a8326b", color_true="#3f7d3a", color_false="#b3261e",
       rounded_corner_radius=14, ui_padding=16, border_width=2.5,
       font_body="Manrope", font_display="Cinzel", font_mono="JetBrains Mono",
-      font_size=10, font_weight=560, pattern="weave")
+      font_size=10, font_weight=560,
+      nav_position="bottom", nav_style="rod", frame="lightbox", block_style="silhouette")
 
 _look("workbench", "Workbench",
-      "The puppet maker's bench: paper, graphite and ruled lines. Light.",
-      color_app_background="#d9cfbd", color_page_background="#efe7d6", color_surface="#fbf6ea",
-      color_accent="#6e675b", color_highlight="#cfc4ae", color_text="#2b2823", color_text_outline="#efe7d6",
+      "A notebook on a wooden bench: ruled paper pages, colored index tabs down the right edge, "
+      "blocks as white index cards with a colored strip. Light.",
+      color_app_background="#8a6a48", color_page_background="#fbf6ea", color_surface="#ffffff",
+      color_accent="#6e675b", color_highlight="#e9e1cf", color_text="#2b2823", color_text_outline="#efe7d6",
       color_general="#4f6d7a", color_input="#c46a1b", color_output="#2f6fb0", color_neutral_block="#7d776b",
       color_custom="#7b5ea7", color_function="#b0508a", color_true="#4c8c4a", color_false="#c0443a",
       rounded_corner_radius=3, ui_padding=14, border_width=1.5,
       font_body="Manrope", font_display="IBM Plex Sans Condensed", font_mono="IBM Plex Mono",
-      font_size=10, font_weight=500, display_upper=True, pattern="ruled")
+      font_size=10, font_weight=500, display_upper=True, pattern="ruled",
+      nav_position="right", nav_style="index", frame="desk", block_style="cards")
 
 _look("console", "Console",
-      "A terminal: monospace everywhere, square, black with amber.",
+      "A terminal: an amber status line on top, function-key navigation along the bottom, "
+      "blocks drawn as outlines. Monospace everywhere.",
       color_app_background="#050505", color_page_background="#050505", color_surface="#0e0e0e",
-      color_accent="#3a3a3a", color_highlight="#1a1a1a", color_text="#d8d8d8", color_text_outline="#000000",
+      color_accent="#5a5a5a", color_highlight="#1a1a1a", color_text="#d8d8d8", color_text_outline="#000000",
       color_general="#8a5f00", color_input="#ffb000", color_output="#4fc3f7", color_neutral_block="#8a8a8a",
       color_custom="#c792ea", color_function="#f78fb3", color_true="#7ddc6b", color_false="#ff5c5c",
       rounded_corner_radius=0, ui_padding=12, border_width=1.0,
       font_body="JetBrains Mono", font_display="JetBrains Mono", font_mono="JetBrains Mono",
-      font_size=10, font_weight=460, display_upper=True)
+      font_size=10, font_weight=460, display_upper=True,
+      nav_position="bottom", nav_style="fkeys", frame="terminal", block_style="outline")
 
 _look("blueprint", "Blueprint",
-      "White line work on a blue grid, like the drawing of a mechanism.",
+      "A technical drawing: a blue grid inside a double border, sheet tabs along the top, "
+      "blocks drawn as line-work components.",
       color_app_background="#0f3260", color_page_background="#123a6b", color_surface="#163f73",
       color_accent="#e8f1ff", color_highlight="#1d4a82", color_text="#ffffff", color_text_outline="#0b2649",
       color_general="#2f6cb5", color_input="#ffd27a", color_output="#7fe0ff", color_neutral_block="#c4d6ee",
       color_custom="#d0b3ff", color_function="#ffb3d9", color_true="#8ff0a4", color_false="#ff9c9c",
       rounded_corner_radius=0, ui_padding=16, border_width=1.5,
       font_body="IBM Plex Mono", font_display="IBM Plex Sans Condensed", font_mono="IBM Plex Mono",
-      font_size=10, font_weight=500, display_upper=True, pattern="grid")
+      font_size=10, font_weight=500, display_upper=True, pattern="grid",
+      nav_position="top", nav_style="sheets", frame="drawing", block_style="schematic")
 
 _look("arcade", "Arcade",
-      "Pixel type, scanlines, pink and cyan. Loud on purpose.",
+      "A cabinet screen: scanlines, pixel type, L1/R1-style navigation across the top, "
+      "chunky blocks with hard drop shadows.",
       color_app_background="#140a24", color_page_background="#1e1036", color_surface="#2e1a52",
       color_accent="#ff4fd8", color_highlight="#3b2466", color_text="#f4ecff", color_text_outline="#140a24",
       color_general="#b12fa0", color_input="#ff9f1c", color_output="#4df3ff", color_neutral_block="#c9b6e8",
       color_custom="#b78cff", color_function="#ff7ac8", color_true="#6dff8a", color_false="#ff4d6d",
       rounded_corner_radius=0, ui_padding=16, border_width=3.0,
       font_body="VT323", font_display="Press Start 2P", font_mono="VT323",
-      font_size=15, display_upper=True, pattern="scanlines")
-
-_look("brutalist", "Brutalist",
-      "Black on white, heavy outlines, capitals. Light.",
-      color_app_background="#ffffff", color_page_background="#ffffff", color_surface="#ffffff",
-      color_accent="#000000", color_highlight="#e8e8e8", color_text="#000000", color_text_outline="#ffffff",
-      color_general="#000000", color_input="#ff5a00", color_output="#0038ff", color_neutral_block="#3d3d3d",
-      color_custom="#7a00ff", color_function="#ff0080", color_true="#00a23c", color_false="#e00000",
-      rounded_corner_radius=0, ui_padding=14, border_width=4.0,
-      font_body="Archivo", font_display="Archivo Black", font_mono="JetBrains Mono",
-      font_size=10, font_weight=500, display_upper=True)
-
-_look("patchbay", "Patchbay",
-      "A rack of jacks and cables: charcoal, with input and output as the two cable colors.",
-      color_app_background="#17181b", color_page_background="#101114", color_surface="#22242a",
-      color_accent="#3b3f4a", color_highlight="#2b2e36", color_text="#e9eaee", color_text_outline="#08090a",
-      color_general="#5b6274", color_input="#ff8a3d", color_output="#3da5ff", color_neutral_block="#9aa1b2",
-      color_custom="#b07cff", color_function="#ff6fb1", color_true="#3ddc84", color_false="#ff4d4d",
-      rounded_corner_radius=18, ui_padding=14, border_width=2.0,
-      font_body="Space Grotesk", font_display="Space Grotesk", font_mono="JetBrains Mono",
-      font_size=10, font_weight=480, pattern="dots")
+      font_size=15, display_upper=True, pattern="scanlines",
+      nav_position="top", nav_style="arcade", frame="cabinet", block_style="pixel")
 
 _look("felt", "Felt",
-      "Hand puppets: green felt, big soft corners, friendly type.",
-      color_app_background="#23422f", color_page_background="#1c3626", color_surface="#2e553d",
+      "Hand puppets: green felt, big soft corners, sewn tabs along the bottom, "
+      "blocks with stitching around the edge.",
+      color_app_background="#1c3626", color_page_background="#23422f", color_surface="#2e553d",
       color_accent="#5c9470", color_highlight="#3a6a4c", color_text="#f6f1e3", color_text_outline="#12241a",
       color_general="#c9578c", color_input="#f29a3f", color_output="#58a8e8", color_neutral_block="#a9b8a4",
       color_custom="#b58be0", color_function="#ee82b4", color_true="#9bd65b", color_false="#e8554a",
       rounded_corner_radius=26, ui_padding=16, border_width=3.0,
       font_body="Sora", font_display="Luckiest Guy", font_mono="JetBrains Mono",
-      font_size=10, font_weight=460, pattern="weave")
+      font_size=10, font_weight=460, pattern="weave",
+      nav_position="bottom", nav_style="sewn", frame="felt", block_style="stitched")
 
-_look("blackout", "Blackout",
-      "House lights off: true black, hairlines, nothing decorative.",
-      color_app_background="#000000", color_page_background="#000000", color_surface="#0b0b0c",
-      color_accent="#2a2a2e", color_highlight="#141416", color_text="#f2f2f3", color_text_outline="#000000",
-      color_general="#26303a", color_input="#ff9a57", color_output="#63c7ff", color_neutral_block="#7c7c84",
-      color_custom="#a98bff", color_function="#ff7fb5", color_true="#5fe08a", color_false="#ff5f6d",
-      rounded_corner_radius=10, ui_padding=14, border_width=1.0,
-      font_body="Manrope", font_display="Manrope", font_mono="JetBrains Mono",
-      font_size=10, font_weight=480)
+_look("scrapbook", "Scrapbook",
+      "A craft book on a wooden table (LittleBigPlanet-inspired): taped paper tabs along the top, "
+      "blocks cut from cardboard, wood, felt, sponge and glossy plastic. Light.",
+      color_app_background="#5b3a24", color_page_background="#fbf3e2", color_surface="#ffffff",
+      color_accent="#d9c8a6", color_highlight="#f1e3c6", color_text="#2b1d12", color_text_outline="#fbf3e2",
+      color_general="#e8823a", color_input="#c88a4a", color_output="#2f7fc0", color_neutral_block="#8b9a86",
+      color_custom="#9b6fc4", color_function="#d0607f", color_true="#5fae3c", color_false="#d0473d",
+      rounded_corner_radius=12, ui_padding=16, border_width=2.0,
+      font_body="Nunito", font_display="Fredoka", font_mono="JetBrains Mono",
+      font_size=10, font_weight=600,
+      nav_position="top", nav_style="taped", frame="table", block_style="materials")
+
+_look("classic", "Classic", "The original grey look: desktop fonts, a sidebar, plain puzzle blocks.")
 
 
 def look_for(settings: ThemeSettings) -> Look:
-    return LOOKS.get(getattr(settings, "preset", "classic") or "classic", LOOKS["classic"])
+    return LOOKS.get(getattr(settings, "preset", "") or "", LOOKS["classic"])
+
+
+LOOK_VERSION = 2
+
+
+def ensure_default_look(cfg) -> None:
+    """Once per install: anyone who never picked a look (or had one that was
+    dropped) gets the default one. Runs before the window is built."""
+    try:
+        state = cfg.load_state()
+    except Exception:
+        return
+    if int(state.get("look_version", 0) or 0) >= LOOK_VERSION:
+        return
+    current = (state.get("theme") or {}).get("preset", "")
+    if current in ("", "classic") + RETIRED_LOOKS:
+        state["theme"] = asdict(LOOKS[DEFAULT_LOOK].settings())
+    state["look_version"] = LOOK_VERSION
+    try:
+        cfg.save_state(state)
+    except Exception:
+        pass
 
 
 # ---------------------------------------------------------------------------

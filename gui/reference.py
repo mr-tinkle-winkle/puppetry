@@ -206,7 +206,7 @@ command(cmd, *args)
   Runs a shell command fire-and-forget (/bin/sh). Extra args are
   shell-quoted into {0}, {1}, ... placeholders:
       command("notify-send {0} {1}", "Title", "a message")
-  Output/errors go to `journalctl --user -u macro-daemon`.
+  Output/errors go to `journalctl --user -u puppetry-daemon`.
 
 arguments(name=default, ...)  -- FIRST LINE ONLY
   Declares parameters, e.g. arguments(hits=3, key=KEY_A). Every

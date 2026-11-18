@@ -83,6 +83,11 @@ class ThemeSettings:
     font_weight: int = 0                   # body weight (100-900); 0 = regular
     display_upper: bool = False            # section titles in capitals
     pattern: str = ""                      # page background: "", "grid", "dots", "scanlines", "ruled", "weave"
+    # structure (gui/themes.py): what changes beyond paint
+    nav_position: str = "left"             # left | right | top | bottom
+    nav_style: str = "segment"             # segment (the kit's buttons) | playbill | rod | index | fkeys | sheets | arcade | sewn | taped
+    frame: str = "plain"                   # what surrounds the pages: plain | stage | lightbox | desk | terminal | drawing | cabinet | felt | table
+    block_style: str = "puzzle"            # how macro blocks are drawn: puzzle | strings | silhouette | cards | outline | schematic | pixel | stitched | materials
 
 
 # Field groups, used by the theme editor's "Revert" buttons.

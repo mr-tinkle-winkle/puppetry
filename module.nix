@@ -127,6 +127,7 @@ in
 
     services.udev.extraRules = ''
       KERNEL=="uinput", MODE="0660", GROUP="input", TAG+="uaccess"
+      SUBSYSTEM=="input", ATTRS{name}=="puppetry-virtual-mouse", ENV{ID_INPUT_JOYSTICK}="", ENV{ID_INPUT_MOUSE}="1"
       SUBSYSTEM=="input", ATTRS{name}=="macro-daemon-virtual-mouse", ENV{ID_INPUT_JOYSTICK}="", ENV{ID_INPUT_MOUSE}="1"
     '';
 
@@ -138,9 +139,13 @@ in
       pkgs.kdotool
     ];
 
-    systemd.user.services.macro-daemon = {
+    systemd.user.services.puppetry-daemon = {
       description = "Puppetry macro daemon";
       wantedBy = [ "default.target" ];
+      # the unit's name before the rename: a copy of it still running from
+      # before a rebuild is stopped when this one starts (two daemons would
+      # fight over the same devices)
+      conflicts = [ "macro-daemon.service" ];
       path = [ pkgs.kdotool ];
       # the daemon starts this when overlay.json turns an OBS page or the
       # layered replay buffer on

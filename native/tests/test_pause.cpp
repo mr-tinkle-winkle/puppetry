@@ -15,6 +15,7 @@
 #include <vector>
 #include <linux/input.h>
 #include <unistd.h>
+#include "config.hpp"
 #include "dispatch.hpp"
 #include "focus.hpp"
 #include "macro.hpp"
@@ -729,7 +730,27 @@ static void test_loop_restart() {
     }
 }
 
+static void test_config_dir_move() {
+    namespace fs = std::filesystem;
+    const char* old_home = std::getenv("HOME");
+    std::string keep = old_home ? old_home : "";
+    fs::path home = fs::temp_directory_path() / ("puppetry_home_" + std::to_string(::getpid()));
+    fs::remove_all(home);
+    fs::create_directories(home / ".config" / "macro-daemon");
+    std::ofstream(home / ".config" / "macro-daemon" / "state.json") << "{\"keyboard\": \"x\"}";
+    ::setenv("HOME", home.c_str(), 1);
+    fs::path got = config_dir();
+    CHECK(got == home / ".config" / "puppetry", "config dir is ~/.config/puppetry");
+    CHECK(fs::exists(home / ".config" / "puppetry" / "state.json"), "the old folder's files moved over");
+    CHECK(fs::is_symlink(home / ".config" / "macro-daemon") &&
+          fs::exists(home / ".config" / "macro-daemon" / "state.json"), "a symlink keeps the old path working");
+    CHECK(config_dir() == got, "second call: same folder, nothing moved again");
+    if (keep.empty()) ::unsetenv("HOME"); else ::setenv("HOME", keep.c_str(), 1);
+    fs::remove_all(home);
+}
+
 int main() {
+    test_config_dir_move();
     test_grab_handover();
     test_loop_restart();
     test_immediate_act_as();

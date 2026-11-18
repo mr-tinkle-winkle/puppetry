@@ -69,9 +69,9 @@ session to take effect.
 - The daemon starts automatically on login as a per-user systemd service.
 - Launch the editor by running `puppetry`, or find **Puppetry** in your
   app launcher / search menu (KRunner, wofi, rofi, etc.).
-- Check it's alive: `systemctl --user status macro-daemon`
-- Watch logs live: `journalctl --user -u macro-daemon -f`
-- Config lives at `~/.config/macro-daemon/` (`state.json` + `profiles/*.json`)
+- Check it's alive: `systemctl --user status puppetry-daemon`
+- Watch logs live: `journalctl --user -u puppetry-daemon -f`
+- Config lives at `~/.config/puppetry/` (`state.json` + `profiles/*.json`)
   -- created automatically on first run.
 - Hitting **Save** in the editor restarts the service for you automatically.
 - Macros can be edited as snap-together **Blocks** or as **Text** -- the
@@ -221,9 +221,9 @@ daemon itself won't actually work until you install the module properly.
 ## Troubleshooting
 
 **Nothing happens when I press my macro's combo.** Check
-`journalctl --user -u macro-daemon -n 30 --no-pager` first. If the log shows
-it watching a device named `macro-daemon-virtual-keyboard` or
-`macro-daemon-virtual-mouse` as your "Keyboard"/"Mouse", it picked up its own
+`journalctl --user -u puppetry-daemon -n 30 --no-pager` first. If the log shows
+it watching a device named `puppetry-virtual-keyboard` or
+`puppetry-virtual-mouse` as your "Keyboard"/"Mouse", it picked up its own
 synthetic device instead of your real hardware -- open the editor and hit
 **Detect** for the correct device.
 

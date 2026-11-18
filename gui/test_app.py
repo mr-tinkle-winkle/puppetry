@@ -1584,6 +1584,22 @@ def main() -> int:
         script[:] = [(0, ""), (0, "active\n")]
         ok, msg = cfg.restart_daemon_service()
         check("restart: first try succeeding needs no retry", ok and msg == "Saved. Daemon restarted." and len(calls) == 2)
+        # before the system is rebuilt the renamed unit doesn't exist yet: the old one is used
+        seen_units = []
+        script[:] = [(5, ""), (0, ""), (0, "active\n")]
+
+        def fake_run2(args, **kw):
+            seen_units.append(args[-1])
+            code, out = script.pop(0)
+            return _sp.CompletedProcess(args, code, stdout=out,
+                                        stderr="Unit puppetry-daemon.service not found." if code else "")
+
+        cfg.subprocess.run = fake_run2
+        cfg.SERVICE = "puppetry-daemon.service"
+        ok, msg = cfg.restart_daemon_service()
+        check("restart: falls back to the old unit name when the new one isn't installed yet",
+              ok and seen_units == ["puppetry-daemon.service", "macro-daemon.service", "macro-daemon.service"])
+        cfg.SERVICE = "puppetry-daemon.service"
     finally:
         cfg.subprocess.run, cfg._wait_responsive = real_run, real_wait
 
@@ -1763,7 +1779,9 @@ def main() -> int:
     from ui_kit.theme_config import ThemeSettings
     themes.load_fonts()
     families = set(QFontDatabase.families())
-    check("ten concept looks besides Classic", len(themes.LOOKS) == 11 and "classic" in themes.LOOKS)
+    check("eight looks besides Classic, Marionette first", len(themes.LOOKS) == 9 and "classic" in themes.LOOKS
+          and list(themes.LOOKS)[0] == "marionette" and themes.DEFAULT_LOOK == "marionette"
+          and not set(themes.RETIRED_LOOKS) & set(themes.LOOKS))
     bad = []
     for key, look in themes.LOOKS.items():
         s_ = look.settings()
@@ -1793,17 +1811,18 @@ def main() -> int:
                     bad.append(f"{key}: text contrast on {bg}")
     check("every look: bundled fonts, valid colors, readable text" + (f" -- {bad}" if bad else ""), not bad)
     arcade = themes.LOOKS["arcade"].settings()
-    back = themes.LOOKS["blackout"].settings(arcade)
+    back = themes.LOOKS["marionette"].settings(arcade)
     check("switching looks leaves nothing behind from the last one",
-          back.pattern == "" and back.display_upper is False and back.font_body == "Manrope" and back.border_width == 1.0)
+          back.pattern == "" and back.display_upper is False and back.font_body == "Manrope" and back.border_width == 1.5
+          and back.nav_style == "playbill" and back.block_style == "strings")
     kept = themes.LOOKS["arcade"].settings(ThemeSettings(custom_widgets_enabled=False))
     check("a look keeps the switches it doesn't own", kept.custom_widgets_enabled is False)
     from ui_kit.theme import Theme as _T
     check("outline weight scales the kit's widths", _T(arcade).border(2) == 3.0 and _T(ThemeSettings()).border(2) == 2.0)
     sp = w.settings_page
     check("Settings lists every look", sp.look_combo.count() == len(themes.LOOKS))
-    sp.look_combo.setCurrentIndex(sp.look_combo.findData("patchbay"))
-    check("picking a look shows its blurb", sp.look_blurb.text() == themes.LOOKS["patchbay"].blurb)
+    sp.look_combo.setCurrentIndex(sp.look_combo.findData("scrapbook"))
+    check("picking a look shows its blurb", sp.look_blurb.text() == themes.LOOKS["scrapbook"].blurb)
     import widgets as _widgets
     _orig_ask = sp_ask = None
     import settings_page as _sp_mod
@@ -1815,8 +1834,8 @@ def main() -> int:
         _sp_mod.ask = _orig_ask
     saved = cfg.load_theme_settings()
     check("Apply theme writes the whole look to state.json",
-          saved.preset == "patchbay" and saved.color_input == "#ff8a3d" and saved.font_body == "Space Grotesk"
-          and saved.pattern == "dots")
+          saved.preset == "scrapbook" and saved.color_input == "#c88a4a" and saved.font_body == "Nunito"
+          and saved.nav_style == "taped" and saved.frame == "table" and saved.block_style == "materials")
     from PySide6.QtGui import QImage, QPainter as _QP
     img = QImage(120, 120, QImage.Format_RGB32)
     for pat in themes.PATTERNS:
@@ -1828,6 +1847,88 @@ def main() -> int:
         qp.end()
         drew = any(img.pixelColor(x, y) != base_c for x in range(0, 120, 1) for y in range(0, 120, 7))
         check(f"pattern '{pat or 'none'}' {'draws' if pat else 'draws nothing'}", drew == bool(pat))
+    # every look builds a working window: its navigation on its side, all five pages reachable
+    import app as _app_mod
+    import look_chrome
+    from ui_kit import theme_config as _tc
+    keep_provider = cfg.load_theme_settings
+    bad_windows = []
+    for key, look in themes.LOOKS.items():
+        _tc.set_settings_provider(lambda l=look: l.settings())
+        try:
+            win = _app_mod.MainWindow()
+            win.resize(1300, 800)
+            win.show()
+            pump(30)
+            strip = win.nav_strip
+            pos = look.settings().nav_position
+            sg, fg = strip.geometry(), win.stack.geometry()
+            side_ok = {"left": sg.right() <= fg.left(), "right": sg.left() >= fg.right(),
+                       "top": sg.bottom() <= fg.top(), "bottom": sg.top() >= fg.bottom()}[pos]
+            ids = sorted(win.nav.id(b) for b in win.nav.buttons())
+            win.nav.button(_app_mod.PAGE_DICTIONARY).click()
+            pump(30)
+            on_dict = win.stack.currentIndex() == _app_mod.PAGE_DICTIONARY
+            tabs_fit = all(b.width() >= b.sizeHint().width() - 1 for b in win.nav.buttons())
+            if not (side_ok and ids == sorted([_app_mod.PAGE_MACROS, _app_mod.PAGE_EDITOR, _app_mod.PAGE_VISUALIZER,
+                                                _app_mod.PAGE_DICTIONARY, _app_mod.PAGE_SETTINGS])
+                    and on_dict and tabs_fit):
+                bad_windows.append((key, side_ok, on_dict, tabs_fit))
+            win.editor_page.stop_threads()
+            for row in win.macro_page.rows:
+                row.stop_threads()
+            win.hide()
+            win.deleteLater()
+        except Exception as exc:          # noqa: BLE001 -- report which look broke
+            bad_windows.append((key, repr(exc)))
+    _tc.set_settings_provider(keep_provider)
+    check("every look builds its window: nav on its side, tabs not squeezed, pages switch"
+          + (f" -- {bad_windows}" if bad_windows else ""), not bad_windows)
+
+    # block styles: each draws something different for the same block
+    import block_render as _br
+    import block_model as _bm
+    from PySide6.QtGui import QImage as _QImg, QPainter as _QPainter2
+    lay_doc = _bm.code_to_blocks("tap(KEY_A)\nwait(0.1)\n")
+    sigs = {}
+    for key, look in themes.LOOKS.items():
+        _tc.set_settings_provider(lambda l=look: l.settings())
+        th = Theme()
+        lay = _br.Layouter(_br.Metrics()).layout_stack(lay_doc.main, 10, 10)
+        if lay is None:
+            break
+        img = _QImg(260, 110, _QImg.Format_RGB32)
+        img.fill(QColor(look.settings().color_page_background))
+        qp = _QPainter2(img)
+        for lb in lay.blocks:
+            _br.paint_block(qp, lb, _br.Metrics(), th)
+        qp.end()
+        sigs[look.settings().block_style] = bytes(img.constBits())[:: 997]
+    _tc.set_settings_provider(keep_provider)
+    if sigs:
+        check("each block style paints differently", len(set(sigs.values())) == len(sigs))
+
+    # the renamed config folder: an old ~/.config/macro-daemon moves over once, a symlink stays
+    import tempfile as _tf
+    from pathlib import Path as _P
+    tmp_home = _P(_tf.mkdtemp())
+    (tmp_home / ".config" / "macro-daemon").mkdir(parents=True)
+    (tmp_home / ".config" / "macro-daemon" / "macros.json").write_text("{}")
+    real_home = os.environ.get("HOME")
+    os.environ["HOME"] = str(tmp_home)
+    try:
+        got = cfg._config_dir()
+        check("config folder: moved to ~/.config/puppetry, old path still works",
+              got == tmp_home / ".config" / "puppetry" and (got / "macros.json").exists()
+              and (tmp_home / ".config" / "macro-daemon").is_symlink()
+              and (tmp_home / ".config" / "macro-daemon" / "macros.json").exists())
+        check("config folder: a second call changes nothing", cfg._config_dir() == got)
+    finally:
+        if real_home is not None:
+            os.environ["HOME"] = real_home
+    check("the daemon's service is puppetry-daemon", cfg.SERVICE in ("puppetry-daemon.service",) and
+          cfg.OLD_SERVICE == "macro-daemon.service")
+
     w.model.set_pref("theme", vars(themes.LOOKS["classic"].settings()))   # back to the look the other checks expect
 
     # ------------------------------------------------------------ styling guardrail

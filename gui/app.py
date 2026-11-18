@@ -70,18 +70,17 @@ class MainWindow(QMainWindow):
         install_wheel_guard(QApplication.instance())
         self.model = AppModel()
 
-        central = QWidget()
+        # the look decides the frame around the pages and where / how the navigation is drawn (look_chrome.py)
+        import look_chrome
+        central = look_chrome.LookFrame()
+        central.status_text = self._status_line
+        self.frame = central
         self.setCentralWidget(central)
-        root = QHBoxLayout(central)
         pad = theme.padding
-        root.setContentsMargins(pad, pad, pad, pad)
+        position = getattr(theme.settings, "nav_position", "left") or "left"
+        root = QHBoxLayout(central) if position in ("left", "right") else QVBoxLayout(central)
+        root.setContentsMargins(*central.margins(pad))
         root.setSpacing(pad)
-
-        sidebar = QWidget()
-        sidebar.setFixedWidth(170)
-        side = QVBoxLayout(sidebar)
-        side.setContentsMargins(0, 0, 0, 0)
-        side.setSpacing(pad)
 
         self.stack = QStackedWidget()
         self.macro_page = MacroListPage(self.model, self.open_editor)
@@ -96,9 +95,8 @@ class MainWindow(QMainWindow):
         self.nav.setExclusive(True)
         nav_icons = {PAGE_MACROS: "nav_macros", PAGE_EDITOR: "nav_editor", PAGE_VISUALIZER: "nav_visualizer",
                      PAGE_SETTINGS: "nav_settings", PAGE_DICTIONARY: "nav_dictionary"}
-        for idx, label in ((PAGE_MACROS, "Macros"), (PAGE_EDITOR, "Macro Editor"),
-                           (PAGE_VISUALIZER, "Input Visualizer"), (PAGE_DICTIONARY, "Dictionary"),
-                           (PAGE_SETTINGS, "Settings")):
+
+        def make_segment(idx: int, label: str):
             # icon beside the label once mrtw's art exists (ui_kit/icons.py
             # lists the file names); text-only until then. The visualizer
             # reads real input, so its icon is tinted input-orange.
@@ -106,16 +104,35 @@ class MainWindow(QMainWindow):
             b = SegmentButton(icon_pixmap=icon_pixmap(nav_icons[idx], 22, tint), text=label, position="full")
             b.set_icon_target_size(22)
             b.setMinimumHeight(40)
+            return b
+
+        labels = [(PAGE_MACROS, "Macros"), (PAGE_EDITOR, "Macro Editor"), (PAGE_VISUALIZER, "Input Visualizer"),
+                  (PAGE_DICTIONARY, "Dictionary"), (PAGE_SETTINGS, "Settings")]
+        sidebar, buttons = look_chrome.build_nav(theme.settings, labels, make_segment)
+        self.nav_strip = sidebar
+        for idx, b in buttons.items():
             self.nav.addButton(b, idx)
-            side.addWidget(b)
-        side.addStretch(1)
         self.nav.button(PAGE_MACROS).setChecked(True)
         self.nav.idClicked.connect(self._nav_clicked)
         self.editor_page.open_dictionary = lambda: self.nav.button(PAGE_DICTIONARY).click()
 
-        root.addWidget(sidebar)
-        root.addWidget(self.stack, stretch=1)
+        if position in ("left", "top"):
+            root.addWidget(sidebar)
+            root.addWidget(self.stack, stretch=1)
+        else:
+            root.addWidget(self.stack, stretch=1)
+            root.addWidget(sidebar)
+        if position in ("top", "bottom"):
+            root.setSpacing(0 if getattr(theme.settings, "nav_style", "") in ("taped", "sewn", "rod", "sheets") else pad)
         self.resize(1400, 850)
+
+    def _status_line(self) -> str:
+        """Console's status line: the profile and whether macros are live."""
+        try:
+            prof = self.model.profile.get("name") or self.model.profile_id
+        except Exception:
+            prof = ""
+        return f"profile: {prof}" if prof else ""
 
     def _nav_clicked(self, idx: int) -> None:
         if idx == PAGE_EDITOR:
@@ -204,6 +221,7 @@ def run_gui() -> int:
     app.setApplicationName("puppetry")
     app.setDesktopFileName("puppetry")
     import themes
+    themes.ensure_default_look(cfg)                        # Marionette for anyone who never picked a look
     themes.apply_fonts(app, cfg.load_theme_settings())    # the look's fonts, before any widget measures text
     window = MainWindow()
     window.show()

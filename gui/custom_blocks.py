@@ -1,7 +1,7 @@
 """
 The custom block library ("Create a custom block"), shared by every macro.
 
-Stored at ~/.config/macro-daemon/custom_blocks.json:
+Stored at ~/.config/puppetry/custom_blocks.json:
 
     {"blocks": [{"name": "click at", "func": "click_at", "category": "Output",
                  "color": "#9b6ad6", "args": [{"name": "x", "default": "0",
