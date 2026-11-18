@@ -218,6 +218,16 @@ class SettingsPage(PageBase):
         bl.addWidget(self.realtime)
         self.content_layout.addWidget(beh)
 
+        # ------------------------------------------------------------ window
+        win_box = CustomGroupBox("Window")
+        wl = win_box.make_layout(QVBoxLayout)
+        self.start_fullscreen = CustomCheckBox("Open in fullscreen")
+        self.start_fullscreen.setChecked(bool(self.model.state.get("start_fullscreen", False)))
+        self.start_fullscreen.toggled.connect(lambda on: self.model.set_pref("start_fullscreen", bool(on)))
+        wl.addWidget(self.start_fullscreen)
+        wl.addWidget(dim_label("F11 switches fullscreen on and off at any time."))
+        self.content_layout.addWidget(win_box)
+
         # ------------------------------------------------------------ theme (looks)
         import themes
         look_box = CustomGroupBox("Theme")
@@ -230,6 +240,10 @@ class SettingsPage(PageBase):
         current_look = themes.look_for(cfg.load_theme_settings()).key
         self.look_combo.setCurrentIndex(max(0, self.look_combo.findData(current_look)))
         row.addWidget(self.look_combo)
+        self.look_dark = CustomCheckBox("Dark version")
+        self.look_dark.setToolTip("The light themes (Shadow play, Workbench, Scrapbook) also come in dark.")
+        self.look_dark.setChecked(bool(getattr(cfg.load_theme_settings(), "dark_variant", False)))
+        row.addWidget(self.look_dark)
         self.look_apply = CustomButton("Apply theme")
         mark_enable(self.look_apply)
         self.look_apply.clicked.connect(self._apply_look)
@@ -419,14 +433,19 @@ class SettingsPage(PageBase):
         import themes
         look = themes.LOOKS.get(self.look_combo.currentData())
         self.look_blurb.setText(look.blurb if look else "")
+        has_dark = bool(look and look.has_dark)
+        self.look_dark.setEnabled(has_dark)
+        self.look_dark.setToolTip("Use this theme's dark colors." if has_dark else "This theme is already dark.")
 
     def _apply_look(self) -> None:
         import themes
         look = themes.LOOKS.get(self.look_combo.currentData())
         if look is None:
             return
-        self.model.set_pref("theme", asdict(look.settings(cfg.load_theme_settings())))
-        choice = ask(self, "Theme", f"\u201c{look.name}\u201d is saved. It shows everywhere once Puppetry reopens.",
+        dark = look.has_dark and self.look_dark.isChecked()
+        self.model.set_pref("theme", asdict(look.settings(cfg.load_theme_settings(), dark=dark)))
+        name = look.name + (" (dark)" if dark else "")
+        choice = ask(self, "Theme", f"\u201c{name}\u201d is saved. It shows everywhere once Puppetry reopens.",
                      ["Later", "Reopen now"], default=1)
         if choice == 1:
             from PySide6.QtWidgets import QApplication

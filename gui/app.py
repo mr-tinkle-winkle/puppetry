@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import sys
 
+from PySide6.QtCore import Qt
 from PySide6.QtGui import QIcon, QPalette
 from PySide6.QtWidgets import (
     QApplication, QButtonGroup, QHBoxLayout, QMainWindow, QStackedWidget, QVBoxLayout, QWidget,
@@ -125,6 +126,16 @@ class MainWindow(QMainWindow):
         if position in ("top", "bottom"):
             root.setSpacing(0 if getattr(theme.settings, "nav_style", "") in ("taped", "sewn", "rod", "sheets") else pad)
         self.resize(1400, 850)
+        from PySide6.QtGui import QKeySequence, QShortcut
+        self._fullscreen_key = QShortcut(QKeySequence(Qt.Key_F11), self)
+        self._fullscreen_key.setContext(Qt.ApplicationShortcut)
+        self._fullscreen_key.activated.connect(self.toggle_fullscreen)
+
+    def toggle_fullscreen(self) -> None:
+        if self.isFullScreen():
+            self.showNormal()
+        else:
+            self.showFullScreen()
 
     def _status_line(self) -> str:
         """Console's status line: the profile and whether macros are live."""
@@ -224,7 +235,10 @@ def run_gui() -> int:
     themes.ensure_default_look(cfg)                        # Marionette for anyone who never picked a look
     themes.apply_fonts(app, cfg.load_theme_settings())    # the look's fonts, before any widget measures text
     window = MainWindow()
-    window.show()
+    if window.model.state.get("start_fullscreen"):      # Settings > Window > Open in fullscreen
+        window.showFullScreen()
+    else:
+        window.show()
     code = app.exec()
     if app.property("puppetry_restart"):                   # Settings > Theme > Apply: come back up in the new look
         import os

@@ -22,7 +22,7 @@ import bisect
 from dataclasses import dataclass, field
 
 from PySide6.QtCore import QPointF, QRectF, Qt
-from PySide6.QtGui import QBrush, QColor, QFont, QFontMetricsF, QLinearGradient, QPainter, QPainterPath, QPen
+from PySide6.QtGui import QBrush, QColor, QFont, QFontMetricsF, QLinearGradient, QPainter, QPainterPath, QPen, QTransform
 
 from block_model import COMPARE_OPS, COMPOUND_KINDS, Block, Rep, expr_text, rep_label
 from reference import PRIMITIVES_BY_NAME
@@ -764,6 +764,47 @@ def paint_block(p: QPainter, lb: LaidBlock, m: Metrics, theme: Theme, selected: 
                     p.drawText(rect, Qt.AlignVCenter | Qt.AlignLeft, text)
 
 
+_MATERIAL_TILES: dict = {}
+
+
+def _material_tile(role: str, rgb: int):
+    """The Scrapbook look's material textures as small transparent tiles
+    (cached), laid over a block's own color with one fillPath."""
+    from PySide6.QtGui import QPixmap
+    key = (role, rgb)
+    tile = _MATERIAL_TILES.get(key)
+    if tile is not None:
+        return tile
+    color = QColor.fromRgb(rgb)
+    grain = QColor(color.darker(140))
+    grain.setAlpha(70)
+    if role == "input":                          # corrugated cardboard
+        tile = QPixmap(6, 8)
+        tile.fill(Qt.transparent)
+        q = QPainter(tile)
+        q.fillRect(QRectF(2, 0, 1.6, 8), grain)
+    elif role == "function":                     # wood grain
+        tile = QPixmap(40, 7)
+        tile.fill(Qt.transparent)
+        q = QPainter(tile)
+        q.setRenderHint(QPainter.Antialiasing)
+        q.setPen(QPen(grain, 1.6))
+        q.drawLine(QPointF(0, 3), QPointF(40, 4.5))
+    else:                                        # felt / sponge: fuzzy dots
+        tile = QPixmap(8, 8)
+        tile.fill(Qt.transparent)
+        q = QPainter(tile)
+        light = QColor("#ffffff")
+        light.setAlpha(45)
+        q.setPen(QPen(light, 1.6))
+        q.drawPoints([QPointF(2, 2), QPointF(6, 2), QPointF(4, 6), QPointF(0, 6)])
+    q.end()
+    if len(_MATERIAL_TILES) > 64:
+        _MATERIAL_TILES.clear()
+    _MATERIAL_TILES[key] = tile
+    return tile
+
+
 def _block_role(b: Block) -> str:
     """input | output | control (timing, loops, ifs, notes) | function (functions, custom, raw)."""
     if b.kind in ("def", "func_call", "return", "custom", "raw"):
@@ -803,7 +844,7 @@ def _paint_body(p: QPainter, lb: LaidBlock, path: QPainterPath, color: QColor, t
         return QColor(s.color_page_background)
     if style == "cards":                         # Workbench: white index cards with a colored strip on top
         p.setPen(QPen(QColor(s.color_accent).lighter(150), 1.0))
-        p.setBrush(QColor("#ffffff"))
+        p.setBrush(QColor(s.color_surface))
         p.drawPath(path)
         p.save()
         p.setClipPath(path)
@@ -836,15 +877,19 @@ def _paint_body(p: QPainter, lb: LaidBlock, path: QPainterPath, color: QColor, t
         p.setBrush(color)
         p.drawPath(path)
         if rect.width() > 16 and rect.height() > 12:
-            from PySide6.QtGui import QTransform
             c = rect.center()
             t = QTransform().translate(c.x(), c.y()).scale((rect.width() - 8) / rect.width(),
                                                              (rect.height() - 8) / rect.height()).translate(-c.x(), -c.y())
             stitch = QColor("#ffffff")
             stitch.setAlpha(150)
-            p.setPen(QPen(stitch, 1.3, Qt.DashLine))
+            pen = QPen(stitch, 1.0)
+            pen.setDashPattern([4, 3])
+            p.setPen(pen)
             p.setBrush(Qt.NoBrush)
+            p.save()
+            p.setRenderHint(QPainter.Antialiasing, False)   # dashes are the expensive part; crisp is fine for stitches
             p.drawPath(t.map(path))
+            p.restore()
         return contrast_text(color)
     if style == "materials":                     # Scrapbook: cut from a material that says what it is
         p.setPen(QPen(color.darker(150), 1.4))
@@ -863,28 +908,9 @@ def _paint_body(p: QPainter, lb: LaidBlock, path: QPainterPath, color: QColor, t
             return contrast_text(color)
         p.setBrush(color)
         p.drawPath(path)
-        p.save()
-        p.setClipPath(path)
-        grain = QColor(color.darker(140))
-        grain.setAlpha(70)
-        p.setPen(QPen(grain, 1.6))
-        if role == "input":                      # corrugated cardboard
-            x = rect.left() + 3
-            while x < rect.right():
-                p.drawLine(QPointF(x, rect.top()), QPointF(x, rect.bottom()))
-                x += 6
-        elif role == "function":                 # wood grain
-            y = rect.top() + 4
-            while y < rect.bottom():
-                p.drawLine(QPointF(rect.left(), y), QPointF(rect.right(), y + 1.5))
-                y += 7
-        else:                                    # felt / sponge: fuzzy dots
-            light = QColor("#ffffff")
-            light.setAlpha(45)
-            p.setPen(QPen(light, 1.6))
-            p.drawPoints([QPointF(x, y) for y in range(int(rect.top()) + 2, int(rect.bottom()), 4)
-                          for x in range(int(rect.left()) + 2 + (y // 4) % 2 * 2, int(rect.right()), 4)])
-        p.restore()
+        tex = QBrush(_material_tile(role, color.rgb()))
+        tex.setTransform(QTransform.fromTranslate(rect.left(), rect.top()))
+        p.fillPath(path, tex)
         return contrast_text(color)
     # puzzle (Classic)
     p.setPen(QPen(color.darker(145), 1.2))

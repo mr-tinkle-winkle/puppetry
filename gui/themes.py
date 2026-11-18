@@ -39,10 +39,16 @@ class Look:
     name: str
     blurb: str
     values: dict[str, Any] = field(default_factory=dict)
+    dark: dict[str, Any] = field(default_factory=dict)   # light looks: what their dark version changes
 
-    def settings(self, base: ThemeSettings | None = None) -> ThemeSettings:
-        """The look as ThemeSettings. `base` supplies the switches a look
-        doesn't own (custom widgets on/off, system palette on/off)."""
+    @property
+    def has_dark(self) -> bool:
+        return bool(self.dark)
+
+    def settings(self, base: ThemeSettings | None = None, dark: bool = False) -> ThemeSettings:
+        """The look as ThemeSettings (its dark version with dark=True, when it
+        has one). `base` supplies the switches a look doesn't own (custom
+        widgets on/off, system palette on/off)."""
         start = asdict(base) if base is not None else asdict(ThemeSettings())
         fresh = asdict(ThemeSettings())
         # everything a look can define goes back to the kit default first,
@@ -51,7 +57,11 @@ class Look:
             if k not in ("custom_widgets_enabled", "app_theme_enabled"):
                 start[k] = v
         start.update(self.values)
+        use_dark = dark and self.has_dark
+        if use_dark:
+            start.update(self.dark)
         start["preset"] = self.key
+        start["dark_variant"] = use_dark
         return ThemeSettings(**start)
 
 
@@ -64,6 +74,11 @@ RETIRED_LOOKS = ("brutalist", "patchbay", "blackout")
 
 def _look(key: str, name: str, blurb: str, **values: Any) -> None:
     LOOKS[key] = Look(key, name, blurb, values)
+
+
+def _dark(key: str, **values: Any) -> None:
+    """The dark version of a light look: the same structure and fonts, new colors."""
+    LOOKS[key].dark.update(values)
 
 
 _look("marionette", "Marionette",
@@ -162,6 +177,30 @@ _look("scrapbook", "Scrapbook",
       font_size=10, font_weight=600,
       nav_position="top", nav_style="taped", frame="table", block_style="materials")
 
+# ---- dark versions of the light looks ----------------------------------------
+
+# a night show: the screen is dark and the cut-outs are lit, cream on brown
+_dark("shadow_play",
+      color_app_background="#0d0906", color_page_background="#1f1610", color_surface="#2a1e16",
+      color_accent="#f3dba6", color_highlight="#3a2a1c", color_text="#f3dba6", color_text_outline="#0d0906",
+      color_general="#f3dba6", color_input="#e2894a", color_output="#5fa8dc", color_neutral_block="#a8957a",
+      color_custom="#b37cc9", color_function="#d66a9c", color_true="#6fb865", color_false="#e0574d")
+
+# the same bench after hours: dark wood, charcoal paper, chalky lines
+_dark("workbench",
+      color_app_background="#3a2a1c", color_page_background="#1f1d1a", color_surface="#2a2724",
+      color_accent="#8a8274", color_highlight="#34302b", color_text="#ece6d8", color_text_outline="#1f1d1a",
+      color_general="#7fa3b2", color_input="#e08a3c", color_output="#5a9be0", color_neutral_block="#a39d90",
+      color_custom="#a68ad0", color_function="#d278ac", color_true="#6fb06d", color_false="#e0645a")
+
+# a black-paper scrapbook on a dark table: the colored tabs and materials stay bright
+_dark("scrapbook",
+      color_app_background="#24160d", color_page_background="#26201c", color_surface="#352d27",
+      color_accent="#6b5a45", color_highlight="#3d332c", color_text="#f6ecd8", color_text_outline="#26201c",
+      color_general="#f0954f", color_input="#d89a58", color_output="#4a9be0", color_neutral_block="#9bab95",
+      color_custom="#b48ad8", color_function="#e07a96", color_true="#72c24f", color_false="#e65a4f")
+
+
 _look("classic", "Classic", "The original grey look: desktop fonts, a sidebar, plain puzzle blocks.")
 
 
@@ -256,58 +295,75 @@ def display_font(settings: ThemeSettings, pixel_size: int = 15):
 # page patterns
 # ---------------------------------------------------------------------------
 
-def paint_pattern(painter, rect, settings: ThemeSettings, base) -> None:
-    """Draws the look's page pattern over an already-filled page. `base` is
-    the page color: lines are that color nudged toward the text color, so
-    a pattern is texture, never contrast."""
-    from PySide6.QtCore import QPointF, QLineF
-    from PySide6.QtGui import QColor, QPen
-    pattern = getattr(settings, "pattern", "")
-    if not pattern:
-        return
-    text = QColor(settings.color_text)
+_tile_cache: dict = {}
+
+
+def pattern_tile(pattern: str, base_rgb: int, text_rgb: int, margin_rgb: int = 0):
+    """One repeat of a page pattern as a QPixmap (cached): pages fill with it
+    as a brush instead of drawing hundreds of lines or dots each paint."""
+    key = (pattern, base_rgb, text_rgb, margin_rgb)
+    tile = _tile_cache.get(key)
+    if tile is not None:
+        return tile
+    from PySide6.QtCore import QLineF, QPointF
+    from PySide6.QtGui import QColor, QPainter, QPen, QPixmap
+    base, text = QColor.fromRgb(base_rgb), QColor.fromRgb(text_rgb)
 
     def mix(amount: float) -> QColor:
         return QColor(int(base.red() + (text.red() - base.red()) * amount),
                       int(base.green() + (text.green() - base.green()) * amount),
                       int(base.blue() + (text.blue() - base.blue()) * amount))
 
-    left, top, right, bottom = rect.left(), rect.top(), rect.right(), rect.bottom()
-    painter.save()
-    painter.setRenderHint(painter.RenderHint.Antialiasing, False)
+    size = {"grid": (120, 120), "dots": (22, 22), "scanlines": (4, 4), "ruled": (8, 28), "weave": (6, 6)}.get(pattern, (8, 8))
+    tile = QPixmap(*size)
+    tile.fill(base)
+    p = QPainter(tile)
     if pattern == "grid":
-        minor, major = QPen(mix(0.07)), QPen(mix(0.14))
-        step = 24
-        lines_minor, lines_major = [], []
-        for i, x in enumerate(range(left, right + 1, step)):
-            (lines_major if i % 5 == 0 else lines_minor).append(QLineF(x, top, x, bottom))
-        for i, y in enumerate(range(top, bottom + 1, step)):
-            (lines_major if i % 5 == 0 else lines_minor).append(QLineF(left, y, right, y))
-        painter.setPen(minor)
-        painter.drawLines(lines_minor)
-        painter.setPen(major)
-        painter.drawLines(lines_major)
+        p.setPen(QPen(mix(0.07)))
+        for i in range(1, 5):
+            p.drawLine(QLineF(i * 24, 0, i * 24, 120))
+            p.drawLine(QLineF(0, i * 24, 120, i * 24))
+        p.setPen(QPen(mix(0.14)))
+        p.drawLine(QLineF(0, 0, 0, 120))
+        p.drawLine(QLineF(0, 0, 120, 0))
     elif pattern == "dots":
         pen = QPen(mix(0.16))
         pen.setWidth(2)
-        painter.setPen(pen)
-        step = 22
-        painter.drawPoints([QPointF(x, y) for y in range(top + step // 2, bottom, step)
-                            for x in range(left + step // 2, right, step)])
+        p.setPen(pen)
+        p.drawPoint(QPointF(11, 11))
     elif pattern == "scanlines":
-        painter.setPen(QPen(mix(0.08)))
-        painter.drawLines([QLineF(left, y, right, y) for y in range(top, bottom + 1, 4)])
+        p.setPen(QPen(mix(0.08)))
+        p.drawLine(QLineF(0, 0, 4, 0))
     elif pattern == "ruled":
-        painter.setPen(QPen(mix(0.10)))
-        painter.drawLines([QLineF(left, y, right, y) for y in range(top + 28, bottom + 1, 28)])
+        p.setPen(QPen(mix(0.10)))
+        p.drawLine(QLineF(0, 27, 8, 27))
+    elif pattern == "weave":
+        p.setPen(QPen(mix(0.05)))
+        p.drawLine(QLineF(0, 0, 0, 6))
+        p.setPen(QPen(mix(0.035)))
+        p.drawLine(QLineF(0, 0, 6, 0))
+    p.end()
+    if len(_tile_cache) > 64:
+        _tile_cache.clear()
+    _tile_cache[key] = tile
+    return tile
+
+
+def paint_pattern(painter, rect, settings: ThemeSettings, base) -> None:
+    """Draws the look's page pattern over an already-filled page, as a tiled
+    brush (pattern_tile). Lines are the page color nudged toward the text
+    color, so a pattern is texture, never contrast."""
+    from PySide6.QtCore import QLineF
+    from PySide6.QtGui import QBrush, QColor, QPen, QTransform
+    pattern = getattr(settings, "pattern", "")
+    if not pattern:
+        return
+    tile = pattern_tile(pattern, base.rgb(), QColor(settings.color_text).rgb())
+    brush = QBrush(tile)
+    brush.setTransform(QTransform.fromTranslate(rect.left(), rect.top()))
+    painter.fillRect(rect, brush)
+    if pattern == "ruled":                 # the red margin line of ruled paper
         margin = QColor(settings.color_false)
         margin.setAlpha(70)
         painter.setPen(QPen(margin))
-        painter.drawLine(QLineF(left + 44, top, left + 44, bottom))
-    elif pattern == "weave":
-        step = 6
-        painter.setPen(QPen(mix(0.05)))
-        painter.drawLines([QLineF(x, top, x, bottom) for x in range(left, right + 1, step)])
-        painter.setPen(QPen(mix(0.035)))
-        painter.drawLines([QLineF(left, y, right, y) for y in range(top, bottom + 1, step)])
-    painter.restore()
+        painter.drawLine(QLineF(rect.left() + 44, rect.top(), rect.left() + 44, rect.bottom()))

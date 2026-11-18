@@ -412,15 +412,32 @@ class LookFrame(QWidget):
         ex = FRAME_MARGINS.get(self.frame_kind(), (0, 0, 0, 0))
         return tuple(pad + e for e in ex)
 
-    def paintEvent(self, _e) -> None:
+    def paintEvent(self, e) -> None:
+        # The frame only changes with the window size or the look, so it is
+        # drawn once into a pixmap and copied from there on every repaint
+        # (repaints happen whenever anything over it changes: hovers, tabs).
         s = Theme().settings
-        p = QPainter(self)
-        p.setRenderHint(QPainter.Antialiasing)
-        r = QRectF(self.rect())
         kind = self.frame_kind()
-        bg = _c(s.color_app_background)
-        p.fillRect(r, bg)
-        getattr(self, "_frame_" + kind, lambda *a: None)(p, r, s, bg)
+        dpr = self.devicePixelRatioF()
+        key = (self.width(), self.height(), dpr, kind, s.color_app_background, s.color_page_background,
+               s.color_accent, s.color_text, s.color_input, s.color_general, s.color_highlight)
+        cached = getattr(self, "_frame_cache", None)
+        if cached is None or cached[0] != key:
+            from PySide6.QtGui import QPixmap
+            pm = QPixmap(max(1, int(self.width() * dpr)), max(1, int(self.height() * dpr)))
+            pm.setDevicePixelRatio(dpr)
+            bg = _c(s.color_app_background)
+            pm.fill(bg)
+            cp = QPainter(pm)
+            cp.setRenderHint(QPainter.Antialiasing)
+            getattr(self, "_frame_" + kind, lambda *a: None)(cp, QRectF(0, 0, self.width(), self.height()), s, bg)
+            cp.end()
+            self._frame_cache = cached = (key, pm)
+        p = QPainter(self)
+        p.drawPixmap(e.rect(), cached[1], QRectF(e.rect().x() * dpr, e.rect().y() * dpr,
+                                                e.rect().width() * dpr, e.rect().height() * dpr).toRect())
+        if kind == "terminal":                 # the status line's text is live (clock, profile)
+            self._terminal_text(p, QRectF(self.rect()), s)
         p.end()
 
     def _frame_stage(self, p, r, s, bg):
@@ -448,7 +465,8 @@ class LookFrame(QWidget):
 
     def _frame_lightbox(self, p, r, s, bg):
         g = QRadialGradient(r.center() - QPointF(0, r.height() * 0.08), max(r.width(), r.height()) * 0.62)
-        g.setColorAt(0.0, _c("#fff4d6"))
+        glow = _c(s.color_page_background)
+        g.setColorAt(0.0, glow.lighter(108) if glow.lightness() > 128 else glow.lighter(160))
         g.setColorAt(0.5, _c(s.color_page_background))
         g.setColorAt(1.0, bg)
         p.fillRect(r, QBrush(g))
@@ -457,18 +475,14 @@ class LookFrame(QWidget):
         p.drawRect(r.adjusted(7, 7, -7, -7))
 
     def _frame_desk(self, p, r, s, bg):
-        p.setPen(QPen(_c("#000000", 26), 2))
-        x = r.left()
-        lines = []
-        while x < r.right():
-            lines.append((x, r.top(), x, r.bottom()))
-            x += 38
-        for x1, y1, x2, y2 in lines:
-            p.drawLine(QPointF(x1, y1), QPointF(x2, y2))
+        p.fillRect(r, QBrush(_stripe_tile(38, 2, _c("#000000", 26))))
 
     def _frame_terminal(self, p, r, s, bg):
+        p.fillRect(QRectF(r.left(), r.top(), r.width(), 22), _c(s.color_input))
+
+    def _terminal_text(self, p, r, s):
+        bg = _c(s.color_app_background)
         bar = QRectF(r.left(), r.top(), r.width(), 22)
-        p.fillRect(bar, _c(s.color_input))
         f = QFont(self.font())
         if getattr(s, "font_mono", ""):
             f.setFamily(s.font_mono)
@@ -496,30 +510,57 @@ class LookFrame(QWidget):
         p.drawRect(r.adjusted(11, 11, -11, -11))
 
     def _frame_cabinet(self, p, r, s, bg):
-        p.setPen(QPen(_c("#ffffff", 9), 2))
-        y = r.top()
-        while y < r.bottom():
-            p.drawLine(QPointF(r.left(), y), QPointF(r.right(), y))
-            y += 4
+        p.fillRect(r, QBrush(_scan_tile(_c("#ffffff", 9))))
 
     def _frame_felt(self, p, r, s, bg):
-        p.setPen(QPen(_c("#ffffff", 10), 1.5))
-        pts = [QPointF(x, y) for y in range(int(r.top()) + 3, int(r.bottom()), 6)
-               for x in range(int(r.left()) + 3, int(r.right()), 6)]
-        p.drawPoints(pts)
+        p.fillRect(r, QBrush(_dot_tile(6, _c("#ffffff", 10))))
 
     def _frame_table(self, p, r, s, bg):
-        p.setPen(Qt.NoPen)
-        x = r.left()
-        i = 0
-        while x < r.right():
-            p.setBrush(_c("#000000", 26 if i % 3 else 40))
-            p.drawRect(QRectF(x, r.top(), 3, r.height()))
-            p.setBrush(_c("#ffffff", 10))
-            p.drawRect(QRectF(x + 11, r.top(), 2, r.height()))
-            x += 29
-            i += 1
+        p.fillRect(r, QBrush(_grain_tile()))
         g = QRadialGradient(r.center() - QPointF(0, r.height() * 0.1), max(r.width(), r.height()) * 0.55)
         g.setColorAt(0.0, _c("#ffd696", 70))
         g.setColorAt(1.0, _c("#ffd696", 0))
         p.fillRect(r, QBrush(g))
+
+
+# ---- texture tiles (each built once) -------------------------------------------
+
+_tiles: dict = {}
+
+
+def _tile(key, w: int, h: int, draw):
+    t = _tiles.get(key)
+    if t is None:
+        from PySide6.QtGui import QPixmap
+        t = QPixmap(w, h)
+        t.fill(Qt.transparent)
+        p = QPainter(t)
+        draw(p)
+        p.end()
+        _tiles[key] = t
+    return t
+
+
+def _stripe_tile(step: int, width: int, color: QColor):
+    return _tile(("stripe", step, width, color.rgba()), step, 8,
+                 lambda p: p.fillRect(QRectF(0, 0, width, 8), color))
+
+
+def _scan_tile(color: QColor):
+    return _tile(("scan", color.rgba()), 8, 4, lambda p: p.fillRect(QRectF(0, 0, 8, 2), color))
+
+
+def _dot_tile(step: int, color: QColor):
+    def draw(p):
+        p.setPen(QPen(color, 1.5))
+        p.drawPoint(QPointF(3, 3))
+    return _tile(("dot", step, color.rgba()), step, step, draw)
+
+
+def _grain_tile():
+    def draw(p):
+        for i in range(3):
+            x = i * 29
+            p.fillRect(QRectF(x, 0, 3, 8), _c("#000000", 40 if i == 0 else 26))
+            p.fillRect(QRectF(x + 11, 0, 2, 8), _c("#ffffff", 10))
+    return _tile(("grain",), 87, 8, draw)

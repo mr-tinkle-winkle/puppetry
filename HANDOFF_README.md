@@ -669,6 +669,20 @@ separately from profiles.
     not installed yet. `macro_daemon.py` / `macro_gui.py` (the original
     Python versions) keep their names.
 
+- **Session 31d: dark versions, fullscreen, theme speed.** Light looks
+  (Shadow play, Workbench, Scrapbook) carry `Look.dark` colors;
+  `Look.settings(dark=True)` applies them and sets
+  `ThemeSettings.dark_variant`; Settings > Theme has a "Dark version" box
+  (disabled for looks that are already dark). Settings > Window > "Open in
+  fullscreen" (state `start_fullscreen`); F11 toggles fullscreen any time
+  (`MainWindow.toggle_fullscreen`). Speed: `LookFrame` draws its frame once
+  into a pixmap per size/look and copies it on repaint (Console's status
+  text stays live); page patterns, frame textures and Scrapbook materials
+  are cached tile brushes instead of per-paint loops of points and lines;
+  Felt's stitching is drawn without antialiasing. Full-window repaint at
+  1600x1000 (offscreen): Felt 71 -> 6 ms, Scrapbook 28 -> 5 ms, the rest
+  2-6 ms; block canvas 3-6 ms in every look.
+
 **Not verified on real hardware / display.** Everything above ran under
 `QT_QPA_PLATFORM=offscreen`; OBS pages were rendered in headless Chromium
 (the engine behind OBS's browser source). Unchecked: a real OBS (tested
@@ -709,7 +723,7 @@ block; which easing recorded movement should use (`linear` today); whether the O
 `overlay.json` (mode 0600) to a keyring.
 
 **Run the checks.** GUI: `cd gui && QT_QPA_PLATFORM=offscreen python3
-test_app.py` (390 checks), `python3 test_overlay.py` (172 checks: layouts,
+test_app.py` (398 checks), `python3 test_overlay.py` (172 checks: layouts,
 scene, movement-view math, replay file, helper over HTTP/SSE with a fake daemon, fake OBS
 server, renderer + CLI, pieces/controller/source colors, transparency per
 format, align/layer, JS parity; needs ffmpeg, node optional) and

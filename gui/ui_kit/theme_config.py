@@ -75,6 +75,7 @@ class ThemeSettings:
     # A "look" is a whole set of these settings picked by name; the fields
     # below are what a look can change beyond colors and corners.
     preset: str = "classic"                # which look these came from
+    dark_variant: bool = False             # a light look's dark version (Look.dark)
     border_width: float = 2.0              # outline weight; 2.0 = the kit's own widths, others scale them
     font_body: str = ""                    # family; "" = the desktop's font
     font_display: str = ""                 # section titles; "" = font_body

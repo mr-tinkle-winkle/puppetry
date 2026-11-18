@@ -1783,8 +1783,10 @@ def main() -> int:
           and list(themes.LOOKS)[0] == "marionette" and themes.DEFAULT_LOOK == "marionette"
           and not set(themes.RETIRED_LOOKS) & set(themes.LOOKS))
     bad = []
-    for key, look in themes.LOOKS.items():
-        s_ = look.settings()
+    variants = [(k, l, False) for k, l in themes.LOOKS.items()] + \
+               [(k + " (dark)", l, True) for k, l in themes.LOOKS.items() if l.has_dark]
+    for key, look, dark_ in variants:
+        s_ = look.settings(dark=dark_)
         for fname in ("font_body", "font_display", "font_mono"):
             fam = getattr(s_, fname)
             if fam and fam not in families:
@@ -1792,7 +1794,7 @@ def main() -> int:
         for cname, cval in vars(s_).items():
             if cname.startswith("color_") and cval and not QColor(cval).isValid():
                 bad.append(f"{key}: {cname}={cval}")
-        if s_.pattern not in themes.PATTERNS or s_.preset != key:
+        if s_.pattern not in themes.PATTERNS or s_.preset != look.key:
             bad.append(f"{key}: pattern/preset")
         unknown = set(look.values) - set(vars(ThemeSettings()))
         if unknown:
@@ -1804,7 +1806,7 @@ def main() -> int:
                 v /= 255.0
                 return v / 12.92 if v <= 0.03928 else ((v + 0.055) / 1.055) ** 2.4
             return 0.2126 * ch(c.red()) + 0.7152 * ch(c.green()) + 0.0722 * ch(c.blue())
-        if key != "classic":
+        if look.key != "classic":
             for bg in (s_.color_page_background, s_.color_surface):
                 hi, lo = max(lum(s_.color_text), lum(bg)), min(lum(s_.color_text), lum(bg))
                 if (hi + 0.05) / (lo + 0.05) < 7.0:
@@ -1847,6 +1849,47 @@ def main() -> int:
         qp.end()
         drew = any(img.pixelColor(x, y) != base_c for x in range(0, 120, 1) for y in range(0, 120, 7))
         check(f"pattern '{pat or 'none'}' {'draws' if pat else 'draws nothing'}", drew == bool(pat))
+    # dark versions of the light looks
+    light = [k for k, l in themes.LOOKS.items()
+             if QColor(l.settings().color_page_background).lightness() > 150]
+    check("every light look has a dark version, dark looks don't need one",
+          sorted(light) == sorted(k for k, l in themes.LOOKS.items() if l.has_dark) and len(light) == 3)
+    for k in light:
+        d = themes.LOOKS[k].settings(dark=True)
+        lt = themes.LOOKS[k].settings()
+        if not (QColor(d.color_page_background).lightness() < 80 and d.dark_variant and d.preset == k
+                and d.nav_style == lt.nav_style and d.block_style == lt.block_style and d.font_body == lt.font_body):
+            check(f"{k} dark: dark page, same structure and fonts", False)
+    check("dark=True on a dark look changes nothing", themes.LOOKS["felt"].settings(dark=True)
+          == themes.LOOKS["felt"].settings())
+    sp.look_combo.setCurrentIndex(sp.look_combo.findData("console"))
+    check("the Dark version box is off for a look that's already dark", not sp.look_dark.isEnabled())
+    sp.look_combo.setCurrentIndex(sp.look_combo.findData("workbench"))
+    check("...and on for a light one", sp.look_dark.isEnabled())
+    sp.look_dark.setChecked(True)
+    _sp_mod.ask = lambda *a, **k: 0
+    try:
+        sp._apply_look()
+    finally:
+        _sp_mod.ask = _orig_ask
+    saved_d = cfg.load_theme_settings()
+    check("Apply with Dark version saves the dark colors", saved_d.preset == "workbench" and saved_d.dark_variant
+          and saved_d.color_page_background == themes.LOOKS["workbench"].dark["color_page_background"])
+    sp.look_dark.setChecked(False)
+
+    # fullscreen: the setting is saved, F11 toggles
+    sp.start_fullscreen.setChecked(True)
+    check("Open in fullscreen is saved", cfg.load_state().get("start_fullscreen") is True)
+    sp.start_fullscreen.setChecked(False)
+    check("...and turned off again", cfg.load_state().get("start_fullscreen") is False)
+    was_full = w.isFullScreen()
+    w.toggle_fullscreen()
+    pump(30)
+    flipped = w.isFullScreen() != was_full or w.windowState() & Qt.WindowFullScreen
+    w.toggle_fullscreen()
+    pump(30)
+    check("F11 (toggle_fullscreen) switches fullscreen", bool(flipped) and w._fullscreen_key.key().toString() == "F11")
+
     # every look builds a working window: its navigation on its side, all five pages reachable
     import app as _app_mod
     import look_chrome
